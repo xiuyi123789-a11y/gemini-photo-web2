@@ -1,0 +1,5 @@
+{
+  "name": "量子跃迁AI修图工作室",
+  "description": "一个多模态内容再创作工具，用于分析图像，提取一致性和非一致性元素，并使用Gemini API生成新的、高度可控的视觉内容。",
+  "requestFramePermissions": []
+}
