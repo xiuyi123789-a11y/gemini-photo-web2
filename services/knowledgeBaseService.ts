@@ -3,7 +3,7 @@ import { KnowledgeBaseEntry, AnalysisResult, ImageFile, KnowledgeBaseCategory } 
 
 const KB_STORAGE_KEY = 'quantum_leap_ai_studio_kb';
 const USER_ID_KEY = 'quantum_leap_user_id';
-const API_BASE_URL = '/api'; // Use relative path for proxy
+const API_BASE_URL = ''; // Use empty path for static file fetch
 
 // Polyfill for uuid if crypto.randomUUID is not available (e.g. non-secure context)
 function uuidv4() {
@@ -77,7 +77,7 @@ export const resizeImage = (file: File): Promise<string> => {
 export const getKnowledgeBase = async (): Promise<KnowledgeBaseEntry[]> => {
   try {
     const userId = getUserId();
-    const response = await fetch(`${API_BASE_URL}/knowledge`, {
+    const response = await fetch(`${API_BASE_URL}/knowledge.json`, {
       headers: {
         'x-user-id': userId
       }
