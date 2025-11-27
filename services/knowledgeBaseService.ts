@@ -202,17 +202,17 @@ export const addRetouchLearningEntry = async (originalFile: File, analysisText: 
     }
 };
 
-export const incrementEntryUsage = (id: string): void => {
-    const currentKB = getKnowledgeBase();
+export const incrementEntryUsage = async (id: string): Promise<void> => {
+    const currentKB = await getKnowledgeBase();
     const updatedKB = currentKB.map(entry => 
         entry.id === id ? { ...entry, usageCount: (entry.usageCount || 0) + 1 } : entry
     );
-    saveKnowledgeBase(updatedKB);
+    await saveKnowledgeBase(updatedKB);
 };
 
 
-export const deleteKnowledgeBaseEntry = (id: string): void => {
-  const currentKB = getKnowledgeBase();
+export const deleteKnowledgeBaseEntry = async (id: string): Promise<void> => {
+  const currentKB = await getKnowledgeBase();
   const updatedKB = currentKB.filter(entry => entry.id !== id);
-  saveKnowledgeBase(updatedKB);
+  await saveKnowledgeBase(updatedKB);
 };

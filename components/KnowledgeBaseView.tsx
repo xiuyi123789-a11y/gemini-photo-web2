@@ -17,8 +17,9 @@ export const KnowledgeBaseView: React.FC = () => {
     const [openCategories, setOpenCategories] = useState<Record<string, boolean>>({});
     const { apiKey } = useApiKey();
 
-    const loadEntries = () => {
-        setEntries(getKnowledgeBase());
+    const loadEntries = async () => {
+        const data = await getKnowledgeBase();
+        setEntries(data);
     };
 
     useEffect(() => {

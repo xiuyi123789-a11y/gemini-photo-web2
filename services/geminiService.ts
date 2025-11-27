@@ -347,7 +347,7 @@ export const analyzeImageForImprovement = async (imageFile: File, apiKey: string
     const imagePart = await fileToGenerativePart(imageFile);
     
     // AI LEARNING: Fetch previous successful retouch examples from Knowledge Base
-    const kbEntries = getKnowledgeBase();
+    const kbEntries = await getKnowledgeBase();
     const learnedExamples = kbEntries
         .filter(e => e.category === KnowledgeBaseCategory.RETOUCH_LEARNING)
         .slice(0, 3);

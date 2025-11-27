@@ -292,7 +292,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
   
   const onFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
-        const fileArray = Array.from(e.target.files);
+        const fileArray: File[] = Array.from(e.target.files);
         const imageFiles = fileArray.map(file => ({ file, preview: URL.createObjectURL(file) }));
         handleFileSelect(imageFiles);
     }
