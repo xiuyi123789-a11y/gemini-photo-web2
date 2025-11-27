@@ -24,11 +24,16 @@ export const SmartRetouchView: React.FC = () => {
         setRows(prev => prev.map(row => 
             row.id === rowId ? { ...row, originalImage: { file, preview }, error: null } : row
         ));
+        
+        // Auto-trigger analysis silently
+        handleAnalyze(rowId, file);
     };
 
-    const handleAnalyze = async (rowId: string) => {
+    const handleAnalyze = async (rowId: string, file?: File) => {
         const row = rows.find(r => r.id === rowId);
-        if (!row?.originalImage) return;
+        const imageFile = file || row?.originalImage?.file;
+        
+        if (!imageFile) return;
 
         if (!apiKey) {
             setRows(prev => prev.map(r => r.id === rowId ? { ...r, error: "请先设置您的 API Key。" } : r));
@@ -37,10 +42,20 @@ export const SmartRetouchView: React.FC = () => {
 
         setRows(prev => prev.map(r => r.id === rowId ? { ...r, isAnalyzing: true, error: null } : r));
         try {
-            const analysis = await analyzeImageForImprovement(row.originalImage.file, apiKey);
-            setRows(prev => prev.map(r => r.id === rowId ? { ...r, isAnalyzing: false, analysisText: analysis } : r));
+            const analysis = await analyzeImageForImprovement(imageFile, apiKey);
+            
+            // Parallelism Logic: Only update if the user hasn't typed anything yet
+            setRows(prev => {
+                const currentRow = prev.find(r => r.id === rowId);
+                if (currentRow && currentRow.analysisText.trim() !== '') {
+                    // User has typed something, don't overwrite
+                    return prev.map(r => r.id === rowId ? { ...r, isAnalyzing: false } : r);
+                }
+                // User hasn't typed, auto-fill
+                return prev.map(r => r.id === rowId ? { ...r, isAnalyzing: false, analysisText: analysis } : r);
+            });
         } catch (e: any) {
-            setRows(prev => prev.map(r => r.id === rowId ? { ...r, isAnalyzing: false, error: e.message || "分析失败" } : r));
+            setRows(prev => prev.map(r => r.id === rowId ? { ...r, isAnalyzing: false, error: null } : r)); // Silent fail or show error without blocking
         }
     };
 
@@ -145,24 +160,21 @@ export const SmartRetouchView: React.FC = () => {
                                 <button 
                                     onClick={() => handleAnalyze(row.id)} 
                                     disabled={!row.originalImage || row.isAnalyzing}
-                                    className="w-full py-3 rounded-xl font-bold bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white shadow-lg shadow-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                                    className="w-full py-3 rounded-xl font-bold bg-slate-700 hover:bg-slate-600 text-white shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-colors"
                                 >
-                                    {row.isAnalyzing ? <LoadingSpinner text="" /> : <><MagicWandIcon className="w-5 h-5" /> AI 解析</>}
+                                    {row.isAnalyzing ? <LoadingSpinner text="AI 正在思考..." /> : <><MagicWandIcon className="w-5 h-5" /> {row.analysisText ? '重新获取建议' : '获取 AI 建议'}</>}
                                 </button>
                             </div>
 
                             {/* Column 2: Analysis & Suggestions */}
                             <div className="flex flex-col gap-3">
                                 <div className="relative aspect-[3/4] bg-slate-900/60 rounded-2xl border border-slate-700 p-4 overflow-hidden">
-                                    {row.isAnalyzing ? (
-                                        <div className="h-full flex items-center justify-center">
-                                            <LoadingSpinner text="正在深度诊断..." />
-                                        </div>
-                                    ) : row.analysisText ? (
+                                    {row.originalImage ? (
                                         <textarea 
                                             value={row.analysisText}
                                             onChange={(e) => setRows(prev => prev.map(r => r.id === row.id ? {...r, analysisText: e.target.value} : r))}
-                                            className="w-full h-full bg-transparent border-none resize-none text-slate-300 text-sm focus:ring-0 placeholder-slate-600 custom-scrollbar"
+                                            placeholder="在此输入修图指令，或等待 AI 解析..."
+                                            className="w-full h-full bg-transparent border-none resize-none text-slate-300 text-sm focus:ring-0 placeholder-slate-500 custom-scrollbar"
                                         />
                                     ) : (
                                         <div className="h-full flex flex-col items-center justify-center text-slate-600 text-center p-4">
@@ -170,11 +182,22 @@ export const SmartRetouchView: React.FC = () => {
                                             <p className="text-sm">AI 将从专业角度评估<br/>并给出具体的修图指令</p>
                                         </div>
                                     )}
+                                    
+                                    {/* Non-intrusive Loading Indicator */}
+                                    {row.isAnalyzing && (
+                                        <div className="absolute bottom-2 right-2 px-3 py-1 bg-blue-500/20 text-blue-300 text-xs rounded-full backdrop-blur-sm border border-blue-500/30 flex items-center gap-2 animate-pulse">
+                                            <MagicWandIcon className="w-3 h-3" />
+                                            AI 正在撰写建议...
+                                        </div>
+                                    )}
                                 </div>
                                 <button 
                                     onClick={() => handleGenerate(row.id)}
-                                    disabled={!row.analysisText || row.isGenerating}
-                                    className="w-full py-3 rounded-xl font-bold bg-gradient-to-r from-fuchsia-600 to-pink-600 hover:from-fuchsia-500 hover:to-pink-500 text-white shadow-lg shadow-fuchsia-500/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                                    disabled={!row.originalImage || !row.analysisText || row.isGenerating}
+                                    className={`w-full py-3 rounded-xl font-bold text-white shadow-lg flex items-center justify-center gap-2 transition-all
+                                        ${(!row.originalImage || !row.analysisText || row.isGenerating) 
+                                            ? 'bg-slate-700 opacity-50 cursor-not-allowed' 
+                                            : 'bg-gradient-to-r from-fuchsia-600 to-pink-600 hover:from-fuchsia-500 hover:to-pink-500 shadow-fuchsia-500/20'}`}
                                 >
                                      {row.isGenerating ? <LoadingSpinner text="" /> : <><PlayIcon className="w-5 h-5" /> 执行优化指令</>}
                                 </button>

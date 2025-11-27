@@ -2,6 +2,31 @@
 import { KnowledgeBaseEntry, AnalysisResult, ImageFile, KnowledgeBaseCategory } from '../types';
 
 const KB_STORAGE_KEY = 'quantum_leap_ai_studio_kb';
+const USER_ID_KEY = 'quantum_leap_user_id';
+const API_BASE_URL = '/api'; // Use relative path for proxy
+
+// Polyfill for uuid if crypto.randomUUID is not available (e.g. non-secure context)
+function uuidv4() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+
+// Get or create userId
+const getUserId = (): string => {
+  let userId = localStorage.getItem(USER_ID_KEY);
+  if (!userId) {
+    userId = uuidv4();
+    localStorage.setItem(USER_ID_KEY, userId);
+  }
+  return userId;
+};
+
 const THUMBNAIL_MAX_SIZE = 256; // Max width/height for thumbnails in pixels
 export const KB_UPDATE_EVENT = 'kb_data_updated'; // Event name
 
@@ -49,31 +74,56 @@ export const resizeImage = (file: File): Promise<string> => {
 };
 
 
-export const getKnowledgeBase = (): KnowledgeBaseEntry[] => {
+export const getKnowledgeBase = async (): Promise<KnowledgeBaseEntry[]> => {
   try {
-    const rawData = localStorage.getItem(KB_STORAGE_KEY);
-    return rawData ? JSON.parse(rawData) : [];
+    const userId = getUserId();
+    const response = await fetch(`${API_BASE_URL}/knowledge`, {
+      headers: {
+        'x-user-id': userId
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Failed to fetch knowledge base: ${response.statusText}`);
+    }
+    
+    return await response.json();
   } catch (error) {
-    console.error("Failed to read knowledge base from localStorage", error);
+    console.error("Failed to read knowledge base from server", error);
+    // Fallback to empty array or maybe localStorage if offline? 
+    // For now, return empty array to match previous behavior
     return [];
   }
 };
 
-export const saveKnowledgeBase = (entries: KnowledgeBaseEntry[]): void => {
+export const saveKnowledgeBase = async (entries: KnowledgeBaseEntry[]): Promise<void> => {
   try {
-    localStorage.setItem(KB_STORAGE_KEY, JSON.stringify(entries));
+    const userId = getUserId();
+    const response = await fetch(`${API_BASE_URL}/knowledge`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-user-id': userId
+      },
+      body: JSON.stringify(entries)
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to save knowledge base: ${response.statusText}`);
+    }
+
     // Dispatch event to notify listeners (e.g., KnowledgeBaseView)
     window.dispatchEvent(new Event(KB_UPDATE_EVENT));
   } catch (error) {
-    console.error("Failed to save knowledge base to localStorage", error);
+    console.error("Failed to save knowledge base to server", error);
   }
 };
 
-export const addMultipleKnowledgeBaseEntries = (entries: Omit<KnowledgeBaseEntry, 'id' | 'usageCount'>[]): KnowledgeBaseEntry[] => {
-  const currentKB = getKnowledgeBase();
-  const newEntries = entries.map(e => ({...e, id: crypto.randomUUID(), usageCount: 0}));
+export const addMultipleKnowledgeBaseEntries = async (entries: Omit<KnowledgeBaseEntry, 'id' | 'usageCount'>[]): Promise<KnowledgeBaseEntry[]> => {
+  const currentKB = await getKnowledgeBase();
+  const newEntries = entries.map(e => ({...e, id: uuidv4(), usageCount: 0}));
   const updatedKB = [...newEntries, ...currentKB];
-  saveKnowledgeBase(updatedKB);
+  await saveKnowledgeBase(updatedKB);
   return newEntries;
 }
 
