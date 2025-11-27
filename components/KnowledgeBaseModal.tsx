@@ -15,7 +15,13 @@ export const KnowledgeBaseModal: React.FC<KnowledgeBaseModalProps> = ({ onClose,
     const [openCategories, setOpenCategories] = useState<Record<string, boolean>>({});
 
     useEffect(() => {
-        setEntries(getKnowledgeBase());
+        const fetchKnowledgeBase = async () => {
+            const data = await getKnowledgeBase();
+            setEntries(data);
+        };
+
+        fetchKnowledgeBase();
+
         const initialOpenState = Object.values(KnowledgeBaseCategory).reduce((acc, cat) => {
             acc[cat] = true; // Default all categories to open
             return acc;
