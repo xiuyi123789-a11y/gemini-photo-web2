@@ -9,6 +9,18 @@ import { KnowledgeBaseModal } from './KnowledgeBaseModal';
 import { ImageModal } from './ImageModal';
 import { useApiKey } from '../src/contexts/ApiKeyContext';
 
+// Simple UUID generator polyfill for non-secure contexts
+function uuidv4() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+
 interface GenerationViewProps {
   initialAnalysisResult: AnalysisResult | null;
 }
@@ -19,7 +31,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
   const [referenceImages, setReferenceImages] = useState<ReferenceImageFile[]>([]);
   const [consistentPrompt, setConsistentPrompt] = useState('');
   const [variablePrompts, setVariablePrompts] = useState<VariablePrompt[]>([
-    { id: crypto.randomUUID(), prompt: '' }
+    { id: uuidv4(), prompt: '' }
   ]);
   
   const [masterImage, setMasterImage] = useState<{ src: string | null; isLoading: boolean }>({ src: null, isLoading: false });
@@ -47,10 +59,10 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
       setConsistentPrompt(consistentText);
 
       const variableItems = inconsistent_elements.map(item => ({
-        id: crypto.randomUUID(),
+        id: uuidv4(),
         prompt: `宽高比: ${item.aspect_ratio}. 景别: ${item.framing}. 姿势: ${item.subject_pose}. 人物描述 (重要): ${item.person_description}. 独特细节: ${item.unique_details}. 相机设置: ${item.camera_settings}.`
       }));
-      setVariablePrompts(variableItems.length > 0 ? variableItems : [{ id: crypto.randomUUID(), prompt: '' }]);
+      setVariablePrompts(variableItems.length > 0 ? variableItems : [{ id: uuidv4(), prompt: '' }]);
     }
   }, []);
 
@@ -63,7 +75,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
     if (newUploads.length === 0) return;
 
     const newImageStates: ReferenceImageFile[] = newUploads.map(imgFile => ({
-        id: crypto.randomUUID(),
+        id: uuidv4(),
         file: imgFile.file,
         originalPreview: imgFile.preview,
         processedPreview: null,
