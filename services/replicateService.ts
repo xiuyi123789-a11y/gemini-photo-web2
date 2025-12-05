@@ -50,7 +50,8 @@ const callApi = async (endpoint: string, body: any, apiKey?: string, stream: boo
         console.warn('Warning: No apiKey provided to callApi');
     }
 
-    console.log(`[Frontend] Calling ${endpoint}`);
+    const fullUrl = `${window.location.origin}${API_BASE_URL}${endpoint}`;
+    console.log(`[Frontend] Calling ${fullUrl}`);
     console.log(`[Frontend] Headers:`, { 
         'x-replicate-token': apiKey ? '***' + apiKey.slice(-4) : 'missing',
         'x-user-id': userId 
