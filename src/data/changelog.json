@@ -1,5 +1,16 @@
 [
   {
+    "version": "v1.0.2",
+    "date": "2025-12-05",
+    "changes": [
+      {
+        "summary": "fix: build error missing changelog.json",
+        "details": "• Update import path in Header.tsx to use alias @/src/data/changelog.json\n• Fix .gitignore to only ignore root /data/ directory, allowing src/data/ to be tracked\n• Track src/data/changelog.json in git"
+      }
+    ],
+    "type": "Fix"
+  },
+  {
     "version": "v1.0.1",
     "date": "2025-12-05",
     "changes": [

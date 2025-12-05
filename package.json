@@ -8,7 +8,8 @@
     "dev:vite": "vite",
     "dev:server": "node server/index.js",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "release": "node scripts/update-changelog.js && git add src/data/changelog.json && git commit -m \"chore: update changelog\" && git push origin main"
   },
   "dependencies": {
     "@google/genai": "^1.28.0",
