@@ -50,7 +50,16 @@ app.use((req, res, next) => {
 });
 
 const DATA_DIR = path.join(__dirname, '../data');
+const DIST_DIR = path.join(__dirname, '../dist'); // Frontend build directory
 console.log('Data directory path:', DATA_DIR);
+
+// Serve static frontend files
+if (fs.existsSync(DIST_DIR)) {
+    console.log('Serving static files from:', DIST_DIR);
+    app.use(express.static(DIST_DIR));
+} else {
+    console.warn('Warning: dist directory not found. Frontend will not be served.');
+}
 
 // Helper to get user directory
 const getUserDir = (userId) => path.join(DATA_DIR, userId);
@@ -439,6 +448,16 @@ app.get('/api/images/:userId/:filename', async (req, res) => {
   } else {
     res.status(404).send('Image not found');
   }
+});
+
+// Catch-all handler for SPA client-side routing
+// This must be the LAST route handler
+app.get('*', (req, res) => {
+    if (fs.existsSync(path.join(DIST_DIR, 'index.html'))) {
+        res.sendFile(path.join(DIST_DIR, 'index.html'));
+    } else {
+        res.status(404).send('Frontend not found (dist directory missing)');
+    }
 });
 
 app.listen(PORT, '0.0.0.0', () => {
