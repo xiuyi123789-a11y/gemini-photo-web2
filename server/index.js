@@ -5,14 +5,15 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
 import Replicate from 'replicate';
-
 import dotenv from 'dotenv';
+
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+// CRITICAL: Use process.env.PORT for Zeabur deployment
 const PORT = process.env.PORT || 3001;
 
 // Initialize Replicate client (Fallback)
@@ -33,7 +34,7 @@ const getReplicateClient = (req) => {
     throw new Error('Replicate API token is missing. Please provide it in the settings.');
 };
 
-// Middleware
+// --- Middleware ---
 app.use(cors({
     origin: '*', // Allow all origins for now, tighten this in production if needed
     methods: ['GET', 'POST', 'OPTIONS'],
@@ -49,6 +50,7 @@ app.use((req, res, next) => {
     next();
 });
 
+// --- Directories ---
 const DATA_DIR = path.join(__dirname, '../data');
 const DIST_DIR = path.join(__dirname, '../dist'); // Frontend build directory
 console.log('Data directory path:', DATA_DIR);
@@ -61,6 +63,8 @@ const ERROR_NOTEBOOK_PATH = path.join(DATA_DIR, 'error_notebook.json');
 
 // Ensure data directory exists
 fs.ensureDirSync(DATA_DIR);
+
+// --- Helpers ---
 
 // Middleware to validate userId
 const validateUserId = (req, res, next) => {
@@ -75,13 +79,6 @@ const validateUserId = (req, res, next) => {
   req.userId = userId;
   next();
 };
-
-// --- Replicate API Endpoints ---
-
-// Health Check Endpoint
-app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', port: PORT, timestamp: new Date().toISOString() });
-});
 
 // Helper to stream Replicate output
 const streamReplicate = async (res, client, model, input) => {
@@ -102,37 +99,6 @@ const streamReplicate = async (res, client, model, input) => {
     }
   }
 };
-
-// POST /api/analyze-image (Vision Analysis)
-app.post('/api/analyze-image', validateUserId, async (req, res) => {
-  try {
-    const replicateClient = getReplicateClient(req);
-    const { images, prompt } = req.body;
-    
-    // Ensure images is an array
-    const imageInputs = Array.isArray(images) ? images : [images];
-
-    // Using openai/gpt-4o-mini for vision analysis
-    const input = {
-        top_p: 1,
-        prompt: prompt,
-        messages: [],
-        image_input: imageInputs,
-        temperature: 1,
-        system_prompt: "You are a helpful assistant.",
-        presence_penalty: 0,
-        frequency_penalty: 0,
-        max_completion_tokens: 4096
-    };
-    
-    console.log('Starting analysis with openai/gpt-4o-mini...');
-    await streamReplicate(res, replicateClient, "openai/gpt-4o-mini", input);
-
-  } catch (error) {
-    console.error('Analysis error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
 
 // Helper to save Replicate output (Stream or URL) to local file
 const saveReplicateOutput = async (outputItem, userId) => {
@@ -197,7 +163,47 @@ const runReplicatePrediction = async (client, model, input) => {
     return prediction.output;
 };
 
-// POST /api/generate-image (Image Generation)
+// ==========================================
+// 🚨 API ROUTES (MUST BE FIRST) 🚨
+// ==========================================
+
+// 1. Health Check
+app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok', port: PORT, timestamp: new Date().toISOString() });
+});
+
+// 2. POST /api/analyze-image (Vision Analysis)
+app.post('/api/analyze-image', validateUserId, async (req, res) => {
+  try {
+    const replicateClient = getReplicateClient(req);
+    const { images, prompt } = req.body;
+    
+    // Ensure images is an array
+    const imageInputs = Array.isArray(images) ? images : [images];
+
+    // Using openai/gpt-4o-mini for vision analysis
+    const input = {
+        top_p: 1,
+        prompt: prompt,
+        messages: [],
+        image_input: imageInputs,
+        temperature: 1,
+        system_prompt: "You are a helpful assistant.",
+        presence_penalty: 0,
+        frequency_penalty: 0,
+        max_completion_tokens: 4096
+    };
+    
+    console.log('Starting analysis with openai/gpt-4o-mini...');
+    await streamReplicate(res, replicateClient, "openai/gpt-4o-mini", input);
+
+  } catch (error) {
+    console.error('Analysis error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 3. POST /api/generate-image (Image Generation)
 app.post('/api/generate-image', validateUserId, async (req, res) => {
     try {
         const replicateClient = getReplicateClient(req);
@@ -243,7 +249,7 @@ app.post('/api/generate-image', validateUserId, async (req, res) => {
     }
 });
 
-// POST /api/retouch-image (Image-to-Image / Inpainting)
+// 4. POST /api/retouch-image (Image-to-Image / Inpainting)
 app.post('/api/retouch-image', validateUserId, async (req, res) => {
     try {
         const replicateClient = getReplicateClient(req);
@@ -312,10 +318,7 @@ app.post('/api/retouch-image', validateUserId, async (req, res) => {
     }
 });
 
-// --- End Replicate Endpoints ---
-
-
-// GET /api/knowledge
+// 5. GET /api/knowledge
 app.get('/api/knowledge', validateUserId, async (req, res) => {
   try {
     const knowledgeFile = getUserKnowledgeFile(req.userId);
@@ -331,7 +334,7 @@ app.get('/api/knowledge', validateUserId, async (req, res) => {
   }
 });
 
-// POST /api/knowledge
+// 6. POST /api/knowledge
 app.post('/api/knowledge', validateUserId, async (req, res) => {
   try {
     const entries = req.body;
@@ -377,9 +380,7 @@ app.post('/api/knowledge', validateUserId, async (req, res) => {
   }
 });
 
-// --- Error Notebook Endpoints ---
-
-// POST /api/error-notebook (Add Entry)
+// 7. Error Notebook Endpoints
 app.post('/api/error-notebook', async (req, res) => {
     try {
         const { issue, solution, tags } = req.body;
@@ -414,7 +415,6 @@ app.post('/api/error-notebook', async (req, res) => {
     }
 });
 
-// GET /api/error-notebook (Get Entries)
 app.get('/api/error-notebook', async (req, res) => {
     try {
         if (await fs.pathExists(ERROR_NOTEBOOK_PATH)) {
@@ -429,7 +429,7 @@ app.get('/api/error-notebook', async (req, res) => {
     }
 });
 
-// Serve user images
+// 8. Serve user images (Dynamic Content)
 app.get('/api/images/:userId/:filename', async (req, res) => {
   const { userId, filename } = req.params;
   
@@ -447,7 +447,10 @@ app.get('/api/images/:userId/:filename', async (req, res) => {
   }
 });
 
-// Serve static frontend files AFTER API routes
+// ==========================================
+// 🚨 STATIC FILES (MUST BE AFTER API) 🚨
+// ==========================================
+
 if (fs.existsSync(DIST_DIR)) {
     console.log('Serving static files from:', DIST_DIR);
     app.use(express.static(DIST_DIR));
@@ -455,7 +458,10 @@ if (fs.existsSync(DIST_DIR)) {
     console.warn('Warning: dist directory not found. Frontend will not be served.');
 }
 
-// Catch-all handler for SPA client-side routing
+// ==========================================
+// 🚨 SPA CATCH-ALL (MUST BE LAST) 🚨
+// ==========================================
+
 // This must be the LAST route handler
 app.get('*', (req, res) => {
     if (fs.existsSync(path.join(DIST_DIR, 'index.html'))) {
