@@ -46,7 +46,15 @@ const callApi = async (endpoint: string, body: any, apiKey?: string, stream: boo
 
     if (apiKey) {
         headers['x-replicate-token'] = apiKey;
+    } else {
+        console.warn('Warning: No apiKey provided to callApi');
     }
+
+    console.log(`[Frontend] Calling ${endpoint}`);
+    console.log(`[Frontend] Headers:`, { 
+        'x-replicate-token': apiKey ? '***' + apiKey.slice(-4) : 'missing',
+        'x-user-id': userId 
+    });
 
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
         method: 'POST',

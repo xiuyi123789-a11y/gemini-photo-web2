@@ -34,8 +34,20 @@ const getReplicateClient = (req) => {
 };
 
 // Middleware
-app.use(cors());
+app.use(cors({
+    origin: '*', // Allow all origins for now, tighten this in production if needed
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-replicate-token', 'x-user-id']
+}));
 app.use(express.json({ limit: '50mb' })); // Increase limit for base64 images
+
+// Debug middleware to log headers
+app.use((req, res, next) => {
+    console.log(`[Request] ${req.method} ${req.path}`);
+    console.log('[Headers] x-replicate-token present:', !!req.headers['x-replicate-token']);
+    console.log('[Headers] x-user-id:', req.headers['x-user-id']);
+    next();
+});
 
 const DATA_DIR = path.join(__dirname, '../data');
 console.log('Data directory path:', DATA_DIR);
