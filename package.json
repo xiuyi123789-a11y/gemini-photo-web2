@@ -3,6 +3,10 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "zeabur": {
+    "startCommand": "npm start",
+    "buildCommand": "npm run build"
+  },
   "scripts": {
     "dev": "concurrently \"npm:dev:server\" \"npm:dev:vite\"",
     "dev:vite": "vite",
