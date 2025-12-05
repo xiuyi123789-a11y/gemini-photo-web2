@@ -37,12 +37,16 @@ const urlToBase64 = async (url: string): Promise<string> => {
     }
 };
 
-const callApi = async (endpoint: string, body: any, stream: boolean = false) => {
+const callApi = async (endpoint: string, body: any, apiKey?: string, stream: boolean = false) => {
     const userId = getUserId();
-    const headers = {
+    const headers: any = {
         'Content-Type': 'application/json',
         'x-user-id': userId
     };
+
+    if (apiKey) {
+        headers['x-replicate-token'] = apiKey;
+    }
 
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
         method: 'POST',
@@ -143,7 +147,7 @@ Return strictly in JSON format.
         const resultText = await callApi('/analyze-image', {
             images: base64Images,
             prompt: prompt
-        }, true);
+        }, apiKey, true);
 
         const jsonString = resultText.replace(/```json\n?|\n?```/g, '').trim();
         return JSON.parse(jsonString) as AnalysisResult;
@@ -201,7 +205,7 @@ export const analyzeAndCategorizeImageForKB = async (imageFile: File, apiKey: st
         const resultText = await callApi('/analyze-image', {
             images: [base64Image],
             prompt: prompt
-        }, true);
+        }, apiKey, true);
 
         const jsonString = resultText.replace(/```json\n?|\n?```/g, '').trim();
         return JSON.parse(jsonString) as KnowledgeBaseAnalysis;
@@ -274,7 +278,7 @@ ${firstVariablePrompt}
             prompt: fullPrompt,
             image_input: base64Images, // Pass reference images if available for style/character consistency
             aspect_ratio: "3:4"
-        });
+        }, apiKey);
 
         return result.imageUrl;
     } catch (error) {
@@ -322,7 +326,7 @@ ${firstVariablePrompt}
         image: base64Master,
         prompt: prompt,
         strength: 0.75 
-    });
+    }, apiKey);
 
     return result.imageUrl;
 };
@@ -396,7 +400,7 @@ ${isRegeneration ? `\n- **Random Seed:** ${Math.random()}` : ''}
             prompt: fullPrompt,
             strength: 0.65, // Reduced from 0.85 to improve consistency with Master Image
             image_input: fusionImageBase64 ? [fusionImageBase64] : undefined
-        });
+        }, apiKey);
 
         return result.imageUrl;
     } catch (error) {
@@ -478,7 +482,7 @@ ${learnedContext}
         const resultText = await callApi('/analyze-image', {
             images: [base64Image],
             prompt: prompt
-        }, true);
+        }, apiKey, true);
 
         const jsonString = resultText.replace(/```json\n?|\n?```/g, '').trim();
         return JSON.parse(jsonString) as SmartRetouchAnalysisResult;
@@ -529,7 +533,7 @@ Return ONLY the final Merged Description text. Do not add explanations.
         return await callApi('/analyze-image', {
             images: [base64Image],
             prompt: prompt
-        }, true);
+        }, apiKey, true);
     } catch (error) {
         console.error("Prompt Merge failed:", error);
         return originalDescription + " " + userInstructions; 
@@ -567,7 +571,7 @@ ${directives}
         image: base64Image,
         prompt: prompt,
         strength: 0.65 
-    });
+    }, apiKey);
 
     return result.imageUrl;
 };
@@ -654,7 +658,7 @@ A restored image where the corners blend invisibly with the rest of the scene. T
         mask: maskImage, // Pass the generated mask
         prompt: prompt
         // Strength is not needed for Flux Fill in this context, or handled differently
-    });
+    }, apiKey);
 
     return result.imageUrl;
 };
@@ -688,7 +692,7 @@ Return ONLY a JSON object.
         const resultText = await callApi('/analyze-image', {
             images: [base64Image],
             prompt: prompt
-        }, true);
+        }, apiKey, true);
 
         const jsonString = resultText.replace(/```json\n?|\n?```/g, '').trim();
         return JSON.parse(jsonString) as PreprocessResult;

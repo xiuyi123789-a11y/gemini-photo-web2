@@ -15,10 +15,23 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = 3001;
 
-// Initialize Replicate client
-const replicate = new Replicate({
+// Initialize Replicate client (Fallback)
+const defaultReplicate = new Replicate({
   auth: process.env.REPLICATE_API_TOKEN,
 });
+
+// Helper to get Replicate client for request
+const getReplicateClient = (req) => {
+    const token = req.headers['x-replicate-token'];
+    if (token) {
+        return new Replicate({ auth: token });
+    }
+    // Fallback to server token if available
+    if (process.env.REPLICATE_API_TOKEN) {
+        return defaultReplicate;
+    }
+    throw new Error('Replicate API token is missing. Please provide it in the settings.');
+};
 
 // Middleware
 app.use(cors());
@@ -53,12 +66,12 @@ const validateUserId = (req, res, next) => {
 // --- Replicate API Endpoints ---
 
 // Helper to stream Replicate output
-const streamReplicate = async (res, model, input) => {
+const streamReplicate = async (res, client, model, input) => {
   try {
     res.setHeader('Content-Type', 'text/plain');
     res.setHeader('Transfer-Encoding', 'chunked');
 
-    for await (const event of replicate.stream(model, { input })) {
+    for await (const event of client.stream(model, { input })) {
       res.write(event.toString());
     }
     res.end();
@@ -75,6 +88,7 @@ const streamReplicate = async (res, model, input) => {
 // POST /api/analyze-image (Vision Analysis)
 app.post('/api/analyze-image', validateUserId, async (req, res) => {
   try {
+    const replicateClient = getReplicateClient(req);
     const { images, prompt } = req.body;
     
     // Ensure images is an array
@@ -94,7 +108,7 @@ app.post('/api/analyze-image', validateUserId, async (req, res) => {
     };
     
     console.log('Starting analysis with openai/gpt-4o-mini...');
-    await streamReplicate(res, "openai/gpt-4o-mini", input);
+    await streamReplicate(res, replicateClient, "openai/gpt-4o-mini", input);
 
   } catch (error) {
     console.error('Analysis error:', error);
@@ -134,9 +148,9 @@ const saveReplicateOutput = async (outputItem, userId) => {
 };
 
 // Helper to run Replicate prediction with polling for better error handling
-const runReplicatePrediction = async (model, input) => {
+const runReplicatePrediction = async (client, model, input) => {
     console.log(`Starting prediction for model: ${model}`);
-    let prediction = await replicate.predictions.create({
+    let prediction = await client.predictions.create({
         version: undefined, // Let Replicate pick the version for the model path
         model: model,
         input: input
@@ -147,7 +161,7 @@ const runReplicatePrediction = async (model, input) => {
     // Poll for completion
     while (prediction.status !== 'succeeded' && prediction.status !== 'failed' && prediction.status !== 'canceled') {
         await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
-        prediction = await replicate.predictions.get(prediction.id);
+        prediction = await client.predictions.get(prediction.id);
         // console.log(`Prediction status: ${prediction.status}`);
     }
 
@@ -168,6 +182,7 @@ const runReplicatePrediction = async (model, input) => {
 // POST /api/generate-image (Image Generation)
 app.post('/api/generate-image', validateUserId, async (req, res) => {
     try {
+        const replicateClient = getReplicateClient(req);
         const { prompt, aspect_ratio, image_input } = req.body;
 
         // Using 'google/nano-banana' as requested
@@ -182,7 +197,7 @@ app.post('/api/generate-image', validateUserId, async (req, res) => {
         console.log('Generating with google/nano-banana, input:', JSON.stringify(input, null, 2));
 
         // Use the polling helper instead of replicate.run
-        const output = await runReplicatePrediction("google/nano-banana", input);
+        const output = await runReplicatePrediction(replicateClient, "google/nano-banana", input);
         
         console.log('Replicate Output:', JSON.stringify(output, null, 2));
 
@@ -213,6 +228,7 @@ app.post('/api/generate-image', validateUserId, async (req, res) => {
 // POST /api/retouch-image (Image-to-Image / Inpainting)
 app.post('/api/retouch-image', validateUserId, async (req, res) => {
     try {
+        const replicateClient = getReplicateClient(req);
         const { image, mask, prompt, strength, image_input } = req.body;
         
         let input;
@@ -252,7 +268,7 @@ app.post('/api/retouch-image', validateUserId, async (req, res) => {
         console.log(`Retouching with ${model}, input keys:`, Object.keys(input));
 
         // Use the polling helper instead of replicate.run
-        const output = await runReplicatePrediction(model, input);
+        const output = await runReplicatePrediction(replicateClient, model, input);
         
         console.log('Replicate Output (Retouch):', JSON.stringify(output, null, 2));
 
