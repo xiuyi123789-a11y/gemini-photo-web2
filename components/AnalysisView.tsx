@@ -1,6 +1,6 @@
 
 import React, { useState } from 'react';
-import { analyzeImages } from '../services/geminiService';
+import { analyzeImages } from '../services/replicateService';
 import { addAnalysisResultToKB } from '../services/knowledgeBaseService';
 import { AnalysisResult, ImageFile } from '../types';
 import { FileUpload } from './FileUpload';
@@ -12,38 +12,59 @@ interface AnalysisViewProps {
 }
 
 const formatResultToMarkdown = (result: AnalysisResult): string => {
-    let md = '### 一致性元素\n\n';
+    let md = '### 一致性元素 (Consistent Elements)\n\n';
     const { consistent_elements, inconsistent_elements } = result;
 
-    md += `**主要主体**\n`;
-    md += `- **物品**: ${consistent_elements.primary_subject.item}\n`;
-    md += `- **关键特征**: ${consistent_elements.primary_subject.key_features.join(', ')}\n`;
-    md += `- **材质**: ${consistent_elements.primary_subject.materials.join(', ')}\n`;
-    md += `- **品牌**: ${consistent_elements.primary_subject.brand}\n`;
-    md += `- **情感氛围**: ${consistent_elements.primary_subject.emotional_tone}\n\n`;
+    // New Structure Handling
+    if (consistent_elements.synthesized_definition) {
+        const def = consistent_elements.synthesized_definition;
+        md += `**核心主体 (Core Subject)**\n${def.core_subject_details}\n\n`;
+        if (def.human_features && def.human_features !== 'null') md += `**人物特征 (Human Features)**\n${def.human_features}\n\n`;
+        if (def.scene_atmosphere && def.scene_atmosphere !== 'null') md += `**场景氛围 (Scene Atmosphere)**\n${def.scene_atmosphere}\n\n`;
+        md += `**视觉质量 (Visual Quality)**\n${def.visual_quality}\n\n`;
+        
+        md += '---\n\n### 非一致性元素 (Inconsistent Elements)\n\n';
+        inconsistent_elements.forEach(item => {
+             md += `**图片 ${item.image_index + 1}**\n`;
+             md += `- **内容类型**: ${item.content_type}\n`;
+             md += `- **独特特征**: ${item.unique_features}\n\n`;
+        });
+        return md;
+    }
 
-    md += `**场景环境**\n`;
-    md += `- **地点**: ${consistent_elements.scene_environment.general_location}\n`;
-    md += `- **共享元素**: ${consistent_elements.scene_environment.shared_elements.join(', ')}\n\n`;
+    // Legacy Structure Handling
+    if (consistent_elements.primary_subject) {
+        md += `**主要主体**\n`;
+        md += `- **物品**: ${consistent_elements.primary_subject.item}\n`;
+        md += `- **关键特征**: ${consistent_elements.primary_subject.key_features.join(', ')}\n`;
+        md += `- **材质**: ${consistent_elements.primary_subject.materials.join(', ')}\n`;
+        md += `- **品牌**: ${consistent_elements.primary_subject.brand}\n`;
+        md += `- **情感氛围**: ${consistent_elements.primary_subject.emotional_tone}\n\n`;
 
-    md += `**图像质量与构图**\n`;
-    md += `- **风格**: ${consistent_elements.image_quality_and_composition.style}\n`;
-    md += `- **光照**: ${consistent_elements.image_quality_and_composition.lighting}\n`;
-    md += `- **质量**: ${consistent_elements.image_quality_and_composition.quality}\n`;
-    md += `- **镜头类型**: ${consistent_elements.image_quality_and_composition.lens_type}\n\n`;
+        md += `**场景环境**\n`;
+        md += `- **地点**: ${consistent_elements.scene_environment.general_location}\n`;
+        md += `- **共享元素**: ${consistent_elements.scene_environment.shared_elements.join(', ')}\n\n`;
 
-    md += '---\n\n### 非一致性元素\n\n';
-    inconsistent_elements.forEach(item => {
-        md += `**图片 ${item.image_index}**\n`;
-        md += `- **景别**: ${item.framing}\n`;
-        md += `- **姿势**: ${item.subject_pose}\n`;
-        md += `- **人物描述**: ${item.person_description}\n`;
-        md += `- **独特细节**: ${item.unique_details}\n`;
-        md += `- **宽高比**: ${item.aspect_ratio}\n`;
-        md += `- **相机设置**: ${item.camera_settings}\n\n`;
-    });
+        md += `**图像质量与构图**\n`;
+        md += `- **风格**: ${consistent_elements.image_quality_and_composition.style}\n`;
+        md += `- **光照**: ${consistent_elements.image_quality_and_composition.lighting}\n`;
+        md += `- **质量**: ${consistent_elements.image_quality_and_composition.quality}\n`;
+        md += `- **镜头类型**: ${consistent_elements.image_quality_and_composition.lens_type}\n\n`;
 
-    return md;
+        md += '---\n\n### 非一致性元素\n\n';
+        inconsistent_elements.forEach(item => {
+            md += `**图片 ${item.image_index}**\n`;
+            md += `- **景别**: ${item.framing}\n`;
+            md += `- **姿势**: ${item.subject_pose}\n`;
+            md += `- **人物描述**: ${item.person_description}\n`;
+            md += `- **独特细节**: ${item.unique_details}\n`;
+            md += `- **宽高比**: ${item.aspect_ratio}\n`;
+            md += `- **相机设置**: ${item.camera_settings}\n\n`;
+        });
+        return md;
+    }
+    
+    return "无法解析的分析结果格式。";
 };
 
 const FormattedMarkdownResultDisplay: React.FC<{ result: AnalysisResult }> = ({ result }) => {
@@ -80,7 +101,7 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({ onAnalysisComplete }
       return;
     }
     if (!apiKey) {
-      setError('请先设置您的 API Key。');
+      setError('请先设置您的 replicate APIkey。');
       return;
     }
     setIsLoading(true);

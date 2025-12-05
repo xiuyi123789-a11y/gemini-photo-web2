@@ -88,6 +88,17 @@ export const ImageModal: React.FC<ImageModalProps> = ({ src, onClose }) => {
         };
     }, [isDragging, onClose]);
 
+    // 3. ESC Key Close Logic
+    useEffect(() => {
+        const handleEsc = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                onClose();
+            }
+        };
+        window.addEventListener('keydown', handleEsc);
+        return () => window.removeEventListener('keydown', handleEsc);
+    }, [onClose]);
+
 
     return (
         <div 

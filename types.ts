@@ -12,34 +12,38 @@ export interface ReferenceImageFile {
   isProcessing: boolean;
 }
 
+export interface SynthesizedDefinition {
+  subject_summary: string;
+  core_subject_details: string;
+  scene_atmosphere: string;
+  visual_quality: string;
+  // Legacy fields for backward compatibility
+  subject_type?: string;
+  human_features?: string | null;
+}
+
 export interface ConsistentElements {
-  primary_subject: {
-    item: string;
-    key_features: string[];
-    materials: string[];
-    brand: string; // New field
-    emotional_tone: string; // New field
-  };
-  scene_environment: {
-    general_location: string;
-    shared_elements: string[];
-  };
-  image_quality_and_composition: {
-    style: string;
-    lighting: string;
-    quality: string;
-    lens_type: string;
-  };
+  synthesized_definition: SynthesizedDefinition;
+  // Legacy fields (optional for backward compatibility if needed, or remove if fully migrating)
+  primary_subject?: any;
+  scene_environment?: any;
+  image_quality_and_composition?: any;
 }
 
 export interface InconsistentElement {
   image_index: number;
-  framing: string;
-  subject_pose: string;
-  person_description: string;
-  unique_details: string;
-  aspect_ratio: string;
-  camera_settings: string; // New field
+  subject_ref: string;
+  action_and_pose: string;
+  camera_angle: string;
+  // Legacy fields
+  content_type?: string;
+  unique_features?: string;
+  framing?: string;
+  subject_pose?: string;
+  person_description?: string;
+  unique_details?: string;
+  aspect_ratio?: string;
+  camera_settings?: string;
 }
 
 export interface AnalysisResult {
@@ -50,6 +54,12 @@ export interface AnalysisResult {
 export interface VariablePrompt {
   id: string;
   prompt: string;
+  referenceImage?: {
+      file: File;
+      preview: string;
+  };
+  analysis?: KnowledgeBaseAnalysis;
+  isAnalyzing?: boolean;
 }
 
 export interface GeneratedImage {
@@ -83,11 +93,15 @@ export interface KnowledgeBaseEntry {
     variablePrompt: string;
   };
   // Field for storing the analysis logic for AI learning
-  learningContext?: string; 
+  learningContext?: string;
+  
+  // For deletion logic
+  groupId?: string; // ID linking fragments to their original full prompt analysis
+  deletedAt?: number; // Timestamp if in trash, undefined if active
 }
 
 export type CategorizedKBSuggestions = {
-  [key in KnowledgeBaseCategory]?: string[];
+  [key in KnowledgeBaseCategory]?: string;
 };
 
 // New type for the enhanced KB analysis response from Gemini
@@ -100,7 +114,8 @@ export interface KnowledgeBaseAnalysis {
 export interface SmartRetouchRow {
     id: string;
     originalImage: ImageFile | null;
-    analysisText: string;
+    analysisText: string; // The visible "Improvement Instructions"
+    understandingText?: string; // The internal "Original Image Understanding"
     isAnalyzing: boolean;
     generatedImage: string | null;
     isGenerating: boolean;

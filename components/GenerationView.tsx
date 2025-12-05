@@ -2,8 +2,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { AnalysisResult, ImageFile, VariablePrompt, GeneratedImageState, KnowledgeBaseEntry, KnowledgeBaseCategory, ReferenceImageFile } from '../types';
 import { MagicWandIcon, PlusIcon, TrashIcon, RefreshIcon, DownloadIcon, ZoomInIcon, EyeIcon, PlayIcon } from './IconComponents';
-import { generateMasterImage, modifyMasterImage, generateSingleFromMaster, removeWatermark } from '../services/geminiService';
-import { incrementEntryUsage } from '../services/knowledgeBaseService';
+import { generateMasterImage, modifyMasterImage, generateSingleFromMaster, analyzeImages, preprocessImageForGeneration, removeWatermark, analyzeAndCategorizeImageForKB } from '../services/replicateService';
+import { incrementEntryUsage, saveKBAnalysisToKB } from '../services/knowledgeBaseService';
 import { LoadingSpinner } from './LoadingSpinner';
 import { KnowledgeBaseModal } from './KnowledgeBaseModal';
 import { ImageModal } from './ImageModal';
@@ -44,31 +44,133 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
   
   const [isKbModalOpen, setIsKbModalOpen] = useState(false);
   const [editingField, setEditingField] = useState<'consistent' | string | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const prevRefImagesCount = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { apiKey } = useApiKey();
 
-
-  const populateFromAnalysis = useCallback((analysisResult: AnalysisResult | null) => {
-    if (analysisResult) {
-      const { consistent_elements, inconsistent_elements } = analysisResult;
-      
-      const consistentText = `主要主体: ${consistent_elements.primary_subject.item} (品牌: ${consistent_elements.primary_subject.brand}), 关键特征: ${consistent_elements.primary_subject.key_features.join(', ')}, 材质: ${consistent_elements.primary_subject.materials.join(', ')}.
-场景环境: ${consistent_elements.scene_environment.general_location}, 包含 ${consistent_elements.scene_environment.shared_elements.join(', ')} 等元素.
-风格与质量: ${consistent_elements.image_quality_and_composition.style}, 使用 ${consistent_elements.image_quality_and_composition.lens_type} 拍摄, 光照为 ${consistent_elements.image_quality_and_composition.lighting}, 画质 ${consistent_elements.image_quality_and_composition.quality}.
-情感氛围: ${consistent_elements.primary_subject.emotional_tone}.`;
-      setConsistentPrompt(consistentText);
-
-      const variableItems = inconsistent_elements.map(item => ({
-        id: uuidv4(),
-        prompt: `宽高比: ${item.aspect_ratio}. 景别: ${item.framing}. 姿势: ${item.subject_pose}. 人物描述 (重要): ${item.person_description}. 独特细节: ${item.unique_details}. 相机设置: ${item.camera_settings}.`
-      }));
-      setVariablePrompts(variableItems.length > 0 ? variableItems : [{ id: uuidv4(), prompt: '' }]);
-    }
-  }, []);
-
   useEffect(() => {
-    populateFromAnalysis(initialAnalysisResult);
-  }, [initialAnalysisResult, populateFromAnalysis]);
+     if (initialAnalysisResult) {
+         populateFromAnalysis(initialAnalysisResult, true);
+     }
+   }, [initialAnalysisResult]);
+
+   const populateFromAnalysis = (result: AnalysisResult, updateVariables: boolean = false) => {
+         const { consistent_elements, inconsistent_elements } = result;
+         
+         // New Structure Handling (Senior Visual Asset Aggregator & Synthesizer)
+         if (consistent_elements.synthesized_definition) {
+             const def = consistent_elements.synthesized_definition;
+             let text = "";
+             if (def.subject_summary) text += `Subject Summary: ${def.subject_summary}\n`;
+             text += `Subject Core: ${def.core_subject_details}\n`;
+             // Legacy fields check
+             if (def.human_features && def.human_features !== 'null') text += `Human Features: ${def.human_features}\n`;
+             
+             if (def.scene_atmosphere && def.scene_atmosphere !== 'null') text += `Scene Atmosphere: ${def.scene_atmosphere}\n`;
+             text += `Visual Quality: ${def.visual_quality}`;
+             
+             setConsistentPrompt(text.trim());
+             
+             if (updateVariables && inconsistent_elements) {
+                 const variableItems = inconsistent_elements.map(item => {
+                     // New structure
+                     if (item.subject_ref) {
+                         return {
+                             id: uuidv4(),
+                             prompt: `[${item.subject_ref}] Action: ${item.action_and_pose}. Camera: ${item.camera_angle}`
+                         };
+                     }
+                     // Legacy structure fallback
+                     return {
+                         id: uuidv4(),
+                         prompt: `[${item.content_type}] ${item.unique_features}`
+                     };
+                 });
+                 setVariablePrompts(variableItems.length > 0 ? variableItems : [{ id: uuidv4(), prompt: '' }]);
+             }
+             return;
+         }
+
+         // Legacy Structure Handling
+         const subject = consistent_elements.primary_subject;
+         const scene = consistent_elements.scene_environment;
+         const style = consistent_elements.image_quality_and_composition;
+         
+         let text = "";
+         if (subject) {
+             text += `${subject.item}. ${subject.key_features.join(', ')}. `;
+             if (subject.materials && subject.materials.length > 0) text += `Materials: ${subject.materials.join(', ')}. `;
+             if (subject.brand) text += `Brand: ${subject.brand}. `;
+             if (subject.emotional_tone) text += `Mood: ${subject.emotional_tone}. `;
+         }
+         
+         if (scene) {
+              text += `Scene: ${scene.general_location}. ${scene.shared_elements.join(', ')}. `;
+         }
+         
+         if (style) {
+             text += `Style: ${style.style}. Lighting: ${style.lighting}. Quality: ${style.quality}. `;
+         }
+         
+         setConsistentPrompt(text.trim());
+
+         if (updateVariables && inconsistent_elements) {
+            const variableItems = inconsistent_elements.map(item => {
+                // Check if it's the old structure or new (though new structure is handled above, type guard helps)
+                if (item.unique_features) {
+                     return {
+                        id: uuidv4(),
+                        prompt: `[${item.content_type}] ${item.unique_features}`
+                     };
+                }
+                return {
+                    id: uuidv4(),
+                    prompt: `Framing: ${item.framing}. Pose: ${item.subject_pose}. Person: ${item.person_description}. Details: ${item.unique_details}. Camera: ${item.camera_settings || ''}.`
+                };
+            });
+            setVariablePrompts(variableItems.length > 0 ? variableItems : [{ id: uuidv4(), prompt: '' }]);
+         }
+   };
+
+   const triggerAutoAnalysis = async () => {
+     const validImages = referenceImages.filter(img => !img.isProcessing && img.processedPreview).map(img => img.file);
+     if (validImages.length === 0 || !apiKey) return;
+     
+     setIsAnalyzing(true);
+     try {
+         const result = await analyzeImages(validImages, apiKey);
+         populateFromAnalysis(result, false); // Only update consistency
+     } catch (e) {
+         console.error("Auto analysis failed", e);
+     } finally {
+         setIsAnalyzing(false);
+     }
+   };
+
+  // Removed automatic trigger of old analysis to prevent overwriting the new specific subject identification
+  /*
+  useEffect(() => {
+    const allProcessed = referenceImages.every(img => !img.isProcessing);
+    const hasImages = referenceImages.length > 0;
+    
+    if (hasImages && allProcessed) {
+         if (referenceImages.length !== prevRefImagesCount.current) {
+             triggerAutoAnalysis();
+             prevRefImagesCount.current = referenceImages.length;
+         }
+    } else if (referenceImages.length === 0) {
+         prevRefImagesCount.current = 0;
+    }
+  }, [referenceImages, apiKey]);
+  */
+  
+  // Update ref count without triggering analysis
+  useEffect(() => {
+       if (referenceImages.length !== prevRefImagesCount.current) {
+           prevRefImagesCount.current = referenceImages.length;
+       }
+  }, [referenceImages]);
 
   const handleFileSelect = useCallback(async (selectedFiles: ImageFile[]) => {
     const newUploads = selectedFiles.slice(0, MAX_REF_IMAGES - referenceImages.length);
@@ -78,35 +180,73 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
         id: uuidv4(),
         file: imgFile.file,
         originalPreview: imgFile.preview,
-        processedPreview: null,
-        isProcessing: true,
+        processedPreview: null, // Will be set after manual analysis
+        isProcessing: false,    // Not processing yet
     }));
 
     setReferenceImages(prev => [...prev, ...newImageStates]);
-
-    // Process each new upload
-    for (const imageState of newImageStates) {
-        try {
-            if (!apiKey) {
-              setError('请先设置您的 API Key。');
-              setReferenceImages(prev => prev.map(img => 
-                  img.id === imageState.id ? { ...img, isProcessing: false, processedPreview: imageState.originalPreview } : img
-              ));
-              continue;
-            }
-            const processedSrc = await removeWatermark(imageState.file, apiKey);
-            setReferenceImages(prev => prev.map(img => 
-                img.id === imageState.id ? { ...img, processedPreview: processedSrc, isProcessing: false } : img
-            ));
-        } catch (error) {
-            console.error("Watermark removal failed:", error);
-            setError(`图片 ${imageState.file.name} 的水印去除失败。`);
-            setReferenceImages(prev => prev.map(img => 
-                img.id === imageState.id ? { ...img, isProcessing: false, processedPreview: imageState.originalPreview } : img // Use original on error
-            ));
-        }
-    }
   }, [referenceImages.length]);
+
+  const handleStartAnalysis = async () => {
+    if (!apiKey) {
+        setError("请先设置您的 API Key。");
+        return;
+    }
+    if (referenceImages.length === 0) {
+        setError("请先上传参考图片。");
+        return;
+    }
+
+    setIsAnalyzing(true);
+    setError(null);
+
+    try {
+        // 1. Process Images (Watermark Removal)
+        const processedRefImages: ReferenceImageFile[] = [];
+        
+        for (const img of referenceImages) {
+            // If already processed, skip re-processing
+            if (img.processedPreview) {
+                processedRefImages.push(img);
+                continue;
+            }
+
+            // Update status to processing
+            setReferenceImages(prev => prev.map(p => p.id === img.id ? { ...p, isProcessing: true } : p));
+
+            let processedUrl = img.originalPreview;
+            try {
+                const analysis = await preprocessImageForGeneration(img.file, apiKey);
+                if (analysis.hasWatermark) {
+                    processedUrl = await removeWatermark(img.file, apiKey);
+                }
+            } catch (e) {
+                console.error(`Failed to process image ${img.id}`, e);
+                // Fallback to original
+            }
+
+            const updatedImg = { ...img, processedPreview: processedUrl, isProcessing: false };
+            processedRefImages.push(updatedImg);
+            
+            // Update state immediately
+            setReferenceImages(prev => prev.map(p => p.id === img.id ? updatedImg : p));
+        }
+
+        // 2. Analyze All Images together
+        const validFiles = processedRefImages.map(img => img.file);
+        if (validFiles.length > 0) {
+            const result = await analyzeImages(validFiles, apiKey);
+            // 3. Populate UI (Replace existing content)
+            populateFromAnalysis(result, true);
+        }
+
+    } catch (e: any) {
+        console.error("Analysis workflow failed", e);
+        setError(e.message || "图片分析流程失败");
+    } finally {
+        setIsAnalyzing(false);
+    }
+  };
 
   const handleDeleteReferenceImage = (id: string) => {
     setReferenceImages(prev => prev.filter(img => img.id !== id));
@@ -125,7 +265,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
   };
 
   const addVariablePrompt = () => {
-    setVariablePrompts(prev => [...prev, { id: crypto.randomUUID(), prompt: '' }]);
+    setVariablePrompts(prev => [...prev, { id: uuidv4(), prompt: '' }]);
   };
 
   const removeVariablePrompt = (id: string) => {
@@ -146,15 +286,54 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
       return processed;
   };
 
+  const handleVariableImageUpload = async (id: string, file: File) => {
+      const preview = URL.createObjectURL(file);
+      setVariablePrompts(prev => prev.map(p => p.id === id ? { ...p, referenceImage: { file, preview } } : p));
+      
+      // Auto analyze
+      if (apiKey) {
+          await handleAnalyzeVariableImage(id, file);
+      }
+  };
+
+  const handleAnalyzeVariableImage = async (id: string, file: File) => {
+      if (!apiKey) return;
+      setVariablePrompts(prev => prev.map(p => p.id === id ? { ...p, isAnalyzing: true } : p));
+      
+      try {
+          const analysis = await analyzeAndCategorizeImageForKB(file, apiKey);
+          setVariablePrompts(prev => prev.map(p => p.id === id ? { ...p, analysis, isAnalyzing: false } : p));
+      } catch (e) {
+          console.error("Analysis failed", e);
+          setVariablePrompts(prev => prev.map(p => p.id === id ? { ...p, isAnalyzing: false } : p));
+      }
+  };
+
+  const handleSaveVariableToKB = async (id: string) => {
+      const prompt = variablePrompts.find(p => p.id === id);
+      if (prompt?.referenceImage?.file && prompt.analysis) {
+          try {
+              await saveKBAnalysisToKB(prompt.analysis, prompt.referenceImage.file);
+              alert("已保存到知识库！");
+          } catch (e) {
+              alert("保存失败");
+          }
+      }
+  };
+
+  const handleDeleteVariableImage = (id: string) => {
+      setVariablePrompts(prev => prev.map(p => p.id === id ? { ...p, referenceImage: undefined, analysis: undefined } : p));
+  };
+
   const handleGenerateMaster = async (isRegeneration = false) => {
     if (!apiKey) {
       setError('请先设置您的 API Key。');
       return;
     }
     const processedImages = getProcessedImages();
-    if (!processedImages || processedImages.length === 0 || !variablePrompts[0]?.prompt) {
-        setError("请上传、等待处理完成至少一张参考图，并填写第一个非一致性提示。");
-        return;
+    if (!processedImages || processedImages.length === 0 || (!variablePrompts[0]?.prompt && !consistentPrompt)) {
+      setError("请上传参考图，并确保有一致性描述或主图提示词。");
+      return;
     }
     setError(null);
     setMasterImage({ src: null, isLoading: true });
@@ -204,7 +383,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
     setError(null);
     
     const imagePromises = variablePrompts.map(vp => 
-        generateSingleFromMaster(processedImages, masterImage.src!, consistentPrompt, vp.prompt, false, apiKey)
+        generateSingleFromMaster(processedImages, masterImage.src!, consistentPrompt, vp.prompt, false, apiKey, vp.referenceImage?.file)
         .then(imageSrc => ({ id: vp.id, src: imageSrc, error: null }))
         .catch(error => ({ id: vp.id, src: null, error }))
     );
@@ -245,7 +424,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
     if (!promptToRegenerate) return;
 
     try {
-        const imageSrc = await generateSingleFromMaster(processedImages, masterImage.src, consistentPrompt, promptToRegenerate.prompt, true, apiKey);
+        const imageSrc = await generateSingleFromMaster(processedImages, masterImage.src, consistentPrompt, promptToRegenerate.prompt, true, apiKey, promptToRegenerate.referenceImage?.file);
         setGeneratedImages(prev => ({...prev, [promptId]: { src: imageSrc, isLoading: false }}));
     } catch(e: any) {
         setError(e.message || `图片 ${promptId} 重新生成失败。`);
@@ -267,8 +446,14 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
     setIsKbModalOpen(true);
   };
 
-  const handleSelectKbEntry = (entry: KnowledgeBaseEntry) => {
-    incrementEntryUsage(entry.id);
+  const handleSelectKbEntry = async (entry: KnowledgeBaseEntry) => {
+    try {
+        await incrementEntryUsage(entry.id);
+    } catch (error) {
+        console.error("Failed to increment usage count", error);
+        // Continue selection even if tracking fails
+    }
+    
     if (entry.fullPrompt && entry.category === KnowledgeBaseCategory.FULL_PROMPT) {
         // For FULL_PROMPT, replace the consistent and the FIRST variable prompt.
         setConsistentPrompt(entry.fullPrompt.consistentPrompt);
@@ -298,10 +483,20 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
     }
   };
 
+  const kbContextPrompt = editingField === 'consistent' 
+      ? consistentPrompt 
+      : (typeof editingField === 'string' ? variablePrompts.find(p => p.id === editingField)?.prompt : undefined);
+
   return (
     <div>
         {enlargedImage && <ImageModal src={enlargedImage} onClose={() => setEnlargedImage(null)} />}
-        {isKbModalOpen && <KnowledgeBaseModal onClose={() => setIsKbModalOpen(null)} onSelectEntry={handleSelectKbEntry} />}
+        {isKbModalOpen && (
+            <KnowledgeBaseModal 
+                onClose={() => setIsKbModalOpen(false)} 
+                onSelectEntry={handleSelectKbEntry} 
+                currentContextPrompt={kbContextPrompt}
+            />
+        )}
         <div className="grid lg:grid-cols-2 gap-8">
         {/* Left Column: Inputs */}
         <div className="flex flex-col gap-8">
@@ -354,6 +549,26 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                         className="hidden"
                     />
                 </div>
+
+                {referenceImages.length > 0 && (
+                    <button
+                        onClick={handleStartAnalysis}
+                        disabled={isAnalyzing}
+                        className="mt-4 w-full py-3 bg-gradient-to-r from-fuchsia-600 to-purple-600 hover:from-fuchsia-500 hover:to-purple-500 text-white font-bold rounded-xl shadow-lg shadow-fuchsia-500/30 transition-all transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    >
+                        {isAnalyzing ? (
+                            <>
+                                <LoadingSpinner text="" />
+                                <span>正在处理与分析...</span>
+                            </>
+                        ) : (
+                            <>
+                                <MagicWandIcon className="w-5 h-5" />
+                                <span>开始图片理解 (Step 1)</span>
+                            </>
+                        )}
+                    </button>
+                )}
               </div>
               
               <div>
@@ -399,9 +614,66 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                         value={vp.prompt}
                         onChange={(e) => handleVariablePromptChange(vp.id, e.target.value)}
                         rows={3}
-                        className="w-full p-3 bg-slate-900/50 border border-slate-700 rounded-xl focus:ring-2 focus:ring-fuchsia-500 focus:border-transparent transition text-slate-300 placeholder-slate-600"
+                        className="w-full p-3 bg-slate-900/50 border border-slate-700 rounded-xl focus:ring-2 focus:ring-fuchsia-500 focus:border-transparent transition text-slate-300 placeholder-slate-600 mb-3"
                         placeholder={index === 0 ? '主图的提示词：全身照，站在镜子前...' : '例如：鞋子特写，无人物...'}
                       />
+                      
+                      {/* Image Upload Area */}
+                      <div className="mb-3">
+                        {!vp.referenceImage ? (
+                            <div className="relative group">
+                                <input 
+                                    type="file" 
+                                    accept="image/*" 
+                                    className="hidden" 
+                                    id={`file-${vp.id}`}
+                                    onChange={(e) => {
+                                        if (e.target.files?.[0]) handleVariableImageUpload(vp.id, e.target.files[0]);
+                                    }}
+                                />
+                                <label htmlFor={`file-${vp.id}`} className="flex items-center justify-center w-full p-3 border-2 border-dashed border-slate-700 rounded-xl text-slate-500 hover:border-fuchsia-500 hover:text-fuchsia-400 cursor-pointer transition-colors text-sm font-bold gap-2">
+                                    <PlusIcon className="w-4 h-4" />
+                                    <span>上传参考图 (自动解析)</span>
+                                </label>
+                            </div>
+                        ) : (
+                            <div className="bg-slate-900/50 rounded-xl p-3 border border-slate-700">
+                                <div className="flex gap-3">
+                                    <div className="relative w-20 h-20 flex-shrink-0 bg-slate-800 rounded-lg overflow-hidden group">
+                                         <img src={vp.referenceImage.preview} alt="Ref" className="w-full h-full object-cover" />
+                                         {vp.isAnalyzing && <div className="absolute inset-0 bg-black/50 flex items-center justify-center"><LoadingSpinner text=""/></div>}
+                                    </div>
+                                    <div className="flex-grow min-w-0 flex flex-col justify-between">
+                                        <div className="flex items-start justify-between">
+                                             <span className="text-xs text-slate-400 truncate">参考图已上传</span>
+                                             <div className="flex gap-1">
+                                                 <button onClick={() => handleSaveVariableToKB(vp.id)} className="text-xs bg-fuchsia-500/20 text-fuchsia-300 px-2 py-1 rounded hover:bg-fuchsia-500/40 transition" title="保存到知识库">保存KB</button>
+                                                 <button onClick={() => handleDeleteVariableImage(vp.id)} className="text-xs bg-red-500/20 text-red-300 px-2 py-1 rounded hover:bg-red-500/40 transition" title="删除图片">删除</button>
+                                             </div>
+                                        </div>
+                                        {/* Analysis Tags */}
+                                        {vp.analysis && (
+                                            <div className="flex flex-wrap gap-1 mt-2 max-h-24 overflow-y-auto">
+                                                {Object.entries(vp.analysis.fragments).map(([key, value]) => (
+                                                    <button 
+                                                        key={key}
+                                                        onClick={() => handleVariablePromptChange(vp.id, vp.prompt + (vp.prompt ? ' ' : '') + value)}
+                                                        className="text-[10px] bg-slate-800 border border-slate-600 hover:border-fuchsia-500 text-slate-300 hover:text-white px-2 py-0.5 rounded-full transition truncate max-w-full text-left"
+                                                        title={value as string}
+                                                    >
+                                                        {key}: {(value as string).substring(0, 10)}...
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
+                                        {!vp.analysis && !vp.isAnalyzing && (
+                                            <button onClick={() => handleAnalyzeVariableImage(vp.id, vp.referenceImage!.file)} className="text-xs text-fuchsia-400 underline mt-1 text-left">重新解析</button>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                      </div>
                       
                       <div className="mt-3 flex justify-end">
                            <button 
@@ -468,7 +740,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                  </div>
                  
                  <div className="mt-4 flex gap-2">
-                    <button onClick={() => handleGenerateMaster(false)} disabled={masterImage.isLoading || referenceImages.some(i => i.isProcessing) || referenceImages.length === 0 || !variablePrompts[0]?.prompt} className={`flex-grow font-bold py-3 px-6 rounded-xl transition-all shadow-lg transform active:scale-95 ${masterPromptStale ? 'bg-amber-500 hover:bg-amber-600 text-white shadow-amber-500/30' : 'bg-gradient-to-r from-fuchsia-600 to-purple-600 hover:from-fuchsia-500 hover:to-purple-500 text-white shadow-fuchsia-500/30'} disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none`}>
+                    <button onClick={() => handleGenerateMaster(false)} disabled={masterImage.isLoading || referenceImages.some(i => i.isProcessing) || referenceImages.length === 0 || (!variablePrompts[0]?.prompt && !consistentPrompt)} className={`flex-grow font-bold py-3 px-6 rounded-xl transition-all shadow-lg transform active:scale-95 ${masterPromptStale ? 'bg-amber-500 hover:bg-amber-600 text-white shadow-amber-500/30' : 'bg-gradient-to-r from-fuchsia-600 to-purple-600 hover:from-fuchsia-500 hover:to-purple-500 text-white shadow-fuchsia-500/30'} disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none`}>
                         {masterImage.isLoading ? '处理中...' : (masterImage.src ? (masterPromptStale ? '更新主图' : '重新生成主图') : '生成主图')}
                     </button>
                  </div>

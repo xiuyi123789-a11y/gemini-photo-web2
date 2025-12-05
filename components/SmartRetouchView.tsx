@@ -1,22 +1,27 @@
 
 import React, { useState } from 'react';
-import { SmartRetouchRow } from '../types';
-import { analyzeImageForImprovement, generateImprovedImage } from '../services/geminiService';
+import { SmartRetouchRow, KnowledgeBaseEntry } from '../types';
+import { analyzeImageSmartRetouch, generateSmartRetouchImage, mergeRetouchPromptsWithImage } from '../services/replicateService';
 import { addRetouchLearningEntry } from '../services/knowledgeBaseService';
-import { MagicWandIcon, PlayIcon, DownloadIcon, ZoomInIcon, TrashIcon, PlusIcon } from './IconComponents';
+import { MagicWandIcon, PlayIcon, DownloadIcon, ZoomInIcon, TrashIcon, PlusIcon, FireIcon } from './IconComponents';
 import { LoadingSpinner } from './LoadingSpinner';
 import { ImageModal } from './ImageModal';
+import { KnowledgeBaseModal } from './KnowledgeBaseModal';
 import { useApiKey } from '../src/contexts/ApiKeyContext';
 
 export const SmartRetouchView: React.FC = () => {
     const [rows, setRows] = useState<SmartRetouchRow[]>([
-        { id: '1', originalImage: null, analysisText: '', isAnalyzing: false, generatedImage: null, isGenerating: false, error: null },
-        { id: '2', originalImage: null, analysisText: '', isAnalyzing: false, generatedImage: null, isGenerating: false, error: null },
-        { id: '3', originalImage: null, analysisText: '', isAnalyzing: false, generatedImage: null, isGenerating: false, error: null },
+        { id: '1', originalImage: null, analysisText: '', understandingText: '', isAnalyzing: false, generatedImage: null, isGenerating: false, error: null },
+        { id: '2', originalImage: null, analysisText: '', understandingText: '', isAnalyzing: false, generatedImage: null, isGenerating: false, error: null },
+        { id: '3', originalImage: null, analysisText: '', understandingText: '', isAnalyzing: false, generatedImage: null, isGenerating: false, error: null },
     ]);
     const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
-    // New state for save feedback (per row id)
     const [saveStatus, setSaveStatus] = useState<Record<string, boolean>>({});
+    
+    // Knowledge Base Modal State
+    const [isKbModalOpen, setIsKbModalOpen] = useState(false);
+    const [activeRowIdForKb, setActiveRowIdForKb] = useState<string | null>(null);
+
     const { apiKey } = useApiKey();
 
     const handleImageUpload = (rowId: string, file: File) => {
@@ -36,26 +41,35 @@ export const SmartRetouchView: React.FC = () => {
         if (!imageFile) return;
 
         if (!apiKey) {
-            setRows(prev => prev.map(r => r.id === rowId ? { ...r, error: "请先设置您的 API Key。" } : r));
+            setRows(prev => prev.map(r => r.id === rowId ? { ...r, error: "请先设置您的 replicate APIkey。" } : r));
             return;
         }
 
         setRows(prev => prev.map(r => r.id === rowId ? { ...r, isAnalyzing: true, error: null } : r));
         try {
-            const analysis = await analyzeImageForImprovement(imageFile, apiKey);
+            const analysis = await analyzeImageSmartRetouch(imageFile, apiKey);
             
             // Parallelism Logic: Only update if the user hasn't typed anything yet
             setRows(prev => {
                 const currentRow = prev.find(r => r.id === rowId);
                 if (currentRow && currentRow.analysisText.trim() !== '') {
-                    // User has typed something, don't overwrite
-                    return prev.map(r => r.id === rowId ? { ...r, isAnalyzing: false } : r);
+                    // User has typed something, don't overwrite visible text, but update internal understanding
+                    return prev.map(r => r.id === rowId ? { 
+                        ...r, 
+                        isAnalyzing: false,
+                        understandingText: analysis.understanding 
+                    } : r);
                 }
-                // User hasn't typed, auto-fill
-                return prev.map(r => r.id === rowId ? { ...r, isAnalyzing: false, analysisText: analysis } : r);
+                // User hasn't typed, auto-fill both
+                return prev.map(r => r.id === rowId ? { 
+                    ...r, 
+                    isAnalyzing: false, 
+                    analysisText: analysis.suggestions,
+                    understandingText: analysis.understanding
+                } : r);
             });
         } catch (e: any) {
-            setRows(prev => prev.map(r => r.id === rowId ? { ...r, isAnalyzing: false, error: null } : r)); // Silent fail or show error without blocking
+            setRows(prev => prev.map(r => r.id === rowId ? { ...r, isAnalyzing: false, error: null } : r));
         }
     };
 
@@ -64,17 +78,54 @@ export const SmartRetouchView: React.FC = () => {
         if (!row?.originalImage || !row.analysisText) return;
 
         if (!apiKey) {
-            setRows(prev => prev.map(r => r.id === rowId ? { ...r, error: "请先设置您的 API Key。" } : r));
+            setRows(prev => prev.map(r => r.id === rowId ? { ...r, error: "请先设置您的 replicate APIkey。" } : r));
             return;
         }
 
         setRows(prev => prev.map(r => r.id === rowId ? { ...r, isGenerating: true, error: null } : r));
         try {
-            const generatedSrc = await generateImprovedImage(row.originalImage.file, row.analysisText, apiKey);
+            // 1. Merge Prompts: Original Description + User Instructions
+            let fullPrompt = row.analysisText;
+            
+            if (row.understandingText) {
+                // Use AI to merge logic
+                 fullPrompt = await mergeRetouchPromptsWithImage(
+                    row.originalImage.file,
+                    row.understandingText,
+                    row.analysisText,
+                    apiKey
+                );
+            }
+
+            // 2. Generate Image
+            const generatedSrc = await generateSmartRetouchImage(row.originalImage.file, fullPrompt, apiKey);
             setRows(prev => prev.map(r => r.id === rowId ? { ...r, isGenerating: false, generatedImage: generatedSrc } : r));
         } catch (e: any) {
             setRows(prev => prev.map(r => r.id === rowId ? { ...r, isGenerating: false, error: e.message || "生成失败" } : r));
         }
+    };
+    
+    const openKbModal = (rowId: string) => {
+        setActiveRowIdForKb(rowId);
+        setIsKbModalOpen(true);
+    };
+
+    const handleKbSelection = (entry: KnowledgeBaseEntry) => {
+        if (!activeRowIdForKb) return;
+        
+        const textToAdd = entry.promptFragment;
+        
+        setRows(prev => prev.map(row => {
+            if (row.id === activeRowIdForKb) {
+                const currentText = row.analysisText || '';
+                const newText = currentText ? `${currentText}\n- ${textToAdd}` : `- ${textToAdd}`;
+                return { ...row, analysisText: newText };
+            }
+            return row;
+        }));
+        
+        setIsKbModalOpen(false);
+        setActiveRowIdForKb(null);
     };
     
     const handleDownload = async (src: string, rowId: string) => {
@@ -170,12 +221,22 @@ export const SmartRetouchView: React.FC = () => {
                             <div className="flex flex-col gap-3">
                                 <div className="relative aspect-[3/4] bg-slate-900/60 rounded-2xl border border-slate-700 p-4 overflow-hidden">
                                     {row.originalImage ? (
-                                        <textarea 
-                                            value={row.analysisText}
-                                            onChange={(e) => setRows(prev => prev.map(r => r.id === row.id ? {...r, analysisText: e.target.value} : r))}
-                                            placeholder="在此输入修图指令，或等待 AI 解析..."
-                                            className="w-full h-full bg-transparent border-none resize-none text-slate-300 text-sm focus:ring-0 placeholder-slate-500 custom-scrollbar"
-                                        />
+                                        <>
+                                            <textarea 
+                                                value={row.analysisText}
+                                                onChange={(e) => setRows(prev => prev.map(r => r.id === row.id ? {...r, analysisText: e.target.value} : r))}
+                                                placeholder="在此输入修图指令，或等待 AI 解析..."
+                                                className="w-full h-full bg-transparent border-none resize-none text-slate-300 text-sm focus:ring-0 placeholder-slate-500 custom-scrollbar pb-10"
+                                            />
+                                            <button
+                                                onClick={() => openKbModal(row.id)}
+                                                className="absolute bottom-3 right-3 px-3 py-1.5 bg-gradient-to-r from-fuchsia-600 to-purple-600 hover:from-fuchsia-500 hover:to-purple-500 text-white rounded-lg backdrop-blur-sm transition-all shadow-lg flex items-center gap-1.5 text-xs font-bold z-10 border border-white/10"
+                                                title="从灵感知识库选择"
+                                            >
+                                                <FireIcon className="w-3.5 h-3.5" />
+                                                获取灵感
+                                            </button>
+                                        </>
                                     ) : (
                                         <div className="h-full flex flex-col items-center justify-center text-slate-600 text-center p-4">
                                             <MagicWandIcon className="w-8 h-8 mb-2 opacity-50" />
@@ -248,6 +309,18 @@ export const SmartRetouchView: React.FC = () => {
                     </div>
                 ))}
             </div>
+            
+            {isKbModalOpen && (
+                <KnowledgeBaseModal
+                    onClose={() => setIsKbModalOpen(false)}
+                    onSelectEntry={handleKbSelection}
+                    currentContextPrompt={
+                        rows.find(r => r.id === activeRowIdForKb)?.understandingText || 
+                        rows.find(r => r.id === activeRowIdForKb)?.analysisText || 
+                        undefined
+                    }
+                />
+            )}
         </div>
     );
 };

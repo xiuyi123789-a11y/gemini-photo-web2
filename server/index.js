@@ -4,12 +4,21 @@ import fs from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
+import Replicate from 'replicate';
+
+import dotenv from 'dotenv';
+dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = 3001;
+
+// Initialize Replicate client
+const replicate = new Replicate({
+  auth: process.env.REPLICATE_API_TOKEN,
+});
 
 // Middleware
 app.use(cors());
@@ -22,6 +31,7 @@ console.log('Data directory path:', DATA_DIR);
 const getUserDir = (userId) => path.join(DATA_DIR, userId);
 const getUserImagesDir = (userId) => path.join(DATA_DIR, userId, 'images');
 const getUserKnowledgeFile = (userId) => path.join(DATA_DIR, userId, 'knowledge.json');
+const ERROR_NOTEBOOK_PATH = path.join(DATA_DIR, 'error_notebook.json');
 
 // Ensure data directory exists
 fs.ensureDirSync(DATA_DIR);
@@ -39,6 +49,237 @@ const validateUserId = (req, res, next) => {
   req.userId = userId;
   next();
 };
+
+// --- Replicate API Endpoints ---
+
+// Helper to stream Replicate output
+const streamReplicate = async (res, model, input) => {
+  try {
+    res.setHeader('Content-Type', 'text/plain');
+    res.setHeader('Transfer-Encoding', 'chunked');
+
+    for await (const event of replicate.stream(model, { input })) {
+      res.write(event.toString());
+    }
+    res.end();
+  } catch (error) {
+    console.error('Replicate stream error:', error);
+    if (!res.headersSent) {
+        res.status(500).json({ error: error.message });
+    } else {
+        res.end();
+    }
+  }
+};
+
+// POST /api/analyze-image (Vision Analysis)
+app.post('/api/analyze-image', validateUserId, async (req, res) => {
+  try {
+    const { images, prompt } = req.body;
+    
+    // Ensure images is an array
+    const imageInputs = Array.isArray(images) ? images : [images];
+
+    // Using openai/gpt-4o-mini for vision analysis
+    const input = {
+        top_p: 1,
+        prompt: prompt,
+        messages: [],
+        image_input: imageInputs,
+        temperature: 1,
+        system_prompt: "You are a helpful assistant.",
+        presence_penalty: 0,
+        frequency_penalty: 0,
+        max_completion_tokens: 4096
+    };
+    
+    console.log('Starting analysis with openai/gpt-4o-mini...');
+    await streamReplicate(res, "openai/gpt-4o-mini", input);
+
+  } catch (error) {
+    console.error('Analysis error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Helper to save Replicate output (Stream or URL) to local file
+const saveReplicateOutput = async (outputItem, userId) => {
+  if (!outputItem) return null;
+
+  try {
+    const filename = `${uuidv4()}.png`;
+    const imagesDir = getUserImagesDir(userId);
+    await fs.ensureDir(imagesDir);
+    const filePath = path.join(imagesDir, filename);
+
+    let buffer;
+    if (typeof outputItem === 'string') {
+        // If it's a URL, download it
+        console.log(`Downloading generated image from: ${outputItem}`);
+        const response = await fetch(outputItem);
+        if (!response.ok) throw new Error(`Failed to download image: ${response.statusText}`);
+        buffer = await response.arrayBuffer();
+    } else {
+        // If it's a stream/blob/buffer
+        buffer = await new Response(outputItem).arrayBuffer();
+    }
+
+    await fs.writeFile(filePath, Buffer.from(buffer));
+    console.log(`Saved generated image to: ${filePath}`);
+    return `/api/images/${userId}/${filename}`;
+  } catch (error) {
+    console.error('Error saving Replicate output:', error);
+    throw error;
+  }
+};
+
+// Helper to run Replicate prediction with polling for better error handling
+const runReplicatePrediction = async (model, input) => {
+    console.log(`Starting prediction for model: ${model}`);
+    let prediction = await replicate.predictions.create({
+        version: undefined, // Let Replicate pick the version for the model path
+        model: model,
+        input: input
+    });
+
+    console.log(`Prediction created: ${prediction.id}`);
+
+    // Poll for completion
+    while (prediction.status !== 'succeeded' && prediction.status !== 'failed' && prediction.status !== 'canceled') {
+        await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
+        prediction = await replicate.predictions.get(prediction.id);
+        // console.log(`Prediction status: ${prediction.status}`);
+    }
+
+    if (prediction.status === 'failed' || prediction.status === 'canceled') {
+        console.error('Prediction failed/canceled:', prediction.error);
+        console.error('Prediction logs:', prediction.logs);
+        throw new Error(`Prediction failed: ${prediction.error || 'Unknown error'}`);
+    }
+
+    if (!prediction.output) {
+        console.error('Prediction succeeded but output is empty. Logs:', prediction.logs);
+        throw new Error('Prediction succeeded but returned no output');
+    }
+
+    return prediction.output;
+};
+
+// POST /api/generate-image (Image Generation)
+app.post('/api/generate-image', validateUserId, async (req, res) => {
+    try {
+        const { prompt, aspect_ratio, image_input } = req.body;
+
+        // Using 'google/nano-banana' as requested
+        const input = {
+            prompt: prompt,
+            aspect_ratio: aspect_ratio || "3:4",
+            output_format: "jpg",
+            // If image_input is provided (as array of URLs), include it
+            ...(image_input && Array.isArray(image_input) && image_input.length > 0 ? { image_input } : {})
+        };
+
+        console.log('Generating with google/nano-banana, input:', JSON.stringify(input, null, 2));
+
+        // Use the polling helper instead of replicate.run
+        const output = await runReplicatePrediction("google/nano-banana", input);
+        
+        console.log('Replicate Output:', JSON.stringify(output, null, 2));
+
+        // Handle output (URL or Stream)
+        let outputUrl;
+        if (Array.isArray(output)) {
+            outputUrl = output[0];
+        } else if (typeof output === 'object' && output.url) {
+            outputUrl = output.url();
+        } else {
+            outputUrl = output;
+        }
+
+        if (!outputUrl || typeof outputUrl !== 'string') {
+            throw new Error(`Invalid output from Replicate: ${JSON.stringify(output)}`);
+        }
+
+        const imageUrl = await saveReplicateOutput(outputUrl, req.userId);
+        
+        res.json({ imageUrl });
+        
+    } catch (error) {
+        console.error('Generation error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// POST /api/retouch-image (Image-to-Image / Inpainting)
+app.post('/api/retouch-image', validateUserId, async (req, res) => {
+    try {
+        const { image, mask, prompt, strength, image_input } = req.body;
+        
+        let input;
+        let model;
+
+        if (mask) {
+            // Inpainting mode using Flux Fill
+            console.log('Using Inpainting Mode (Flux Fill)');
+            model = "black-forest-labs/flux-fill-dev";
+            input = {
+                image: image,
+                mask: mask,
+                prompt: prompt,
+                guidance: 30, // Standard for Flux Fill
+                output_format: "jpg",
+                aspect_ratio: "3:4" // Optional, but good to keep consistent
+            };
+        } else {
+            // User requested model: google/nano-banana
+            console.log('Using Creative Mode (google/nano-banana)');
+            model = "google/nano-banana";
+            
+            // Construct image_input array: [Master Image, ...Fusion Images]
+            const inputs = [image];
+            if (image_input && Array.isArray(image_input)) {
+                inputs.push(...image_input);
+            }
+
+            input = {
+                prompt: prompt,
+                image_input: inputs,
+                aspect_ratio: "match_input_image",
+                output_format: "jpg"
+            };
+        }
+
+        console.log(`Retouching with ${model}, input keys:`, Object.keys(input));
+
+        // Use the polling helper instead of replicate.run
+        const output = await runReplicatePrediction(model, input);
+        
+        console.log('Replicate Output (Retouch):', JSON.stringify(output, null, 2));
+
+        let outputUrl;
+        if (Array.isArray(output)) {
+            outputUrl = output[0];
+        } else if (typeof output === 'object' && output.url) {
+            outputUrl = output.url();
+        } else {
+            outputUrl = output;
+        }
+
+        if (!outputUrl || typeof outputUrl !== 'string') {
+            throw new Error(`Invalid output from Replicate: ${JSON.stringify(output)}`);
+        }
+
+        const imageUrl = await saveReplicateOutput(outputUrl, req.userId);
+        res.json({ imageUrl });
+
+    } catch (error) {
+        console.error('Retouch error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// --- End Replicate Endpoints ---
+
 
 // GET /api/knowledge
 app.get('/api/knowledge', validateUserId, async (req, res) => {
@@ -102,6 +343,58 @@ app.post('/api/knowledge', validateUserId, async (req, res) => {
   }
 });
 
+// --- Error Notebook Endpoints ---
+
+// POST /api/error-notebook (Add Entry)
+app.post('/api/error-notebook', async (req, res) => {
+    try {
+        const { issue, solution, tags } = req.body;
+        if (!issue || !solution) {
+            return res.status(400).json({ error: 'Issue and solution are required' });
+        }
+
+        await fs.ensureFile(ERROR_NOTEBOOK_PATH);
+        let notebook = [];
+        try {
+            notebook = await fs.readJson(ERROR_NOTEBOOK_PATH);
+        } catch (e) {
+            notebook = [];
+        }
+
+        const newEntry = {
+            id: uuidv4(),
+            issue,
+            solution,
+            timestamp: new Date().toISOString(),
+            tags: tags || []
+        };
+
+        notebook.push(newEntry);
+        await fs.writeJson(ERROR_NOTEBOOK_PATH, notebook, { spaces: 2 });
+        
+        console.log(`Added entry to error notebook: ${issue}`);
+        res.json(newEntry);
+    } catch (error) {
+        console.error('Error writing to error notebook:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// GET /api/error-notebook (Get Entries)
+app.get('/api/error-notebook', async (req, res) => {
+    try {
+        if (await fs.pathExists(ERROR_NOTEBOOK_PATH)) {
+            const notebook = await fs.readJson(ERROR_NOTEBOOK_PATH);
+            res.json(notebook);
+        } else {
+            res.json([]);
+        }
+    } catch (error) {
+        console.error('Error reading error notebook:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 // Serve user images
 app.get('/api/images/:userId/:filename', async (req, res) => {
   const { userId, filename } = req.params;
@@ -120,6 +413,6 @@ app.get('/api/images/:userId/:filename', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server running on http://0.0.0.0:${PORT}`);
 });

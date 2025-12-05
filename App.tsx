@@ -19,7 +19,15 @@ import { ApiKeyModal } from './components/ApiKeyModal';
 import { useApiKey } from './src/contexts/ApiKeyContext';
 
 const App: React.FC = () => {
-  const [currentView, setCurrentView] = useState<View>('analyze');
+  const [currentView, setCurrentViewState] = useState<View>(() => {
+      return (localStorage.getItem('currentView') as View) || 'analyze';
+  });
+  
+  const setCurrentView = (view: View) => {
+      setCurrentViewState(view);
+      localStorage.setItem('currentView', view);
+  };
+
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const { apiKey } = useApiKey();
 
@@ -76,8 +84,9 @@ const App: React.FC = () => {
                 </div>
               </>
             ) : (
-              <div className="text-center py-12">
-                <p className="text-lg text-slate-400">请输入您的 API Key 以继续。</p>
+              <div className="text-center">
+                <h2 className="text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-500 mb-6">欢迎来到量子跃迁 AI 修图工作室</h2>
+                <p className="text-lg text-slate-400">请输入您的 replicate APIkey 以继续。</p>
               </div>
             )}
           </div>

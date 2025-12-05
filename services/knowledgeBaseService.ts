@@ -3,7 +3,7 @@ import { KnowledgeBaseEntry, AnalysisResult, ImageFile, KnowledgeBaseCategory } 
 
 const KB_STORAGE_KEY = 'quantum_leap_ai_studio_kb';
 const USER_ID_KEY = 'quantum_leap_user_id';
-const API_BASE_URL = ''; // Use empty path for static file fetch
+const API_BASE_URL = '/api'; // Use proxy path
 
 // Polyfill for uuid if crypto.randomUUID is not available (e.g. non-secure context)
 function uuidv4() {
@@ -77,7 +77,7 @@ export const resizeImage = (file: File): Promise<string> => {
 export const getKnowledgeBase = async (): Promise<KnowledgeBaseEntry[]> => {
   try {
     const userId = getUserId();
-    const response = await fetch(`${API_BASE_URL}/knowledge.json`, {
+    const response = await fetch(`${API_BASE_URL}/knowledge`, {
       headers: {
         'x-user-id': userId
       }
@@ -130,60 +130,122 @@ export const addMultipleKnowledgeBaseEntries = async (entries: Omit<KnowledgeBas
 export const addAnalysisResultToKB = async (result: AnalysisResult, imageFiles: ImageFile[]): Promise<void> => {
     const newEntries: Omit<KnowledgeBaseEntry, 'id' | 'usageCount'>[] = [];
     const thumbnailPreviews = await Promise.all(imageFiles.map(img => resizeImage(img.file)));
+    const groupId = uuidv4(); // Generate a group ID for this batch
 
     // Add consistent elements (associated with the first image)
     const { consistent_elements, inconsistent_elements } = result;
     const firstImagePreview = thumbnailPreviews[0];
 
-    // --- Create FULL PROMPT entry ---
-    const consistentText = `主要主体: ${consistent_elements.primary_subject.item} (品牌: ${consistent_elements.primary_subject.brand}), 关键特征: ${consistent_elements.primary_subject.key_features.join(', ')}, 材质: ${consistent_elements.primary_subject.materials.join(', ')}.
+    // --- New Structure Handling ---
+    if (consistent_elements.synthesized_definition) {
+        const def = consistent_elements.synthesized_definition;
+        
+        const consistentText = `核心主体: ${def.core_subject_details}. 人物特征: ${def.human_features || '无'}. 场景氛围: ${def.scene_atmosphere || '纯净背景'}. 视觉质量: ${def.visual_quality}.`;
+        
+        const firstVariable = inconsistent_elements[0];
+        const variableText = firstVariable ? `[${firstVariable.content_type}] ${firstVariable.unique_features}` : '';
+
+        // FULL PROMPT
+        newEntries.push({
+            category: KnowledgeBaseCategory.FULL_PROMPT,
+            promptFragment: `完整复刻: ${def.subject_type}`,
+            sourceImagePreview: firstImagePreview,
+            fullPrompt: {
+                consistentPrompt: consistentText,
+                variablePrompt: variableText
+            },
+            groupId
+        });
+
+        // FRAGMENTS
+        if (def.scene_atmosphere && def.scene_atmosphere !== 'null') {
+            newEntries.push({
+                category: KnowledgeBaseCategory.SCENE,
+                promptFragment: `场景: ${def.scene_atmosphere}`,
+                sourceImagePreview: firstImagePreview,
+                groupId
+            });
+        }
+        
+        newEntries.push({
+            category: KnowledgeBaseCategory.STYLE,
+            promptFragment: `风格: ${def.visual_quality}`,
+            sourceImagePreview: firstImagePreview,
+            groupId
+        });
+
+        // Inconsistent Elements
+        for (const item of inconsistent_elements) {
+            const imageIndex = item.image_index; // New structure is 0-based index directly
+            if (imageIndex < 0 || imageIndex >= thumbnailPreviews.length) continue;
+            const preview = thumbnailPreviews[imageIndex];
+
+            newEntries.push({
+                category: KnowledgeBaseCategory.COMPOSITION, // Defaulting to Composition for now as it captures framing/pose
+                promptFragment: `[${item.content_type}] ${item.unique_features}`,
+                sourceImagePreview: preview,
+                groupId
+            });
+        }
+
+        addMultipleKnowledgeBaseEntries(newEntries);
+        return;
+    }
+
+    // --- Legacy Structure Handling ---
+    if (consistent_elements.primary_subject) {
+        const consistentText = `主要主体: ${consistent_elements.primary_subject.item} (品牌: ${consistent_elements.primary_subject.brand}), 关键特征: ${consistent_elements.primary_subject.key_features.join(', ')}, 材质: ${consistent_elements.primary_subject.materials.join(', ')}.
 场景环境: ${consistent_elements.scene_environment.general_location}, 包含 ${consistent_elements.scene_environment.shared_elements.join(', ')} 等元素.
 风格与质量: ${consistent_elements.image_quality_and_composition.style}, 使用 ${consistent_elements.image_quality_and_composition.lens_type} 拍摄, 光照为 ${consistent_elements.image_quality_and_composition.lighting}, 画质 ${consistent_elements.image_quality_and_composition.quality}.
 情感氛围: ${consistent_elements.primary_subject.emotional_tone}.`;
 
-    const firstVariable = inconsistent_elements[0];
-    const variableText = firstVariable ? `宽高比: ${firstVariable.aspect_ratio}. 景别: ${firstVariable.framing}. 姿势: ${firstVariable.subject_pose}. 人物描述 (重要): ${firstVariable.person_description}. 独特细节: ${firstVariable.unique_details}. 相机设置: ${firstVariable.camera_settings}.` : '';
+        const firstVariable = inconsistent_elements[0];
+        const variableText = firstVariable ? `宽高比: ${firstVariable.aspect_ratio}. 景别: ${firstVariable.framing}. 姿势: ${firstVariable.subject_pose}. 人物描述 (重要): ${firstVariable.person_description}. 独特细节: ${firstVariable.unique_details}. 相机设置: ${firstVariable.camera_settings}.` : '';
 
-    newEntries.push({
-        category: KnowledgeBaseCategory.FULL_PROMPT,
-        promptFragment: `完整复刻: ${consistent_elements.primary_subject.item} 在 ${consistent_elements.scene_environment.general_location}`,
-        sourceImagePreview: firstImagePreview,
-        fullPrompt: {
-            consistentPrompt: consistentText,
-            variablePrompt: variableText
-        }
-    });
+        newEntries.push({
+            category: KnowledgeBaseCategory.FULL_PROMPT,
+            promptFragment: `完整复刻: ${consistent_elements.primary_subject.item} 在 ${consistent_elements.scene_environment.general_location}`,
+            sourceImagePreview: firstImagePreview,
+            fullPrompt: {
+                consistentPrompt: consistentText,
+                variablePrompt: variableText
+            },
+            groupId
+        });
 
-    // --- Create FRAGMENT entries ---
-    newEntries.push({
-        category: KnowledgeBaseCategory.SCENE,
-        promptFragment: `场景环境: ${consistent_elements.scene_environment.general_location}, 包含 ${consistent_elements.scene_environment.shared_elements.join(', ')}`,
-        sourceImagePreview: firstImagePreview
-    });
-     newEntries.push({
-        category: KnowledgeBaseCategory.STYLE,
-        promptFragment: `风格与质量: ${consistent_elements.image_quality_and_composition.style}, 使用 ${consistent_elements.image_quality_and_composition.lens_type}, 光照为 ${consistent_elements.image_quality_and_composition.lighting}`,
-        sourceImagePreview: firstImagePreview
-    });
+        // --- Create FRAGMENT entries ---
+        newEntries.push({
+            category: KnowledgeBaseCategory.SCENE,
+            promptFragment: `场景环境: ${consistent_elements.scene_environment.general_location}, 包含 ${consistent_elements.scene_environment.shared_elements.join(', ')}`,
+            sourceImagePreview: firstImagePreview,
+            groupId
+        });
+         newEntries.push({
+            category: KnowledgeBaseCategory.STYLE,
+            promptFragment: `风格与质量: ${consistent_elements.image_quality_and_composition.style}, 使用 ${consistent_elements.image_quality_and_composition.lens_type}, 光照为 ${consistent_elements.image_quality_and_composition.lighting}`,
+            sourceImagePreview: firstImagePreview,
+            groupId
+        });
 
-    // Add inconsistent elements
-    for (const item of inconsistent_elements) {
-        const imageIndex = item.image_index - 1;
-        if (imageIndex < 0 || imageIndex >= thumbnailPreviews.length) continue;
-        const preview = thumbnailPreviews[imageIndex];
+        // Add inconsistent elements
+        for (const item of inconsistent_elements) {
+            const imageIndex = item.image_index - 1;
+            if (imageIndex < 0 || imageIndex >= thumbnailPreviews.length) continue;
+            const preview = thumbnailPreviews[imageIndex];
 
-        if (item.subject_pose) {
-            newEntries.push({ category: KnowledgeBaseCategory.POSE, promptFragment: item.subject_pose, sourceImagePreview: preview });
+            if (item.subject_pose) {
+                newEntries.push({ category: KnowledgeBaseCategory.POSE, promptFragment: item.subject_pose, sourceImagePreview: preview, groupId });
+            }
+            if (item.framing) {
+                newEntries.push({ category: KnowledgeBaseCategory.COMPOSITION, promptFragment: item.framing, sourceImagePreview: preview, groupId });
+            }
+            if (item.person_description && item.person_description.toLowerCase().includes('穿着')) {
+                 newEntries.push({ category: KnowledgeBaseCategory.CLOTHING, promptFragment: item.person_description, sourceImagePreview: preview, groupId });
+            }
         }
-        if (item.framing) {
-            newEntries.push({ category: KnowledgeBaseCategory.COMPOSITION, promptFragment: item.framing, sourceImagePreview: preview });
-        }
-        if (item.person_description && item.person_description.toLowerCase().includes('穿着')) {
-             newEntries.push({ category: KnowledgeBaseCategory.CLOTHING, promptFragment: item.person_description, sourceImagePreview: preview });
-        }
+        
+        addMultipleKnowledgeBaseEntries(newEntries);
     }
-    
-    addMultipleKnowledgeBaseEntries(newEntries);
 };
 
 export const addRetouchLearningEntry = async (originalFile: File, analysisText: string): Promise<void> => {
@@ -193,12 +255,56 @@ export const addRetouchLearningEntry = async (originalFile: File, analysisText: 
             category: KnowledgeBaseCategory.RETOUCH_LEARNING,
             promptFragment: analysisText, // Storing the successful analysis/suggestion as the fragment
             sourceImagePreview: thumbnail,
-            learningContext: analysisText // Redundant but explicit for the AI learning purpose
+            learningContext: analysisText, // Redundant but explicit for the AI learning purpose
+            groupId: uuidv4()
         };
-        addMultipleKnowledgeBaseEntries([newEntry]);
-        console.log("Saved retouching memory to Knowledge Base for AI learning.");
-    } catch (error) {
-        console.error("Failed to save retouch learning entry:", error);
+        
+        await addMultipleKnowledgeBaseEntries([newEntry]);
+    } catch (e) {
+        console.error("Failed to add retouch learning entry", e);
+    }
+};
+
+export const saveKBAnalysisToKB = async (analysis: any, imageFile: File): Promise<void> => {
+    // analysis is KnowledgeBaseAnalysis
+    const thumbnail = await resizeImage(imageFile);
+    const groupId = uuidv4();
+    const newEntries: Omit<KnowledgeBaseEntry, 'id' | 'usageCount'>[] = [];
+
+    // Add Holistic Description (Motherboard) as Full Prompt or Style? 
+    // Maybe Full Prompt category but without strict Consistent/Variable split?
+    // Or just treat it as SCENE/STYLE combination?
+    // Let's add it as FULL_PROMPT for now, or maybe we don't save the motherboard description directly if not requested.
+    // But user says "save to knowledge base".
+    
+    if (analysis.holistic_description) {
+         newEntries.push({
+            category: KnowledgeBaseCategory.FULL_PROMPT,
+            promptFragment: `全图解构: ${analysis.holistic_description.substring(0, 50)}...`,
+            sourceImagePreview: thumbnail,
+            fullPrompt: {
+                consistentPrompt: analysis.holistic_description,
+                variablePrompt: ""
+            },
+            groupId
+        });
+    }
+
+    if (analysis.fragments) {
+        Object.entries(analysis.fragments).forEach(([category, content]) => {
+            if (content && typeof content === 'string') {
+                newEntries.push({
+                    category: category as KnowledgeBaseCategory,
+                    promptFragment: content,
+                    sourceImagePreview: thumbnail,
+                    groupId
+                });
+            }
+        });
+    }
+
+    if (newEntries.length > 0) {
+        await addMultipleKnowledgeBaseEntries(newEntries);
     }
 };
 
@@ -210,9 +316,75 @@ export const incrementEntryUsage = async (id: string): Promise<void> => {
     await saveKnowledgeBase(updatedKB);
 };
 
+// --- Deletion & Trash Bin Logic ---
 
-export const deleteKnowledgeBaseEntry = async (id: string): Promise<void> => {
+// Soft delete (Move to Trash)
+export const softDeleteKnowledgeBaseEntries = async (ids: string[]): Promise<void> => {
   const currentKB = await getKnowledgeBase();
-  const updatedKB = currentKB.filter(entry => entry.id !== id);
+  const now = Date.now();
+  
+  // Find entries to delete
+  const entriesToDelete = currentKB.filter(e => ids.includes(e.id));
+  const groupIdsToDelete = new Set<string>();
+
+  // Identify FULL_PROMPT entries to trigger cascading delete
+  entriesToDelete.forEach(e => {
+    if (e.category === KnowledgeBaseCategory.FULL_PROMPT && e.groupId) {
+        groupIdsToDelete.add(e.groupId);
+    }
+  });
+
+  const updatedKB = currentKB.map(entry => {
+      // Delete if ID matches OR if it belongs to a group being deleted (Cascade)
+      if (ids.includes(entry.id) || (entry.groupId && groupIdsToDelete.has(entry.groupId))) {
+          return { ...entry, deletedAt: now };
+      }
+      return entry;
+  });
+
   await saveKnowledgeBase(updatedKB);
+};
+
+// Restore from Trash
+export const restoreKnowledgeBaseEntries = async (ids: string[]): Promise<void> => {
+    const currentKB = await getKnowledgeBase();
+    const updatedKB = currentKB.map(entry => {
+        if (ids.includes(entry.id)) {
+             // Remove deletedAt field
+            const { deletedAt, ...rest } = entry;
+            return rest;
+        }
+        return entry;
+    });
+    await saveKnowledgeBase(updatedKB);
+};
+
+// Permanently Delete
+export const permanentlyDeleteKnowledgeBaseEntries = async (ids: string[]): Promise<void> => {
+    const currentKB = await getKnowledgeBase();
+    const updatedKB = currentKB.filter(entry => !ids.includes(entry.id));
+    await saveKnowledgeBase(updatedKB);
+};
+
+// Clean up old trash (older than 30 days)
+export const cleanUpTrash = async (): Promise<void> => {
+    const currentKB = await getKnowledgeBase();
+    const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
+    
+    const updatedKB = currentKB.filter(entry => {
+        if (entry.deletedAt && entry.deletedAt < thirtyDaysAgo) {
+            return false; // Delete
+        }
+        return true; // Keep
+    });
+    
+    if (updatedKB.length !== currentKB.length) {
+        await saveKnowledgeBase(updatedKB);
+        console.log("Auto-cleaned up old trash items.");
+    }
+};
+
+// Kept for backward compatibility if needed, but softDelete is preferred
+export const deleteKnowledgeBaseEntry = async (id: string): Promise<void> => {
+  await softDeleteKnowledgeBaseEntries([id]);
 };
