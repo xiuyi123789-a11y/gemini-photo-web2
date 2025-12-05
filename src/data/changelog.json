@@ -1,5 +1,24 @@
 [
   {
+    "version": "v1.1.0",
+    "date": "2025-12-05",
+    "changes": [
+      {
+        "summary": "核心生成引擎升级：AI场景导演模式",
+        "details": "• 模型升级：非蒙版生成模式已切换至 google/nano-banana，显著提升创意生成能力。\n• 提示词工程：引入 'AI Scene Director & Consistency Enforcer' 协议，实施 'Inheritance & Overwrite' 规则，确保在改变画面构图（Variable）的同时严格继承角色资产（Consistent）。"
+      },
+      {
+        "summary": "关键Bug修复与稳定性提升",
+        "details": "• 修复白屏崩溃：解决了在点击“添加另一个画面”时，因 crypto.randomUUID 在非安全上下文不可用导致的页面崩溃问题，替换为全兼容的 uuidv4 polyfill。\n• 构建修复：修正了 changelog.json 路径引用错误及 .gitignore 配置问题。"
+      },
+      {
+        "summary": "工程化与安全性改进",
+        "details": "• 安全加固：移除服务端硬编码 API Token，全面强制使用环境变量。\n• 自动化发布：新增 `npm run release` 指令，实现 Changelog 自动生成与 Git 发布流的自动化。"
+      }
+    ],
+    "type": "Feature"
+  },
+  {
     "version": "v1.0.2",
     "date": "2025-12-05",
     "changes": [
