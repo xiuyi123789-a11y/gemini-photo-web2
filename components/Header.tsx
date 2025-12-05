@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import { EyeIcon, EyeSlashIcon } from './IconComponents';
 import { ChangelogModal } from './ChangelogModal';
-import changelogData from '../src/data/changelog.json';
+import changelogData from '@/src/data/changelog.json';
 
 import { useApiKey } from '../src/contexts/ApiKeyContext';
 

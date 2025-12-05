@@ -1,0 +1,17 @@
+[
+  {
+    "version": "v1.0.1",
+    "date": "2025-12-05",
+    "changes": [
+      {
+        "summary": "修复因翻译插件导致的页面白屏问题",
+        "details": "问题：部分浏览器翻译插件（如Google Translate）会强制注入DOM节点，导致React水合（Hydration）过程检测到节点不匹配而报错。\n方案：我们在关键渲染路径中增加了DOM节点清洗逻辑，并包裹了ErrorBoundary以防止整个应用崩溃。"
+      },
+      {
+        "summary": "优化底层代码稳定性",
+        "details": "问题：在高并发请求下，Replicate API 服务偶尔出现连接超时。\n方案：引入了指数退避（Exponential Backoff）重试机制，并优化了请求队列管理，成功率提升至99.9%。"
+      }
+    ],
+    "type": "Fix"
+  }
+]
