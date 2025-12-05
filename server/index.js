@@ -13,7 +13,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 
 // Initialize Replicate client (Fallback)
 const defaultReplicate = new Replicate({
@@ -77,6 +77,11 @@ const validateUserId = (req, res, next) => {
 };
 
 // --- Replicate API Endpoints ---
+
+// Health Check Endpoint
+app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok', port: PORT, timestamp: new Date().toISOString() });
+});
 
 // Helper to stream Replicate output
 const streamReplicate = async (res, client, model, input) => {
