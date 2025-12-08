@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import multer from 'multer';
 import fs from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -41,19 +42,24 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization', 'x-replicate-token', 'x-user-id']
 }));
 app.use(express.json({ limit: '50mb' })); // Increase limit for base64 images
+app.use(express.urlencoded({ extended: true }));
+
+// 2. Multer Configuration (Critical for file uploads)
+const upload = multer({
+  storage: multer.memoryStorage(), // Store in memory for speed
+  limits: { fileSize: 20 * 1024 * 1024 } // Limit to 20MB
+});
 
 // Debug middleware to log headers
 app.use((req, res, next) => {
     console.log(`[Request] ${req.method} ${req.path}`);
-    console.log('[Headers] x-replicate-token present:', !!req.headers['x-replicate-token']);
-    console.log('[Headers] x-user-id:', req.headers['x-user-id']);
+    // console.log('[Headers] x-replicate-token present:', !!req.headers['x-replicate-token']);
     next();
 });
 
 // --- Directories ---
 const DATA_DIR = path.join(__dirname, '../data');
 const DIST_DIR = path.join(__dirname, '../dist'); // Frontend build directory
-console.log('Data directory path:', DATA_DIR);
 
 // Helper to get user directory
 const getUserDir = (userId) => path.join(DATA_DIR, userId);
@@ -78,26 +84,6 @@ const validateUserId = (req, res, next) => {
   }
   req.userId = userId;
   next();
-};
-
-// Helper to stream Replicate output
-const streamReplicate = async (res, client, model, input) => {
-  try {
-    res.setHeader('Content-Type', 'text/plain');
-    res.setHeader('Transfer-Encoding', 'chunked');
-
-    for await (const event of client.stream(model, { input })) {
-      res.write(event.toString());
-    }
-    res.end();
-  } catch (error) {
-    console.error('Replicate stream error:', error);
-    if (!res.headersSent) {
-        res.status(500).json({ error: error.message });
-    } else {
-        res.end();
-    }
-  }
 };
 
 // Helper to save Replicate output (Stream or URL) to local file
@@ -131,40 +117,102 @@ const saveReplicateOutput = async (outputItem, userId) => {
   }
 };
 
+// Helper to execute Replicate operations with retry logic for 429 errors
+const executeWithRetry = async (operation, maxRetries = 10) => {
+    let retries = 0;
+    while (true) {
+        try {
+            return await operation();
+        } catch (error) {
+            // Check for 429 status or rate limit message
+            const isRateLimit = error.status === 429 || 
+                                (error.message && error.message.includes('429')) ||
+                                (error.response && error.response.status === 429);
+            
+            if (isRateLimit) {
+                retries++;
+                if (retries > maxRetries) {
+                    console.error(`[Replicate] Max retries (${maxRetries}) exceeded for rate limit.`);
+                    throw error;
+                }
+                
+                // Default backoff: 2s, 4s, 8s...
+                let delay = 2000 * Math.pow(1.5, retries - 1); 
+                
+                // Try to extract retry_after from error
+                try {
+                    // Check headers if available
+                    if (error.response && error.response.headers) {
+                        const retryHeader = error.response.headers.get('retry-after');
+                        if (retryHeader) {
+                            delay = (parseInt(retryHeader, 10) + 1) * 1000;
+                        }
+                    }
+                    // Check message for "retry_after" JSON field
+                    const match = error.message && error.message.match(/"retry_after":\s*(\d+)/);
+                    if (match) {
+                        delay = (parseInt(match[1], 10) + 1) * 1000;
+                    }
+                } catch (e) {
+                    // Ignore parsing errors
+                }
+
+                console.log(`[Replicate] Rate limit hit (429). Retrying in ${Math.round(delay)}ms... (Attempt ${retries}/${maxRetries})`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            } else {
+                throw error;
+            }
+        }
+    }
+};
+
 // Helper to run Replicate prediction with polling for better error handling
-const runReplicatePrediction = async (client, model, input) => {
-    console.log(`Starting prediction for model: ${model}`);
-    let prediction = await client.predictions.create({
-        version: undefined, // Let Replicate pick the version for the model path
-        model: model,
+const runReplicatePrediction = async (client, modelPath, input) => {
+    console.log(`Starting prediction for model: ${modelPath}`);
+    
+    let versionId;
+    
+    // Check if modelPath contains a version hash (owner/name:version)
+    if (modelPath.includes(':')) {
+        versionId = modelPath.split(':')[1];
+    } else {
+        // Fetch latest version dynamically if no hash provided
+        try {
+            const [owner, name] = modelPath.split('/');
+            const modelData = await executeWithRetry(() => client.models.get(owner, name));
+            if (!modelData.latest_version) {
+                throw new Error('Model has no latest version');
+            }
+            versionId = modelData.latest_version.id;
+        } catch (e) {
+            console.error(`Error resolving version for ${modelPath}:`, e);
+            throw new Error(`Failed to resolve latest version for ${modelPath}`);
+        }
+    }
+
+    let prediction = await executeWithRetry(() => client.predictions.create({
+        version: versionId,
         input: input
-    });
+    }));
 
     console.log(`Prediction created: ${prediction.id}`);
 
     // Poll for completion
     while (prediction.status !== 'succeeded' && prediction.status !== 'failed' && prediction.status !== 'canceled') {
         await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
-        prediction = await client.predictions.get(prediction.id);
-        // console.log(`Prediction status: ${prediction.status}`);
+        prediction = await executeWithRetry(() => client.predictions.get(prediction.id));
     }
 
     if (prediction.status === 'failed' || prediction.status === 'canceled') {
         console.error('Prediction failed/canceled:', prediction.error);
-        console.error('Prediction logs:', prediction.logs);
         throw new Error(`Prediction failed: ${prediction.error || 'Unknown error'}`);
-    }
-
-    if (!prediction.output) {
-        console.error('Prediction succeeded but output is empty. Logs:', prediction.logs);
-        throw new Error('Prediction succeeded but returned no output');
     }
 
     return prediction.output;
 };
 
 // ==========================================
-// 🚨 API ROUTES (MUST BE FIRST) 🚨
+// 🚨 API ROUTES 🚨
 // ==========================================
 
 // 1. Health Check
@@ -172,34 +220,163 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', port: PORT, timestamp: new Date().toISOString() });
 });
 
-// 2. POST /api/analyze-image (Vision Analysis)
-app.post('/api/analyze-image', validateUserId, async (req, res) => {
+// 2. POST /api/analyze-image (Vision Analysis - UPGRADED)
+app.post('/api/analyze-image', upload.single('image'), async (req, res) => {
   try {
-    const replicateClient = getReplicateClient(req);
-    const { images, prompt } = req.body;
-    
-    // Ensure images is an array
-    const imageInputs = Array.isArray(images) ? images : [images];
+    if (!req.file) {
+      return res.status(400).json({ error: '未接收到图片文件' });
+    }
 
-    // Using openai/gpt-4o-mini for vision analysis
+    console.log(`[Server] 收到图片: ${req.file.originalname} (${req.file.size} bytes)`);
+
+    const mimeType = req.file.mimetype;
+    const base64Image = req.file.buffer.toString('base64');
+    const dataUri = `data:${mimeType};base64,${base64Image}`;
+
+    console.log('[Server] 正在调用 Replicate 模型 (openai/gpt-4o-mini)...');
+    
+    const replicateClient = getReplicateClient(req);
+
+    // --- 高级提示词配置 ---
+    const SYSTEM_PROMPT = `ROLE: Senior Visual Asset Analyst & Physics Engine Specialist
+(角色设定：资深视觉资产分析师与物理引擎专家。你拥有商业摄影师的布光逻辑、工业设计师的材质库、以及CG渲染师的物理参数认知。)`;
+
+    const USER_INSTRUCTION = `
+# TASK:
+Perform a "Microscopic Visual Deconstruction" of the provided image.
+Your goal is to extract a dataset so detailed that a 3D artist could reconstruct the scene physically, or an AI could replicate it pixel-perfectly.
+
+# CRITICAL ANALYSIS GUIDELINES (THE "MICROSCOPE" RULE):
+1. NO GENERIC ADJECTIVES: Do not say "nice skin"; say "semi-matte skin with visible pores and slight sebum shine on the T-zone".
+2. MATERIAL PHYSICS: Always describe the surface interaction: Roughness, Reflectivity (IOR), Transparency, and Imperfections (scratches, dust, fingerprints).
+3. LIGHT INTERACTION: Describe how light hits the object: Subsurface Scattering (SSS), Fresnel Effect, Caustics, or Anisotropy.
+4. MANUFACTURING DETAILS: Look for seams, stitching, mold marks, oxidation, or wear & tear.
+
+# ANALYSIS PROTOCOL (7-DIMENSION STRUCTURE):
+1. Subject (主体): The core focus.
+2. Pose & Action (姿势&动作): Tension, Gravity, Flow.
+3. Scene & Environment (场景&环境): Spatial context, Surface textures.
+4. Composition & Camera (构图&镜头): Focal length, Depth of Field, Angles.
+5. Lighting & Atmosphere (光照&氛围): Light source, Modifiers, Mood.
+6. Apparel & Styling (服装&造型): Fabric weight, Weave, Accessories.
+7. Style & Post-Processing (风格&后期): Color science, Grain, Rendering style.
+
+# OUTPUT FORMAT (STRICT TEMPLATE):
+Output in **Chinese**. Use the exact structure below.
+If a category is not present, explicitly write [N/A]. DO NOT HALLUCINATE.
+
+## OUTPUT EXAMPLES (LEARN FROM THIS LEVEL OF GRANULARITY):
+
+### Scenario A: Complex Product Still Life (e.g., Vintage Sneaker)
+**1. 主体 (Subject):**
+* **核心物体:** 1985年复古篮球鞋（左脚，悬浮状态）。
+* **材质物理:**
+  * *鞋面A:* **长绒粗糙麂皮 (Rough-out Suede)**，深灰色，表面有明显的**手指抚摸留下的色差轨迹**，绒毛在边缘处呈现不规则的**磨损泛白**。
+  * *鞋面B:* **裂纹漆皮 (Cracked Leather)**，白色，随着弯折处展现出自然的**龟裂纹理**，裂缝中渗入微尘。
+* **工艺细节:** 中底为 **EVA发泡材质**，表面带有**注塑模具的微细颗粒感**，且因时间久远呈现**氧化后的奶油黄**。溢胶在接缝处清晰可见。
+**2. 姿势&动作 (Pose & Action):**
+* **动态:** 动态悬浮，鞋尖向下倾斜 15度。
+* **张力:** 鞋带并非静止下垂，而是呈现**失重漂浮状**。
+**3. 场景&环境 (Scene & Environment):**
+* **支撑物:** 底部有一块**破碎的混凝土块**，断面粗糙，露出内部的**骨料碎石**。
+* **地面:** **黑色镜面亚克力板**，产生高反差倒影，倒影边缘带有**菲涅尔反射**导致的亮度衰减。
+**4. 构图&镜头 (Composition & Camera):**
+* **视角:** 微距平视。
+* **焦段:** 105mm 微距红圈镜头。
+* **景深:** F11 小光圈，确保鞋头到鞋跟都在焦内。
+**5. 光照&氛围 (Lighting & Atmosphere):**
+* **布光:** **三点布光法**。主光为硬光，强调麂皮质感；轮廓光为冷蓝色。
+* **光效:** 鞋底橡胶部分呈现轻微的**次表面散射 (SSS)**，透光处偏红。
+**6. 服装&造型 (Apparel & Styling):**
+* [N/A - 纯产品拍摄]
+**7. 风格&后期 (Style & Post-Processing):**
+* **风格:** 赛博朋克工业风。
+* **后期:** 强烈的**锐化处理**，色差 (Chromatic Aberration) 在画面边缘轻微可见。
+
+### Scenario B: High-End Beauty Portrait (Extreme Close-up)
+**1. 主体 (Subject):**
+* **人物:** 20岁北欧女性面部特写。
+* **皮肤物理:** **超写实皮肤纹理**。可见鼻翼两侧的**毛孔**、脸颊上细微的**白色绒毛**。T区有自然的**皮脂光泽**，而非均匀高光。
+* **眼部:** 虹膜呈现复杂的**放射状纹理**，瞳孔外圈有深色**角膜缘环**。
+**2. 姿势&动作 (Pose & Action):**
+* **微表情:** 嘴唇微张，舌尖轻抵上齿。眼神**失焦**。
+**3. 场景&环境 (Scene & Environment):**
+* **背景:** 深炭灰色背景纸，表面有轻微的**纸张纹理**。
+**4. 构图&镜头 (Composition & Camera):**
+* **构图:** 紧凑构图，头顶被切断。
+* **镜头:** 85mm 人像皇镜。
+* **景深:** F1.2 极浅景深。焦点死锁在**左眼睫毛**上。
+**5. 光照&氛围 (Lighting & Atmosphere):**
+* **布光:** **雷达罩**位于正上方，形成圆环形**眼神光**。
+* **氛围:** 冷艳、高贵。
+**6. 服装&造型 (Apparel & Styling):**
+* **妆容:** **创意湿亮妆**。眼皮上涂有透明唇蜜，产生**不规则的高光反射**。
+* **配饰:** 耳骨夹，材质为**拉丝纯银**，表面有细微的划痕。
+**7. 风格&后期 (Style & Post-Processing):**
+* **色调:** 肤色校正为**冷白皮**，阴影偏青色。
+* **质感:** 保留了**ISO 100 的细腻度**，无噪点。
+
+### Scenario C: Atmospheric Interior (Architectural Visualization)
+**1. 主体 (Subject):**
+* [N/A - 空间为主体]
+**2. 姿势&动作 (Pose & Action):**
+* [N/A - 无生物]
+**3. 场景&环境 (Scene & Environment):**
+* **硬装材质:**
+  * *墙面:* **微水泥**，米灰色，表面有手工涂抹的**刀触肌理**。
+  * *地面:* **老旧回收木地板**，带有**虫眼**、**水渍**和**行走磨损的痕迹**。
+* **软装陈设:**
+  * *沙发:* **亚麻布艺**，米白色，织物纹理粗糙，坐垫处有自然的**塌陷褶皱**。
+  * *玻璃:* 咖啡桌为**钢化茶色玻璃**，边缘有绿色的**切面反光**。
+**4. 构图&镜头 (Composition & Camera):**
+* **视角:** **两点透视**。
+* **镜头:** 24mm 移轴镜头。
+**5. 光照&氛围 (Lighting & Atmosphere):**
+* **自然光:** 傍晚的**黄金时刻**。色温约为 3500K。
+* **光影交互:** 阳光透过窗纱，形成**漫射的柔光**。地面上有窗框拉长的**硬阴影**。
+* **体积光:** 空气中漂浮着**被照亮的灰尘粒子**，形成明显的**丁达尔光束**。
+**6. 服装&造型 (Apparel & Styling):**
+* [N/A - 无]
+**7. 风格&后期 (Style & Post-Processing):**
+* **风格:** 极简主义 (Wabi-sabi)。
+* **后期:** 模拟 **CGI 渲染质感**，高光部分带有轻微的**柔光辉光**。
+
+# FINAL INSTRUCTION:
+Analyze the uploaded image now.
+STRICTLY follow the 7-section structure above.
+MANDATORY: You MUST describe materials, physics, and light interactions with the level of detail shown in the examples. Do not summarize.
+`;
+
+    // Prepare input for openai/gpt-4o-mini
     const input = {
         top_p: 1,
-        prompt: prompt,
+        prompt: req.body.prompt || USER_INSTRUCTION, // 优先使用前端传入的 prompt，否则使用默认详细指令
         messages: [],
-        image_input: imageInputs,
-        temperature: 1,
-        system_prompt: "You are a helpful assistant.",
+        image_input: [dataUri],
+        temperature: 0.2,
+        system_prompt: SYSTEM_PROMPT, // 使用新的角色设定
         presence_penalty: 0,
         frequency_penalty: 0,
-        max_completion_tokens: 4096
+        max_completion_tokens: 3000 // 增加 Token 限制以允许详细输出
     };
-    
-    console.log('Starting analysis with openai/gpt-4o-mini...');
-    await streamReplicate(res, replicateClient, "openai/gpt-4o-mini", input);
+
+    // Use replicate.run() for simpler execution
+    const output = await executeWithRetry(() => replicateClient.run("openai/gpt-4o-mini", { input }));
+
+    const analysisText = Array.isArray(output) ? output.join('') : output.toString();
+    console.log('[Server] 分析完成');
+
+    res.json({
+      success: true,
+      analysis: analysisText
+    });
 
   } catch (error) {
-    console.error('Analysis error:', error);
-    res.status(500).json({ error: error.message });
+    console.error('[Server Error]', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || '智能解析服务出错'
+    });
   }
 });
 
@@ -214,18 +391,13 @@ app.post('/api/generate-image', validateUserId, async (req, res) => {
             prompt: prompt,
             aspect_ratio: aspect_ratio || "3:4",
             output_format: "jpg",
-            // If image_input is provided (as array of URLs), include it
             ...(image_input && Array.isArray(image_input) && image_input.length > 0 ? { image_input } : {})
         };
 
         console.log('Generating with google/nano-banana, input:', JSON.stringify(input, null, 2));
 
-        // Use the polling helper instead of replicate.run
         const output = await runReplicatePrediction(replicateClient, "google/nano-banana", input);
         
-        console.log('Replicate Output:', JSON.stringify(output, null, 2));
-
-        // Handle output (URL or Stream)
         let outputUrl;
         if (Array.isArray(output)) {
             outputUrl = output[0];
@@ -266,16 +438,15 @@ app.post('/api/retouch-image', validateUserId, async (req, res) => {
                 image: image,
                 mask: mask,
                 prompt: prompt,
-                guidance: 30, // Standard for Flux Fill
+                guidance: 30,
                 output_format: "jpg",
-                aspect_ratio: "3:4" // Optional, but good to keep consistent
+                aspect_ratio: "3:4"
             };
         } else {
-            // User requested model: google/nano-banana
+            // Creative Mode
             console.log('Using Creative Mode (google/nano-banana)');
             model = "google/nano-banana";
             
-            // Construct image_input array: [Master Image, ...Fusion Images]
             const inputs = [image];
             if (image_input && Array.isArray(image_input)) {
                 inputs.push(...image_input);
@@ -289,13 +460,10 @@ app.post('/api/retouch-image', validateUserId, async (req, res) => {
             };
         }
 
-        console.log(`Retouching with ${model}, input keys:`, Object.keys(input));
+        console.log(`Retouching with ${model}`);
 
-        // Use the polling helper instead of replicate.run
         const output = await runReplicatePrediction(replicateClient, model, input);
         
-        console.log('Replicate Output (Retouch):', JSON.stringify(output, null, 2));
-
         let outputUrl;
         if (Array.isArray(output)) {
             outputUrl = output[0];
@@ -345,10 +513,8 @@ app.post('/api/knowledge', validateUserId, async (req, res) => {
     const imagesDir = getUserImagesDir(req.userId);
     await fs.ensureDir(imagesDir);
 
-    // Process entries: extract base64 images and save as files
     const processedEntries = await Promise.all(entries.map(async (entry) => {
       if (entry.sourceImagePreview && entry.sourceImagePreview.startsWith('data:image')) {
-        // Extract base64 data
         const matches = entry.sourceImagePreview.match(/^data:image\/([a-zA-Z]+);base64,(.+)$/);
         if (matches) {
           const ext = matches[1];
@@ -358,7 +524,6 @@ app.post('/api/knowledge', validateUserId, async (req, res) => {
           
           await fs.writeFile(filePath, data, 'base64');
           
-          // Update entry with URL
           return {
             ...entry,
             sourceImagePreview: `/api/images/${req.userId}/${filename}`
@@ -368,7 +533,6 @@ app.post('/api/knowledge', validateUserId, async (req, res) => {
       return entry;
     }));
 
-    // Save updated JSON
     const knowledgeFile = getUserKnowledgeFile(req.userId);
     await fs.ensureDir(path.dirname(knowledgeFile));
     await fs.writeJson(knowledgeFile, processedEntries, { spaces: 2 });
@@ -407,7 +571,6 @@ app.post('/api/error-notebook', async (req, res) => {
         notebook.push(newEntry);
         await fs.writeJson(ERROR_NOTEBOOK_PATH, notebook, { spaces: 2 });
         
-        console.log(`Added entry to error notebook: ${issue}`);
         res.json(newEntry);
     } catch (error) {
         console.error('Error writing to error notebook:', error);
@@ -429,11 +592,10 @@ app.get('/api/error-notebook', async (req, res) => {
     }
 });
 
-// 8. Serve user images (Dynamic Content)
+// 8. Serve user images
 app.get('/api/images/:userId/:filename', async (req, res) => {
   const { userId, filename } = req.params;
   
-  // Security check
   if (!/^[a-zA-Z0-9-]+$/.test(userId) || !/^[a-zA-Z0-9-.]+$/.test(filename)) {
     return res.status(400).send('Invalid parameters');
   }
@@ -448,7 +610,7 @@ app.get('/api/images/:userId/:filename', async (req, res) => {
 });
 
 // ==========================================
-// 🚨 STATIC FILES (MUST BE AFTER API) 🚨
+// 🚨 STATIC FILES 🚨
 // ==========================================
 
 if (fs.existsSync(DIST_DIR)) {
@@ -459,11 +621,10 @@ if (fs.existsSync(DIST_DIR)) {
 }
 
 // ==========================================
-// 🚨 SPA CATCH-ALL (MUST BE LAST) 🚨
+// 🚨 SPA CATCH-ALL 🚨
 // ==========================================
 
-// This must be the LAST route handler
-app.get('*', (req, res) => {
+app.get(/(.*)/, (req, res) => {
     if (fs.existsSync(path.join(DIST_DIR, 'index.html'))) {
         res.sendFile(path.join(DIST_DIR, 'index.html'));
     } else {
@@ -472,5 +633,5 @@ app.get('*', (req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on http://0.0.0.0:${PORT}`);
+  console.log(`[Server] 服务已启动，监听端口: ${PORT}`);
 });

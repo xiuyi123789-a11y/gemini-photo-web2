@@ -129,14 +129,41 @@ export const addMultipleKnowledgeBaseEntries = async (entries: Omit<KnowledgeBas
 
 export const addAnalysisResultToKB = async (result: AnalysisResult, imageFiles: ImageFile[]): Promise<void> => {
     const newEntries: Omit<KnowledgeBaseEntry, 'id' | 'usageCount'>[] = [];
+    
+    // --- New Simple Mode (String Analysis) ---
+    if (result.analysis && !result.consistent_elements) {
+        // Find the corresponding image
+        const matchedImage = imageFiles.find(img => img.file.name === result.fileName);
+        const targetImage = matchedImage || imageFiles[0]; // Fallback to first image
+        const thumbnail = await resizeImage(targetImage.file);
+        const groupId = uuidv4();
+
+        newEntries.push({
+            category: KnowledgeBaseCategory.FULL_PROMPT,
+            promptFragment: `智能解析: ${result.fileName || '未知文件'}`,
+            sourceImagePreview: thumbnail,
+            fullPrompt: {
+                consistentPrompt: result.analysis,
+                variablePrompt: ""
+            },
+            groupId
+        });
+
+        await addMultipleKnowledgeBaseEntries(newEntries);
+        return;
+    }
+
+    // --- Complex/Legacy Mode ---
     const thumbnailPreviews = await Promise.all(imageFiles.map(img => resizeImage(img.file)));
     const groupId = uuidv4(); // Generate a group ID for this batch
 
     // Add consistent elements (associated with the first image)
     const { consistent_elements, inconsistent_elements } = result;
+    if (!consistent_elements) return; // Safety check
+
     const firstImagePreview = thumbnailPreviews[0];
 
-    // --- New Structure Handling ---
+    // --- New Structure Handling (Structured Object) ---
     if (consistent_elements.synthesized_definition) {
         const def = consistent_elements.synthesized_definition;
         

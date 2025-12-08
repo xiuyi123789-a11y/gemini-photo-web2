@@ -7,7 +7,6 @@ import { MagicWandIcon, PlayIcon, DownloadIcon, ZoomInIcon, TrashIcon, PlusIcon,
 import { LoadingSpinner } from './LoadingSpinner';
 import { ImageModal } from './ImageModal';
 import { KnowledgeBaseModal } from './KnowledgeBaseModal';
-import { useApiKey } from '../src/contexts/ApiKeyContext';
 
 export const SmartRetouchView: React.FC = () => {
     const [rows, setRows] = useState<SmartRetouchRow[]>([
@@ -21,8 +20,6 @@ export const SmartRetouchView: React.FC = () => {
     // Knowledge Base Modal State
     const [isKbModalOpen, setIsKbModalOpen] = useState(false);
     const [activeRowIdForKb, setActiveRowIdForKb] = useState<string | null>(null);
-
-    const { apiKey } = useApiKey();
 
     const handleImageUpload = (rowId: string, file: File) => {
         const preview = URL.createObjectURL(file);
@@ -40,14 +37,9 @@ export const SmartRetouchView: React.FC = () => {
         
         if (!imageFile) return;
 
-        if (!apiKey) {
-            setRows(prev => prev.map(r => r.id === rowId ? { ...r, error: "请先设置您的 replicate APIkey。" } : r));
-            return;
-        }
-
         setRows(prev => prev.map(r => r.id === rowId ? { ...r, isAnalyzing: true, error: null } : r));
         try {
-            const analysis = await analyzeImageSmartRetouch(imageFile, apiKey);
+            const analysis = await analyzeImageSmartRetouch(imageFile);
             
             // Parallelism Logic: Only update if the user hasn't typed anything yet
             setRows(prev => {
@@ -77,11 +69,6 @@ export const SmartRetouchView: React.FC = () => {
         const row = rows.find(r => r.id === rowId);
         if (!row?.originalImage || !row.analysisText) return;
 
-        if (!apiKey) {
-            setRows(prev => prev.map(r => r.id === rowId ? { ...r, error: "请先设置您的 replicate APIkey。" } : r));
-            return;
-        }
-
         setRows(prev => prev.map(r => r.id === rowId ? { ...r, isGenerating: true, error: null } : r));
         try {
             // 1. Merge Prompts: Original Description + User Instructions
@@ -92,14 +79,14 @@ export const SmartRetouchView: React.FC = () => {
                  fullPrompt = await mergeRetouchPromptsWithImage(
                     row.originalImage.file,
                     row.understandingText,
-                    row.analysisText,
-                    apiKey
+                    row.analysisText
                 );
             }
 
             // 2. Generate Image
-            const generatedSrc = await generateSmartRetouchImage(row.originalImage.file, fullPrompt, apiKey);
-            setRows(prev => prev.map(r => r.id === rowId ? { ...r, isGenerating: false, generatedImage: generatedSrc } : r));
+            const result = await generateSmartRetouchImage(row.originalImage.file, fullPrompt);
+            
+            setRows(prev => prev.map(r => r.id === rowId ? { ...r, generatedImage: result, isGenerating: false } : r));
         } catch (e: any) {
             setRows(prev => prev.map(r => r.id === rowId ? { ...r, isGenerating: false, error: e.message || "生成失败" } : r));
         }

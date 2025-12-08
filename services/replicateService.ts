@@ -8,6 +8,10 @@ const getUserId = () => {
     return localStorage.getItem('userId') || 'default-user';
 };
 
+const getReplicateApiKey = () => {
+    return localStorage.getItem('replicate_api_token') || '';
+};
+
 const fileToBase64 = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -37,8 +41,9 @@ const urlToBase64 = async (url: string): Promise<string> => {
     }
 };
 
-const callApi = async (endpoint: string, body: any, apiKey?: string, stream: boolean = false) => {
+const callApi = async (endpoint: string, body: any, stream: boolean = false) => {
     const userId = getUserId();
+    const apiKey = getReplicateApiKey();
     const headers: any = {
         'Content-Type': 'application/json',
         'x-user-id': userId
@@ -46,15 +51,13 @@ const callApi = async (endpoint: string, body: any, apiKey?: string, stream: boo
 
     if (apiKey) {
         headers['x-replicate-token'] = apiKey;
-    } else {
-        console.warn('Warning: No apiKey provided to callApi');
     }
 
     const fullUrl = `${window.location.origin}${API_BASE_URL}${endpoint}`;
     console.log(`[Frontend] Calling ${fullUrl}`);
     console.log(`[Frontend] Headers:`, { 
-        'x-replicate-token': apiKey ? '***' + apiKey.slice(-4) : 'missing',
-        'x-user-id': userId 
+        'x-user-id': userId,
+        'x-replicate-token': apiKey ? '(present)' : '(missing)'
     });
 
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
@@ -86,89 +89,66 @@ const callApi = async (endpoint: string, body: any, apiKey?: string, stream: boo
     }
 };
 
-export const analyzeImages = async (images: File[], apiKey: string): Promise<AnalysisResult> => {
-    const base64Images = await Promise.all(images.map(fileToBase64));
+export const analyzeImages = async (files: File[]): Promise<AnalysisResult[]> => {
+    const results: AnalysisResult[] = [];
 
-    const prompt = `
-# ROLE: Visual Asset Librarian & Scene Director 
-(角色设定：视觉资产管理员与场景导演。你的工作是将“物体本身”与“拍摄方式”彻底分离。) 
+    for (const file of files) {
+        try {
+            // 1. 构建 FormData
+            const formData = new FormData();
+            formData.append('image', file); // 这里的 'image' 必须对应后端 upload.single('image')
 
-# TASK: 
-Analyze ALL ${images.length} images to separate "WHAT is in the image" (Consistent) from "HOW it is shot" (Inconsistent). 
+            // 2. 发送请求到我们自己的后端
+            // 注意：这里不要手动加 Content-Type header，浏览器会自动处理
+            const headers: HeadersInit = {};
+            const userId = getUserId();
+            const apiKey = getReplicateApiKey();
+            
+            if (userId) headers['x-user-id'] = userId;
+            if (apiKey) headers['x-replicate-token'] = apiKey;
 
-# CRITICAL LOGIC (THE "INVENTORY" RULE): 
-**Rule 1: The "Consistent Elements" is a Global Asset Library.** 
-- If Image 1 shows a [Woman] and Image 2 shows a [Shoe], the Consistent Content MUST contain **BOTH** the [Woman] AND the [Shoe]. 
-- **NEVER** put the physical description of a main subject (color, material, face) into "Inconsistent Elements". 
-- Even if an object appears in only ONE image, it is still a "Core Asset" and belongs in "Consistent Elements". 
+            const response = await fetch(`${API_BASE_URL}/analyze-image`, {
+                method: 'POST',
+                headers,
+                body: formData,
+            });
 
-**Rule 2: The "Inconsistent Elements" is for Camera & Action ONLY.** 
-- This section describes the *momentary state*: Angle, Pose, Lighting Direction, Zoom Level. 
-- **Bad Example:** "Unique Features: A white sneaker." (WRONG - The sneaker is an asset). 
-- **Good Example:** "Unique Features: Side profile view, floating composition." (CORRECT). 
+            if (!response.ok) {
+                // 尝试读取错误信息
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.error || `Server error: ${response.status}`);
+            }
 
-# STEP-BY-STEP EXECUTION: 
+            const data = await response.json();
 
-1.  **Build the Asset List (Consistent Content):** 
-    - Scan Image 1: Extract the Subject (e.g., Model). Add detailed physical description to \`core_subject_details\`. 
-    - Scan Image 2: Extract the Subject (e.g., Shoe). Does it conflict with the Model? No, it's a new asset. **APPEND** the Shoe's detailed description to \`core_subject_details\`. 
-    - *Result:* The \`core_subject_details\` should read like: "A female model with [details]... AND A white sneaker with [details]..." 
+            // 3. 格式化结果
+            results.push({
+                fileName: file.name,
+                analysis: data.analysis || '无法获取解析结果',
+                timestamp: new Date().toISOString()
+            });
 
-2.  **Define the Shot (Inconsistent Content):** 
-    - For Image 1: Describe ONLY the Model's pose and the camera angle. 
-    - For Image 2: Describe ONLY the Shoe's rotation and the background style. 
-
-# LANGUAGE INSTRUCTION:
-**CRITICAL:** All content values in the JSON output MUST be in **Simplified Chinese (简体中文)**.
-- The JSON keys (e.g., "consistent_elements", "core_subject_details") must remain in **English**.
-- The values (descriptions) must be fully translated to Simplified Chinese.
-
-# OUTPUT_FORMAT: 
-Return strictly in JSON format. 
-
-{ 
-  "consistent_elements": { 
-    "synthesized_definition": { 
-      "subject_summary": "e.g., 'Fashion Model & Vintage Sneaker Collection'", 
-      "core_subject_details": "【关键指令】在此处合并所有图片中的物体描述。例如：'1. 模特：长发，白色羽毛裙... 2. 鞋品：灰白色复古运动鞋，麂皮材质...' (必须包含所有出现的主体)", 
-      "scene_atmosphere": "【环境库】提取所有出现的背景元素（如：海洋、岩石、纯白摄影棚背景）", 
-      "visual_quality": "统一的画质描述 (e.g., High fidelity, Studio lighting)" 
-    } 
-  }, 
-  "inconsistent_elements": [ 
-    { 
-      "image_index": 0, 
-      "subject_ref": "e.g., 'The Model'", 
-      "action_and_pose": "e.g., 'Touching collarbone, looking left'", 
-      "camera_angle": "e.g., 'Close-up, Side Profile'" 
-    }, 
-    { 
-      "image_index": 1, 
-      "subject_ref": "e.g., 'The Sneaker'", 
-      "action_and_pose": "e.g., 'Static product display, no movement'", 
-      "camera_angle": "e.g., 'Side view, slightly elevated'" 
-    } 
-  ] 
-}
-`;
-
-    try {
-        const resultText = await callApi('/analyze-image', {
-            images: base64Images,
-            prompt: prompt
-        }, apiKey, true);
-
-        const jsonString = resultText.replace(/```json\n?|\n?```/g, '').trim();
-        return JSON.parse(jsonString) as AnalysisResult;
-    } catch (error) {
-        console.error("Analysis failed:", error);
-        throw new Error("图片分析失败，请重试。");
+        } catch (error) {
+            console.error(`Error analyzing ${file.name}:`, error);
+            results.push({
+                fileName: file.name,
+                analysis: `分析失败: ${error instanceof Error ? error.message : '未知错误'}`,
+                timestamp: new Date().toISOString(),
+                error: true
+            });
+            
+            // 记录到错误本
+            addToErrorNotebook({
+                type: 'analysis_error',
+                details: `File: ${file.name}, Error: ${error instanceof Error ? error.message : 'Unknown'}`
+            });
+        }
     }
+
+    return results;
 };
 
-export const analyzeAndCategorizeImageForKB = async (imageFile: File, apiKey: string): Promise<KnowledgeBaseAnalysis> => {
-    const base64Image = await fileToBase64(imageFile);
-
+export const analyzeAndCategorizeImageForKB = async (imageFile: File): Promise<KnowledgeBaseAnalysis> => {
     const prompt = `
 # ROLE: 资深提示词工程师与图像解构专家 (v3.0)
 
@@ -211,10 +191,30 @@ export const analyzeAndCategorizeImageForKB = async (imageFile: File, apiKey: st
 `;
 
     try {
-        const resultText = await callApi('/analyze-image', {
-            images: [base64Image],
-            prompt: prompt
-        }, apiKey, true);
+        // Construct FormData for the new backend
+        const formData = new FormData();
+        formData.append('image', imageFile);
+        formData.append('prompt', prompt);
+
+        const headers: HeadersInit = {};
+        const userId = getUserId();
+        const apiKey = getReplicateApiKey();
+        if (userId) headers['x-user-id'] = userId;
+        if (apiKey) headers['x-replicate-token'] = apiKey;
+
+        const response = await fetch(`${API_BASE_URL}/analyze-image`, {
+            method: 'POST',
+            headers,
+            body: formData
+        });
+
+        if (!response.ok) {
+             const errorData = await response.json().catch(() => ({}));
+             throw new Error(errorData.error || `Server error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        const resultText = data.analysis;
 
         const jsonString = resultText.replace(/```json\n?|\n?```/g, '').trim();
         return JSON.parse(jsonString) as KnowledgeBaseAnalysis;
@@ -234,8 +234,7 @@ const createBaseDirectives = () => `
 export const generateMasterImage = async (
     referenceImages: string[],
     consistentPrompt: string,
-    firstVariablePrompt: string,
-    apiKey: string
+    firstVariablePrompt: string
 ): Promise<string> => {
     // const directives = createBaseDirectives(); // Merged into the main prompt for better flow
     const fullPrompt = `
@@ -287,7 +286,7 @@ ${firstVariablePrompt}
             prompt: fullPrompt,
             image_input: base64Images, // Pass reference images if available for style/character consistency
             aspect_ratio: "3:4"
-        }, apiKey);
+        });
 
         return result.imageUrl;
     } catch (error) {
@@ -306,8 +305,7 @@ export const modifyMasterImage = async (
     masterImageSrc: string,
     consistentPrompt: string,
     firstVariablePrompt: string,
-    modificationRequest: string,
-    apiKey: string
+    modificationRequest: string
 ): Promise<string> => {
     const directives = createBaseDirectives();
     const prompt = `
@@ -335,7 +333,7 @@ ${firstVariablePrompt}
         image: base64Master,
         prompt: prompt,
         strength: 0.75 
-    }, apiKey);
+    });
 
     return result.imageUrl;
 };
@@ -346,7 +344,6 @@ export const generateSingleFromMaster = async (
     consistentPrompt: string,
     variablePrompt: string,
     isRegeneration: boolean,
-    apiKey: string,
     fusionImage?: File | string // New parameter for fusion
 ): Promise<string> => {
     // Logic: Use Master Image as base + Full Prompt (Consistent + Variable)
@@ -409,7 +406,7 @@ ${isRegeneration ? `\n- **Random Seed:** ${Math.random()}` : ''}
             prompt: fullPrompt,
             strength: 0.65, // Reduced from 0.85 to improve consistency with Master Image
             image_input: fusionImageBase64 ? [fusionImageBase64] : undefined
-        }, apiKey);
+        });
 
         return result.imageUrl;
     } catch (error) {
@@ -428,9 +425,7 @@ export interface SmartRetouchAnalysisResult {
     suggestions: string;
 }
 
-export const analyzeImageSmartRetouch = async (imageFile: File, apiKey: string): Promise<SmartRetouchAnalysisResult> => {
-    const base64Image = await fileToBase64(imageFile);
-    
+export const analyzeImageSmartRetouch = async (imageFile: File): Promise<SmartRetouchAnalysisResult> => {
     // Fetch previous successful retouch examples from Knowledge Base
     let learnedContext = "";
     try {
@@ -470,45 +465,58 @@ ${e.promptFragment}
 - **风格 (Style):** 摄影风格、色调分级。
 
 # STEP 2: IMPROVEMENT SUGGESTIONS (优化指令)
-不要输出任何分析过程。直接输出**修图与重绘指令 (Directives)**。
-必须涵盖：
-- **水印/Logo:** [强制] 如有，必须指令去除。
-- **视觉冲击力:** 构图是否平淡？建议更具张力的视角。
-- **人物状态:** 动作是否僵硬？建议更自然的Pose。
-- **光影质感:** 建议更高级的布光。
-
+基于画面现状，提出3-5条具体的修图或AI重绘建议。
+建议必须具体、可执行。例如：“将背景替换为简约的灰色大理石纹理”、“增强人物面部的高光对比度”、“将色调调整为暖色调的复古风格”。
 ${learnedContext}
 
-# OUTPUT FORMAT:
+# LANGUAGE INSTRUCTION:
+**CRITICAL:** All content values in the JSON output MUST be in **Simplified Chinese (简体中文)**.
+- The JSON keys must remain in **English**.
+- The values must be fully translated to Simplified Chinese.
+
+# OUTPUT_FORMAT:
 以结构化的JSON格式提供输出。
 {
-  "understanding": "（在这里填写极度详细的母版描述...）",
-  "suggestions": "1. [强制] 去除水印...\\n2. (指令)...\\n3. (指令)..." 
+  "understanding": "（在这里填写完整的母版描述...）",
+  "suggestions": "（在这里填写优化建议列表，用换行符分隔...）"
 }
 `;
 
     try {
-        const resultText = await callApi('/analyze-image', {
-            images: [base64Image],
-            prompt: prompt
-        }, apiKey, true);
+        const formData = new FormData();
+        formData.append('image', imageFile);
+        formData.append('prompt', prompt);
+
+        const headers: HeadersInit = {};
+        const userId = getUserId();
+        if (userId) headers['x-user-id'] = userId;
+
+        const response = await fetch(`${API_BASE_URL}/analyze-image`, {
+            method: 'POST',
+            headers,
+            body: formData
+        });
+
+        if (!response.ok) {
+             const errorData = await response.json().catch(() => ({}));
+             throw new Error(errorData.error || `Server error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        const resultText = data.analysis;
 
         const jsonString = resultText.replace(/```json\n?|\n?```/g, '').trim();
         return JSON.parse(jsonString) as SmartRetouchAnalysisResult;
     } catch (error) {
-        console.error("Smart Analysis failed:", error);
-        return {
-            understanding: "解析失败，请重试。",
-            suggestions: "解析失败，请重试。"
-        };
+        console.error("Smart Retouch Analysis failed:", error);
+        throw new Error("智能修图分析失败。");
     }
 };
 
 export const mergeRetouchPromptsWithImage = async (
     imageFile: File,
     originalDescription: string,
-    userInstructions: string,
-    apiKey: string
+    userInstructions: string
 ): Promise<string> => {
     const base64Image = await fileToBase64(imageFile);
     const prompt = `
@@ -542,7 +550,7 @@ Return ONLY the final Merged Description text. Do not add explanations.
         return await callApi('/analyze-image', {
             images: [base64Image],
             prompt: prompt
-        }, apiKey, true);
+        }, true);
     } catch (error) {
         console.error("Prompt Merge failed:", error);
         return originalDescription + " " + userInstructions; 
@@ -551,8 +559,7 @@ Return ONLY the final Merged Description text. Do not add explanations.
 
 export const generateSmartRetouchImage = async (
     originalImageFile: File,
-    fullDescription: string,
-    apiKey: string
+    fullDescription: string
 ): Promise<string> => {
     const base64Image = await fileToBase64(originalImageFile);
     const directives = createBaseDirectives();
@@ -580,7 +587,7 @@ ${directives}
         image: base64Image,
         prompt: prompt,
         strength: 0.65 
-    }, apiKey);
+    });
 
     return result.imageUrl;
 };
@@ -624,7 +631,7 @@ const createCornerMask = async (imageFile: File): Promise<string> => {
     });
 };
 
-export const removeWatermark = async (imageFile: File, apiKey: string): Promise<string> => {
+export const removeWatermark = async (imageFile: File): Promise<string> => {
     const base64Image = await fileToBase64(imageFile);
     const maskImage = await createCornerMask(imageFile);
 
@@ -667,7 +674,7 @@ A restored image where the corners blend invisibly with the rest of the scene. T
         mask: maskImage, // Pass the generated mask
         prompt: prompt
         // Strength is not needed for Flux Fill in this context, or handled differently
-    }, apiKey);
+    });
 
     return result.imageUrl;
 };
@@ -677,7 +684,7 @@ export interface PreprocessResult {
     subjectDescription: string;
 }
 
-export const preprocessImageForGeneration = async (imageFile: File, apiKey: string): Promise<PreprocessResult> => {
+export const preprocessImageForGeneration = async (imageFile: File): Promise<PreprocessResult> => {
     const base64Image = await fileToBase64(imageFile);
     
     const prompt = `
@@ -701,7 +708,7 @@ Return ONLY a JSON object.
         const resultText = await callApi('/analyze-image', {
             images: [base64Image],
             prompt: prompt
-        }, apiKey, true);
+        }, true);
 
         const jsonString = resultText.replace(/```json\n?|\n?```/g, '').trim();
         return JSON.parse(jsonString) as PreprocessResult;

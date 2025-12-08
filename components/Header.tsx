@@ -4,12 +4,20 @@ import { EyeIcon, EyeSlashIcon } from './IconComponents';
 import { ChangelogModal } from './ChangelogModal';
 import changelogData from '@/src/data/changelog.json';
 
-import { useApiKey } from '../src/contexts/ApiKeyContext';
-
 export const Header: React.FC = () => {
-  const { openModal } = useApiKey();
   const [isChangelogOpen, setIsChangelogOpen] = useState(false);
   const currentVersion = changelogData[0]?.version || 'v1.0.0';
+  
+  // API Key State
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('replicate_api_token') || '');
+  const [isVisible, setIsVisible] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+
+  const handleSaveApiKey = () => {
+    localStorage.setItem('replicate_api_token', apiKey);
+    setIsEditing(false);
+    // Optional: Show a toast or feedback? For now, the button disappearing is feedback.
+  };
 
   return (
     <header className="bg-slate-900/40 backdrop-blur-md border-b border-white/5 sticky top-0 z-20 transition-all">
@@ -36,12 +44,34 @@ export const Header: React.FC = () => {
 
           {/* Right: API Key Input */}
           <div className="flex items-center gap-2 justify-center md:justify-end w-full">
-             <button
-                onClick={openModal}
-                className="bg-gradient-to-r from-fuchsia-600 to-pink-600 text-white font-bold py-1.5 px-4 rounded-full text-xs hover:shadow-lg hover:shadow-fuchsia-500/30 transform hover:scale-105 transition-all whitespace-nowrap"
-              >
-                更新 replicate APIkey
-              </button>
+             <div className="relative flex items-center bg-slate-800/50 rounded-lg border border-white/10 px-3 py-1.5 transition-all focus-within:border-fuchsia-500/50 focus-within:ring-1 focus-within:ring-fuchsia-500/50">
+                <span className="text-xs text-slate-400 mr-2 font-mono whitespace-nowrap">API Key</span>
+                <input 
+                    type={isVisible ? "text" : "password"} 
+                    value={apiKey}
+                    onChange={(e) => {
+                        setApiKey(e.target.value);
+                        setIsEditing(true);
+                    }}
+                    placeholder="r8_..."
+                    className="bg-transparent border-none outline-none text-xs text-white placeholder-slate-600 w-24 sm:w-32 font-mono"
+                />
+                <button 
+                    onClick={() => setIsVisible(!isVisible)}
+                    className="ml-2 text-slate-400 hover:text-white transition-colors"
+                    title={isVisible ? "隐藏" : "显示"}
+                >
+                    {isVisible ? <EyeSlashIcon className="w-3.5 h-3.5" /> : <EyeIcon className="w-3.5 h-3.5" />}
+                </button>
+             </div>
+             {isEditing && (
+                 <button 
+                    onClick={handleSaveApiKey}
+                    className="px-3 py-1.5 rounded-lg bg-fuchsia-600 hover:bg-fuchsia-500 text-xs font-bold text-white transition-colors shadow-lg shadow-fuchsia-500/20 whitespace-nowrap"
+                 >
+                    确认
+                 </button>
+             )}
           </div>
         </div>
       </div>

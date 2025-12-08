@@ -15,7 +15,6 @@ import {
 } from '../services/knowledgeBaseService';
 import { LoadingSpinner } from './LoadingSpinner';
 import { TrashIcon, ChevronDownIcon, FireIcon, CheckIcon, RefreshIcon, SearchIcon, XIcon } from './IconComponents';
-import { useApiKey } from '../src/contexts/ApiKeyContext';
 
 export const KnowledgeBaseView: React.FC = () => {
     const [entries, setEntries] = useState<KnowledgeBaseEntry[]>([]);
@@ -30,8 +29,6 @@ export const KnowledgeBaseView: React.FC = () => {
     const [viewMode, setViewMode] = useState<'active' | 'trash'>('active');
     const [isSelectionMode, setIsSelectionMode] = useState(false);
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-
-    const { apiKey } = useApiKey();
 
     const loadEntries = async () => {
         const data = await getKnowledgeBase();
@@ -122,11 +119,6 @@ export const KnowledgeBaseView: React.FC = () => {
     const handleFileAnalyze = async (files: ImageFile[]) => {
         if (files.length === 0) return;
 
-        if (!apiKey) {
-            setError("请先设置您的 API Key。");
-            return;
-        }
-        
         setIsLoading(true);
         setError(null);
         setAnalysisProgress({ current: 0, total: files.length });
@@ -136,7 +128,7 @@ export const KnowledgeBaseView: React.FC = () => {
         for (const imageFile of files) {
             try {
                 const thumbnail = await resizeImage(imageFile.file);
-                const analysisResult: KnowledgeBaseAnalysis = await analyzeAndCategorizeImageForKB(imageFile.file, apiKey);
+                const analysisResult: KnowledgeBaseAnalysis = await analyzeAndCategorizeImageForKB(imageFile.file);
                 
                 const newEntries: Omit<KnowledgeBaseEntry, 'id' | 'usageCount'>[] = [];
                 

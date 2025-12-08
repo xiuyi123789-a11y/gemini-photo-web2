@@ -13,11 +13,6 @@ import { initializeAi } from './services/geminiService';
 
 type View = 'analyze' | 'generate' | 'retouch' | 'knowledge';
 
-import { ApiKeyProvider } from './src/contexts/ApiKeyContext';
-
-import { ApiKeyModal } from './components/ApiKeyModal';
-import { useApiKey } from './src/contexts/ApiKeyContext';
-
 const App: React.FC = () => {
   const [currentView, setCurrentViewState] = useState<View>(() => {
       return (localStorage.getItem('currentView') as View) || 'analyze';
@@ -28,10 +23,9 @@ const App: React.FC = () => {
       localStorage.setItem('currentView', view);
   };
 
-  const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
-  const { apiKey } = useApiKey();
+  const [analysisResult, setAnalysisResult] = useState<AnalysisResult[] | null>(null);
 
-  const handleAnalysisComplete = useCallback((result: AnalysisResult) => {
+  const handleAnalysisComplete = useCallback((result: AnalysisResult[]) => {
     setAnalysisResult(result);
     setCurrentView('generate');
   }, []);
@@ -56,7 +50,6 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen flex flex-col">
-      <ApiKeyModal />
       <Header />
       <main className="flex-grow container mx-auto p-4 md:p-8 max-w-7xl">
         <div className="bg-slate-900/60 backdrop-blur-md border border-white/10 rounded-3xl shadow-2xl p-6 md:p-8 mb-8">
@@ -68,8 +61,6 @@ const App: React.FC = () => {
           </div>
 
           <div className="transition-opacity duration-500 ease-in-out">
-            {apiKey ? (
-              <>
                 <div style={{ display: currentView === 'analyze' ? 'block' : 'none' }}>
                     <AnalysisView onAnalysisComplete={handleAnalysisComplete} />
                 </div>
@@ -82,13 +73,6 @@ const App: React.FC = () => {
                 <div style={{ display: currentView === 'knowledge' ? 'block' : 'none' }}>
                     <KnowledgeBaseView />
                 </div>
-              </>
-            ) : (
-              <div className="text-center">
-                <h2 className="text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-500 mb-6">欢迎来到量子跃迁 AI 修图工作室</h2>
-                <p className="text-lg text-slate-400">请输入您的 replicate APIkey 以继续。</p>
-              </div>
-            )}
           </div>
         </div>
       </main>

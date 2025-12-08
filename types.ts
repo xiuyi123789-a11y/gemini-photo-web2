@@ -47,8 +47,15 @@ export interface InconsistentElement {
 }
 
 export interface AnalysisResult {
-  consistent_elements: ConsistentElements;
-  inconsistent_elements: InconsistentElement[];
+  // Legacy structure (Optional for backward compatibility)
+  consistent_elements?: ConsistentElements;
+  inconsistent_elements?: InconsistentElement[];
+  
+  // New simplified structure
+  fileName?: string;
+  analysis?: string;
+  timestamp?: string;
+  error?: boolean;
 }
 
 export interface VariablePrompt {

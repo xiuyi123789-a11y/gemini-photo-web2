@@ -7,7 +7,6 @@ import { incrementEntryUsage, saveKBAnalysisToKB } from '../services/knowledgeBa
 import { LoadingSpinner } from './LoadingSpinner';
 import { KnowledgeBaseModal } from './KnowledgeBaseModal';
 import { ImageModal } from './ImageModal';
-import { useApiKey } from '../src/contexts/ApiKeyContext';
 
 // Simple UUID generator polyfill for non-secure contexts
 function uuidv4() {
@@ -22,7 +21,7 @@ function uuidv4() {
 }
 
 interface GenerationViewProps {
-  initialAnalysisResult: AnalysisResult | null;
+  initialAnalysisResult: AnalysisResult[] | null;
 }
 
 const MAX_REF_IMAGES = 8;
@@ -47,99 +46,32 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const prevRefImagesCount = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { apiKey } = useApiKey();
 
   useEffect(() => {
-     if (initialAnalysisResult) {
+     if (initialAnalysisResult && initialAnalysisResult.length > 0) {
          populateFromAnalysis(initialAnalysisResult, true);
      }
    }, [initialAnalysisResult]);
 
-   const populateFromAnalysis = (result: AnalysisResult, updateVariables: boolean = false) => {
-         const { consistent_elements, inconsistent_elements } = result;
+   const populateFromAnalysis = (results: AnalysisResult[], updateVariables: boolean = false) => {
+         // Combine all analysis results into one text
+         const combinedAnalysis = results.map(r => `[${r.fileName || 'Image'}]\n${r.analysis || ''}`).join('\n\n');
          
-         // New Structure Handling (Senior Visual Asset Aggregator & Synthesizer)
-         if (consistent_elements.synthesized_definition) {
-             const def = consistent_elements.synthesized_definition;
-             let text = "";
-             if (def.subject_summary) text += `Subject Summary: ${def.subject_summary}\n`;
-             text += `Subject Core: ${def.core_subject_details}\n`;
-             // Legacy fields check
-             if (def.human_features && def.human_features !== 'null') text += `Human Features: ${def.human_features}\n`;
-             
-             if (def.scene_atmosphere && def.scene_atmosphere !== 'null') text += `Scene Atmosphere: ${def.scene_atmosphere}\n`;
-             text += `Visual Quality: ${def.visual_quality}`;
-             
-             setConsistentPrompt(text.trim());
-             
-             if (updateVariables && inconsistent_elements) {
-                 const variableItems = inconsistent_elements.map(item => {
-                     // New structure
-                     if (item.subject_ref) {
-                         return {
-                             id: uuidv4(),
-                             prompt: `[${item.subject_ref}] Action: ${item.action_and_pose}. Camera: ${item.camera_angle}`
-                         };
-                     }
-                     // Legacy structure fallback
-                     return {
-                         id: uuidv4(),
-                         prompt: `[${item.content_type}] ${item.unique_features}`
-                     };
-                 });
-                 setVariablePrompts(variableItems.length > 0 ? variableItems : [{ id: uuidv4(), prompt: '' }]);
-             }
-             return;
-         }
-
-         // Legacy Structure Handling
-         const subject = consistent_elements.primary_subject;
-         const scene = consistent_elements.scene_environment;
-         const style = consistent_elements.image_quality_and_composition;
+         setConsistentPrompt(combinedAnalysis.trim());
          
-         let text = "";
-         if (subject) {
-             text += `${subject.item}. ${subject.key_features.join(', ')}. `;
-             if (subject.materials && subject.materials.length > 0) text += `Materials: ${subject.materials.join(', ')}. `;
-             if (subject.brand) text += `Brand: ${subject.brand}. `;
-             if (subject.emotional_tone) text += `Mood: ${subject.emotional_tone}. `;
-         }
-         
-         if (scene) {
-              text += `Scene: ${scene.general_location}. ${scene.shared_elements.join(', ')}. `;
-         }
-         
-         if (style) {
-             text += `Style: ${style.style}. Lighting: ${style.lighting}. Quality: ${style.quality}. `;
-         }
-         
-         setConsistentPrompt(text.trim());
-
-         if (updateVariables && inconsistent_elements) {
-            const variableItems = inconsistent_elements.map(item => {
-                // Check if it's the old structure or new (though new structure is handled above, type guard helps)
-                if (item.unique_features) {
-                     return {
-                        id: uuidv4(),
-                        prompt: `[${item.content_type}] ${item.unique_features}`
-                     };
-                }
-                return {
-                    id: uuidv4(),
-                    prompt: `Framing: ${item.framing}. Pose: ${item.subject_pose}. Person: ${item.person_description}. Details: ${item.unique_details}. Camera: ${item.camera_settings || ''}.`
-                };
-            });
-            setVariablePrompts(variableItems.length > 0 ? variableItems : [{ id: uuidv4(), prompt: '' }]);
+         if (updateVariables) {
+             // Since we don't have structured variables anymore, reset or keep one empty
+             setVariablePrompts([{ id: uuidv4(), prompt: '' }]);
          }
    };
 
    const triggerAutoAnalysis = async () => {
      const validImages = referenceImages.filter(img => !img.isProcessing && img.processedPreview).map(img => img.file);
-     if (validImages.length === 0 || !apiKey) return;
+     if (validImages.length === 0) return;
      
      setIsAnalyzing(true);
      try {
-         const result = await analyzeImages(validImages, apiKey);
+         const result = await analyzeImages(validImages);
          populateFromAnalysis(result, false); // Only update consistency
      } catch (e) {
          console.error("Auto analysis failed", e);
@@ -188,10 +120,6 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
   }, [referenceImages.length]);
 
   const handleStartAnalysis = async () => {
-    if (!apiKey) {
-        setError("请先设置您的 API Key。");
-        return;
-    }
     if (referenceImages.length === 0) {
         setError("请先上传参考图片。");
         return;
@@ -216,9 +144,9 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
 
             let processedUrl = img.originalPreview;
             try {
-                const analysis = await preprocessImageForGeneration(img.file, apiKey);
+                const analysis = await preprocessImageForGeneration(img.file);
                 if (analysis.hasWatermark) {
-                    processedUrl = await removeWatermark(img.file, apiKey);
+                    processedUrl = await removeWatermark(img.file);
                 }
             } catch (e) {
                 console.error(`Failed to process image ${img.id}`, e);
@@ -235,7 +163,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
         // 2. Analyze All Images together
         const validFiles = processedRefImages.map(img => img.file);
         if (validFiles.length > 0) {
-            const result = await analyzeImages(validFiles, apiKey);
+            const result = await analyzeImages(validFiles);
             // 3. Populate UI (Replace existing content)
             populateFromAnalysis(result, true);
         }
@@ -291,17 +219,14 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
       setVariablePrompts(prev => prev.map(p => p.id === id ? { ...p, referenceImage: { file, preview } } : p));
       
       // Auto analyze
-      if (apiKey) {
-          await handleAnalyzeVariableImage(id, file);
-      }
+      await handleAnalyzeVariableImage(id, file);
   };
 
   const handleAnalyzeVariableImage = async (id: string, file: File) => {
-      if (!apiKey) return;
       setVariablePrompts(prev => prev.map(p => p.id === id ? { ...p, isAnalyzing: true } : p));
       
       try {
-          const analysis = await analyzeAndCategorizeImageForKB(file, apiKey);
+          const analysis = await analyzeAndCategorizeImageForKB(file);
           setVariablePrompts(prev => prev.map(p => p.id === id ? { ...p, analysis, isAnalyzing: false } : p));
       } catch (e) {
           console.error("Analysis failed", e);
@@ -326,10 +251,6 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
   };
 
   const handleGenerateMaster = async (isRegeneration = false) => {
-    if (!apiKey) {
-      setError('请先设置您的 API Key。');
-      return;
-    }
     const processedImages = getProcessedImages();
     if (!processedImages || processedImages.length === 0 || (!variablePrompts[0]?.prompt && !consistentPrompt)) {
       setError("请上传参考图，并确保有一致性描述或主图提示词。");
@@ -339,7 +260,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
     setMasterImage({ src: null, isLoading: true });
     
     try {
-        const result = await generateMasterImage(processedImages, consistentPrompt, variablePrompts[0].prompt, apiKey);
+        const result = await generateMasterImage(processedImages, consistentPrompt, variablePrompts[0].prompt);
         setMasterImage({ src: result, isLoading: false });
         setMasterPromptStale(false);
     } catch (e: any) {
@@ -349,10 +270,6 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
   };
 
   const handleModifyMaster = async () => {
-    if (!apiKey) {
-      setError('请先设置您的 API Key。');
-      return;
-    }
     const processedImages = getProcessedImages();
     if (!processedImages || processedImages.length === 0 || !masterImage.src || !modificationPrompt) {
         setError("无法修改，缺少参考图、主图或修改指令。");
@@ -361,7 +278,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
     setError(null);
     setMasterImage(prev => ({ ...prev, isLoading: true }));
     try {
-        const result = await modifyMasterImage(processedImages, masterImage.src, consistentPrompt, variablePrompts[0].prompt, modificationPrompt, apiKey);
+        const result = await modifyMasterImage(processedImages, masterImage.src, consistentPrompt, variablePrompts[0].prompt, modificationPrompt);
         setMasterImage({ src: result, isLoading: false });
         setModificationPrompt('');
     } catch (e: any) {
@@ -371,10 +288,6 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
   };
   
   const handleGenerateAll = async () => {
-    if (!apiKey) {
-      setError('请先设置您的 API Key。');
-      return;
-    }
     const processedImages = getProcessedImages();
     if (!processedImages || processedImages.length === 0 || !masterImage.src) {
         setError("请先生成并确认主图，才能生成系列图片。");
@@ -383,7 +296,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
     setError(null);
     
     const imagePromises = variablePrompts.map(vp => 
-        generateSingleFromMaster(processedImages, masterImage.src!, consistentPrompt, vp.prompt, false, apiKey, vp.referenceImage?.file)
+        generateSingleFromMaster(processedImages, masterImage.src!, consistentPrompt, vp.prompt, false, vp.referenceImage?.file)
         .then(imageSrc => ({ id: vp.id, src: imageSrc, error: null }))
         .catch(error => ({ id: vp.id, src: null, error }))
     );
@@ -408,10 +321,6 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
   };
 
   const handleRegenerateSingle = async (promptId: string) => {
-    if (!apiKey) {
-      setError('请先设置您的 API Key。');
-      return;
-    }
     const processedImages = getProcessedImages();
     if (!processedImages || processedImages.length === 0 || !masterImage.src) {
       setError("请先生成并确认主图。");
@@ -424,7 +333,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
     if (!promptToRegenerate) return;
 
     try {
-        const imageSrc = await generateSingleFromMaster(processedImages, masterImage.src, consistentPrompt, promptToRegenerate.prompt, true, apiKey, promptToRegenerate.referenceImage?.file);
+        const imageSrc = await generateSingleFromMaster(processedImages, masterImage.src, consistentPrompt, promptToRegenerate.prompt, true, promptToRegenerate.referenceImage?.file);
         setGeneratedImages(prev => ({...prev, [promptId]: { src: imageSrc, isLoading: false }}));
     } catch(e: any) {
         setError(e.message || `图片 ${promptId} 重新生成失败。`);
