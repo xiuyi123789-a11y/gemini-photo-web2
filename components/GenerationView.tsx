@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { AnalysisResult, ImageFile, VariablePrompt, GeneratedImageState, KnowledgeBaseEntry, KnowledgeBaseCategory, ReferenceImageFile, KnowledgeBaseAnalysis } from '../types';
-import { MagicWandIcon, PlusIcon, TrashIcon, RefreshIcon, DownloadIcon, ZoomInIcon, EyeIcon, PlayIcon, BookOpenIcon } from './IconComponents';
+import { MagicWandIcon, PlusIcon, TrashIcon, RefreshIcon, DownloadIcon, ZoomInIcon, EyeIcon, PlayIcon, BookOpenIcon, ChevronDownIcon } from './IconComponents';
 import { generateMasterImage, modifyMasterImage, generateSingleFromMaster, analyzeAndMergeReferenceImagesForGeneration, analyzeAndCategorizeImageForKB } from '../services/replicateService';
 import { getKnowledgeBase, incrementEntryUsage, KB_UPDATE_EVENT, saveKBAnalysisToKB } from '../services/knowledgeBaseService';
 import { LoadingSpinner } from './LoadingSpinner';
@@ -26,6 +26,130 @@ interface GenerationViewProps {
 }
 
 const MAX_REF_IMAGES = 8;
+
+const VARIABLE_PROMPT_TERM_CATEGORIES: Array<{
+  id: string;
+  label: string;
+  items: Array<{ cn: string; en: string }>;
+}> = [
+  {
+    id: 'camera_angles',
+    label: '拍摄角度',
+    items: [
+      { cn: '平视', en: 'Eye-Level' },
+      { cn: '仰视', en: 'Low Angle' },
+      { cn: '俯视', en: 'High Angle' },
+      { cn: '上帝视角/顶视', en: "Bird's Eye View / Top-Down" },
+      { cn: '虫视/极低', en: "Worm's Eye View" },
+      { cn: '荷兰角', en: 'Dutch Angle' },
+      { cn: '第一人称', en: 'POV (Point of View)' },
+      { cn: '过肩镜头', en: 'Over-the-Shoulder' },
+      { cn: '侧颜', en: 'Side Profile' },
+      { cn: '背影', en: 'Back View' },
+      { cn: '自底向上透视', en: 'Bottom-up perspective' },
+      { cn: '地面视角', en: 'Ground level shot' }
+    ]
+  },
+  {
+    id: 'shot_types',
+    label: '景别裁切',
+    items: [
+      { cn: '极特写', en: 'Extreme Close-Up (ECU)' },
+      { cn: '特写', en: 'Close-Up (CU)' },
+      { cn: '中景', en: 'Medium Shot (MS)' },
+      { cn: '七分身（美式镜头）', en: 'Cowboy Shot' },
+      { cn: '全身/广角', en: 'Full Body / Wide Shot' },
+      { cn: '远景/大远景', en: 'Long Shot / Extreme Long' },
+      { cn: '美式镜头（膝盖以上）', en: 'American Shot' }
+    ]
+  },
+  {
+    id: 'body_framing',
+    label: '局部特写',
+    items: [
+      { cn: '膝盖以下', en: 'Knees down shot' },
+      { cn: '腰部以下', en: 'Waist down shot' },
+      { cn: '低位截取', en: 'Low section' },
+      { cn: '仅腿部', en: 'Legs only' },
+      { cn: '中段特写', en: 'Midsection shot' },
+      { cn: '躯干特写', en: 'Torso shot' },
+      { cn: '臀/胯部特写', en: 'Hip shot / Hip level' },
+      { cn: '膝处裁切', en: 'Cropped at knees' },
+      { cn: '聚焦手部', en: 'Focus on hands' },
+      { cn: '肚脐/腹部聚焦', en: 'Navel focus / Belly shot' },
+      { cn: '锁骨特写', en: 'Clavicle shot' }
+    ]
+  },
+  {
+    id: 'headless_exclusion',
+    label: '去头排除',
+    items: [
+      { cn: '无头照', en: 'Headless shot' },
+      { cn: '脖子以下', en: 'Neck down' },
+      { cn: '头部出框/被裁', en: 'Cropped head / Head out of frame' },
+      { cn: '下巴以下', en: 'Chin down' },
+      { cn: '断头构图', en: 'Decapitated framing' }
+    ]
+  },
+  {
+    id: 'cinematic',
+    label: '电影分镜',
+    items: [
+      { cn: '插入镜头', en: 'Insert shot' },
+      { cn: '物体定场镜头', en: 'Establishing shot of [Object]' },
+      { cn: '项圈式特写', en: 'Choker shot' },
+      { cn: '腰下侧视', en: 'Profile from waist down' },
+      { cn: '腿部平铺', en: 'Flat lay of legs' }
+    ]
+  },
+  {
+    id: 'lens_technical',
+    label: '镜头参数',
+    items: [
+      { cn: '微距镜头/微距摄影', en: 'Macro Lens / Macro photography' },
+      { cn: '鱼眼镜头', en: 'Fisheye Lens' },
+      { cn: '长焦镜头', en: 'Telephoto Lens' },
+      { cn: '广角镜头', en: 'Wide Angle Lens' },
+      { cn: '景深/虚化', en: 'Bokeh / Depth of Field' }
+    ]
+  },
+  {
+    id: 'negative_prompting',
+    label: '负向排除',
+    items: [
+      { cn: '出框', en: 'Out of frame' },
+      { cn: '被裁切', en: 'Cropped' },
+      { cn: '局部视角', en: 'Partial view' },
+      { cn: '无身体（慎用）', en: 'Disembodied' }
+    ]
+  },
+  {
+    id: 'quick_combos',
+    label: '组合示例',
+    items: [
+      {
+        cn: '鞋与小腿（不见大腿以上）',
+        en: 'Low angle, knees down shot, focus on sneakers, ground level shot, shallow depth of field'
+      },
+      {
+        cn: '牛仔裤细节（无头无小腿）',
+        en: 'Midsection shot, hip level, fabric texture focus, cropped head, cropped at knees, straight-on view'
+      },
+      {
+        cn: '项链锁骨特写',
+        en: 'Extreme close-up on neck and collarbone, chin down, macro photography, soft lighting'
+      },
+      {
+        cn: '仅手与戒指',
+        en: 'Focus on hands, insert shot, macro lens, body as background, blurred torso'
+      },
+      {
+        cn: '夸张鞋底透视',
+        en: "Worm’s eye view, bottom-up perspective, close-up on footwear, wide angle lens, dynamic composition"
+      }
+    ]
+  }
+];
 
 export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisResult }) => {
   const [referenceImages, setReferenceImages] = useState<ReferenceImageFile[]>([]);
@@ -52,6 +176,9 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
   const prevRefImagesCount = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const consistentTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const variableTextareaRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
+  const openMenuWrapperRef = useRef<HTMLDivElement | null>(null);
+  const [openVariableTermMenu, setOpenVariableTermMenu] = useState<{ promptId: string; categoryId: string } | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -119,6 +246,28 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
        }
   }, [referenceImages]);
 
+  useEffect(() => {
+    if (!openVariableTermMenu) return;
+
+    const onMouseDown = (e: MouseEvent) => {
+      const wrapper = openMenuWrapperRef.current;
+      if (!wrapper) return;
+      if (wrapper.contains(e.target as Node)) return;
+      setOpenVariableTermMenu(null);
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpenVariableTermMenu(null);
+    };
+
+    window.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('mousedown', onMouseDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [openVariableTermMenu]);
+
   const handleFileSelect = useCallback(async (selectedFiles: ImageFile[]) => {
     const newUploads = selectedFiles.slice(0, MAX_REF_IMAGES - referenceImages.length);
     if (newUploads.length === 0) return;
@@ -178,6 +327,35 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
     if(id === variablePrompts[0]?.id && masterImage.src) {
         setMasterPromptStale(true);
     }
+  };
+
+  const toggleVariableTermMenu = (promptId: string, categoryId: string) => {
+    setOpenVariableTermMenu(prev => {
+      if (prev && prev.promptId === promptId && prev.categoryId === categoryId) return null;
+      return { promptId, categoryId };
+    });
+  };
+
+  const insertVariablePromptTerm = (promptId: string, term: string) => {
+    const currentPrompt = variablePrompts.find(p => p.id === promptId)?.prompt || '';
+    const textarea = variableTextareaRefs.current[promptId];
+    const start = textarea?.selectionStart ?? currentPrompt.length;
+    const end = textarea?.selectionEnd ?? currentPrompt.length;
+    const before = currentPrompt.slice(0, start);
+    const after = currentPrompt.slice(end);
+    const needsSpaceBefore = before.length > 0 && !/[\s,，;；\n]$/.test(before);
+    const needsSpaceAfter = after.length > 0 && !/^[\s,，;；\n]/.test(after);
+    const nextPrompt = `${before}${needsSpaceBefore ? ' ' : ''}${term}${needsSpaceAfter ? ' ' : ''}${after}`;
+    const caretPos = (before + (needsSpaceBefore ? ' ' : '') + term + (needsSpaceAfter ? ' ' : '')).length;
+
+    setVariablePrompts(prev => prev.map(p => (p.id === promptId ? { ...p, prompt: nextPrompt } : p)));
+
+    setTimeout(() => {
+      const el = variableTextareaRefs.current[promptId];
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(caretPos, caretPos);
+    }, 0);
   };
 
   const addVariablePrompt = () => {
@@ -746,12 +924,56 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                          </div>
                       </div>
                       <textarea
+                        ref={(el) => {
+                          variableTextareaRefs.current[vp.id] = el;
+                        }}
                         value={vp.prompt}
                         onChange={(e) => handleVariablePromptChange(vp.id, e.target.value)}
                         rows={3}
                         className="w-full p-3 bg-slate-900/50 border border-slate-700 rounded-xl focus:ring-2 focus:ring-fuchsia-500 focus:border-transparent transition text-slate-300 placeholder-slate-600 mb-3"
                         placeholder={index === 0 ? '主图的提示词：全身照，站在镜子前...' : '例如：鞋子特写，无人物...'}
                       />
+                      <div className="mb-3 flex flex-wrap gap-2">
+                        {VARIABLE_PROMPT_TERM_CATEGORIES.map((cat) => {
+                          const isOpen = openVariableTermMenu?.promptId === vp.id && openVariableTermMenu?.categoryId === cat.id;
+                          return (
+                            <div
+                              key={cat.id}
+                              className="relative"
+                              ref={(el) => {
+                                if (isOpen) openMenuWrapperRef.current = el;
+                              }}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => toggleVariableTermMenu(vp.id, cat.id)}
+                                className="flex items-center gap-2 px-3 py-2 bg-slate-900/40 border border-slate-700 hover:border-fuchsia-500 text-slate-200 rounded-xl text-xs font-semibold transition-colors"
+                              >
+                                <span>{cat.label}</span>
+                                <ChevronDownIcon className={`w-4 h-4 text-slate-400 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+                              </button>
+
+                              {isOpen && (
+                                <div className="absolute left-0 mt-2 z-50 w-[360px] max-w-[calc(100vw-3rem)] bg-slate-950/95 border border-slate-700 rounded-2xl shadow-2xl backdrop-blur-md overflow-hidden">
+                                  <div className="max-h-72 overflow-y-auto p-2">
+                                    {cat.items.map((item) => (
+                                      <button
+                                        key={`${cat.id}-${item.en}`}
+                                        type="button"
+                                        onClick={() => insertVariablePromptTerm(vp.id, item.en)}
+                                        className="w-full text-left px-3 py-2 rounded-xl hover:bg-slate-800/60 transition-colors flex items-center justify-between gap-3"
+                                      >
+                                        <span className="text-xs text-slate-200 truncate">{item.cn}</span>
+                                        <span className="text-[11px] text-slate-400 font-mono truncate">{item.en}</span>
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
                       {copyRecommendations[vp.id] && copyRecommendations[vp.id].length > 0 && (
                         <div className="mb-3 p-3 bg-slate-900/40 border border-white/5 rounded-2xl shadow-inner">
                           <div className="flex items-center justify-between mb-2">

@@ -460,21 +460,20 @@ const createBaseDirectives = () => `
 `;
 
 const GENERATION_REFERENCE_IMAGE_SINGLE_JSON_PROMPT = `
-你是一个为「多参考图合成」服务的图像解析器。你的输出会被程序读取并用于“融合主体信息”，所以必须严格输出 JSON。
+你是一位拥有 20 年经验的「商业摄影修图师」兼「视觉分析专家」。你的任务是极其精准地解析输入图片，提取用于高保真图像重建的 JSON 数据。
 
 【输入】
 - 你将收到一张图片。
 
-【任务】
-1) 判断这张图的主类型：人物 / 产品 / 场景 / 混合（人物+产品、人物+场景、产品+场景等）。
-2) 只提取“主体相关”的可见信息：结构、元素、颜色、材质、服装、配饰、脸部/发型（若可见）、场景、光照、氛围、后期风格。
-3) 严禁虚构看不到的信息：没有的就写 null 或 ""，并在 notes 里明确原因（例如：未露脸/被遮挡/裁切）。
-4) 人物：默认亚洲女性、小红书风格，但如果图中明显不符，请显式标注。
-5) 人物身材数字化：身高/体重/三围只能在“可以从画面明确判断或存在明显尺度参照”时填写；否则必须填 null，并写明无法确定。
+【核心任务】
+1) **显微镜级观察：** 不要只看大概。对于服装和产品，必须分析其**材质纹理（Texture）、光泽感（Sheen）、厚度（Weight）和工艺细节（Craftsmanship）**。
+2) **专业摄影分析：** 使用专业术语描述光线（如：伦勃朗光、蝴蝶光、漫反射、硬光）和构图。
+3) **严格的事实提取：** 严禁虚构。对于看不清的细节填 null，但在 notes 中说明。
+4) **人物与风格：** 默认亚洲女性、高质感小红书/商业摄影风格。
 
 【输出要求（必须严格遵守）】
-- 只输出一个 JSON 对象，不要 markdown，不要代码块，不要额外解释文字。
-- 字段必须齐全，缺失信息用 null 或 ""。
+- 只输出一个 JSON 对象，不要 markdown，不要代码块。
+- 重点在于 **materials（材质）** 和 **details（细节）** 字段的丰富度。
 
 JSON 结构：
 {
@@ -496,13 +495,13 @@ JSON 结构：
     },
     "face": {
       "visible": boolean,
-      "details": string | null,
+      "details": string | null, // 描述五官特征、皮肤质感（如：清透、哑光、奶油肌）
       "makeup": string | null,
       "notes": string
     },
-    "hair": string | null,
-    "clothing": string | null,
-    "accessories": string | null,
+    "hair": string | null, // 描述发色、发质（如：柔顺、毛躁）、卷度
+    "clothing": string | null, // 【重点】必须包含：面料名称（如针织、丹宁、丝绸）、表面纹理（如螺纹、磨毛、光面）、版型、褶皱感
+    "accessories": string | null, // 描述材质（金属、塑料、皮革）
     "pose": string | null,
     "framing": string | null,
     "notes": string
@@ -512,62 +511,83 @@ JSON 结构：
     "category": string | null,
     "overall": string | null,
     "structure": string | null,
-    "colors": string | null,
-    "materials": string | null,
-    "details": string | null,
+    "colors": string | null, // 精准色值描述（如：复古棕、象牙白）
+    "materials": string | null, // 【重点】描述材质组合（如：翻毛皮拼接网布）、反光特性、表面触感
+    "details": string | null, // 【重点】描述Logo工艺、缝线颜色、鞋底纹路、五金件细节
     "notes": string
   },
   "scene": {
     "present": boolean,
     "location_type": string | null,
     "elements": string | null,
-    "materials": string | null,
+    "materials": string | null, // 描述地面/墙面材质（如：粗糙混凝土、湿润草地）
     "cleanliness": string | null,
     "notes": string
   },
   "lighting": {
-    "source": string | null,
-    "direction": string | null,
-    "softness": string | null,
-    "shadows": string | null,
-    "color_temperature": string | null,
+    "source": string | null, // 自然光/人造光
+    "direction": string | null, // 侧光/逆光/顶光
+    "quality": string | null, // 【重点】软光(Soft)/硬光(Hard)/漫反射(Diffused)
+    "shadows": string | null, // 阴影深浅、边缘锐度
+    "color_temperature": string | null, // 暖调/冷调/中性
     "notes": string
   },
   "style": {
-    "overall_style": string | null,
-    "post_processing": string | null,
-    "not_style": string | null,
+    "overall_style": string | null, // 如：High-end Streetwear, Minimalist
+    "image_quality": string | null, // 【重点】描述画质特征：8k, sharp focus, film grain, noise level
+    "post_processing": string | null, // 滤镜感、对比度、饱和度
     "notes": string
   },
-  "negative_constraints": string
+  "negative_constraints": string // 画面中存在的瑕疵，如：blur, distortion, low resolution, bad anatomy
 }
 `.trim();
 
 const GENERATION_REFERENCE_IMAGE_MERGE_PROMPT = `
-你是一个为「图像生成模型」服务的多参考图融合器。你将收到多个 JSON（由图片解析器产出），这些 JSON 只包含可见事实与约束。
+你是一位「高级视觉提示词工程师」兼「多源图像融合专家」。你将收到多个 JSON（由图片解析器产出），这些 JSON 包含可见事实与约束。
 
-【目标】
-把多张参考图的主体信息融合成“一张完整的目标画面描述”，用于图像生成的可复刻提示词。
+【核心目标】
+将多张参考图的信息融合成一段**“商业摄影级”**的图像生成提示词。你需要不仅仅是“描述”，而是要进行“视觉增强”，确保生成的画面具备极高的材质真实感和细节精度。
 
-【融合规则（必须严格遵守）】
-1) 主体统一：
-   - 如果任意图片包含人物（person.present=true），最终主体必须包含人物；人物的穿搭/身材/脸部（若可见）以人物图为准。
-   - 如果存在产品专门图（product.present=true 且更像白底或特写），产品结构/元素/颜色/材质以该产品图为最高优先级。
-   - 如果存在场景图（scene.present=true），场景元素/结构/材质/氛围以场景图为最高优先级。
-2) 替换与剔除：
-   - 若人物图里出现鞋/包等产品，但另有产品图提供更清晰的产品信息，必须用产品图的信息替换人物图中的该产品描述。
-   - 删除所有不属于最终主体的无关信息（例如路人、无关摆件、无关文字）。
-3) 严令禁止无中生有：
-   - 所有细节只能来自输入 JSON；JSON 里为 null/"" 的信息不得补全或猜测。
-   - 若所有图片都不包含人物（所有 person.present=false），严禁在输出中出现人物相关描述。此时默认这是“产品的场景图”，主体为产品 + 场景（若有）。
-4) 输出格式固定（不要编号列表、不要 JSON）：
-   只输出以下 5 段标题 + 一段“其他描述”，每段用自然语言写清楚、具体、工程化：
-   【主体（人物/产品/人物+产品）】
-   【服装&造型】
-   【场景&环境】
-   【光照&氛围】
-   【风格&后期】
-   其他描述：人物默认全身照、三视图（左视/正视/右视）、平视视角；产品默认三视图、三维视角。若与输入 JSON 冲突（例如裁切到无脸），必须以 JSON 为准并明确说明。
+【融合与增强规则（最高优先级）】
+
+1. **产品独裁原则（解决特征冲突）：**
+   - **绝对替换：** 如果存在 \`product.present=true\` 的产品图（如鞋子），该产品的特征（颜色、材质、结构、Logo）必须**100%**取自产品图。
+   - **屏蔽干扰：** 严禁描述人物图（\`person.present=true\`）中原本穿着的同类产品。例如：若人物图穿红鞋，产品图是棕鞋，输出必须明确描述“棕色鞋”，并**完全忽略**红鞋的任何特征。
+
+2. **材质与细节的“合理推断”（解决细节缺失）：**
+   - **拒绝平庸：** 不要只输出“粉色背心”或“牛仔裤”。必须基于商业摄影标准，推断并补充材质细节。
+   - **增强示例：**
+     - “背心” -> “高品质针织螺纹面料，表面有细腻棉质纹理”
+     - “牛仔裤” -> “重磅水洗丹宁布，具有粗糙的织物纹理和清晰的缝线细节”
+     - “皮鞋” -> “细腻的翻毛皮与光面皮拼接，具有真实的皮革毛孔与光泽”
+
+3. **主体融合逻辑：**
+   - 主体以人物图的姿态、身材、脸部为骨架。
+   - 将产品图的物品“穿戴”或“放置”在主体上，替换原有物品。
+   - 场景以场景图为准；若无场景图，则保留人物图的背景，但需进行“干净化”处理（去除杂乱路人）。
+
+4. **画质与光影注入：**
+   - 必须在描述中自然融入提升画质的关键词，如：\`8k resolution\`, \`photorealistic\`, \`highly detailed texture\`, \`cinematic lighting\`, \`depth of field\`。
+
+【输出格式规范】
+不要输出 JSON，不要编号。请输出以下 5 段内容，语言需精准、优美、具有画面诱导性：
+
+【主体（人物/产品/人物+产品）】
+（描述主体的身份、姿态、核心动作，强调高分辨率和真实感）
+
+【服装&造型】
+（**重点区域**：详细描述衣物和配饰。在此处执行“产品替换”和“材质增强”。必须使用丰富的形容词描述布料、剪裁和质感。）
+
+【场景&环境】
+（描述环境元素、地面材质、背景景深。强调环境与主体的融合。）
+
+【光照&氛围】
+（描述光源方向、光质-软/硬、色温、阴影细节，营造的高级感。）
+
+【风格&后期】
+（定义摄影风格，如：商业广告大片、小红书生活感、胶片感。包含画质关键词。）
+
+其他描述：人物默认全身照、三视图（左视/正视/右视）、平视视角；产品默认三视图、三维视角。若与输入 JSON 冲突（例如裁切到无脸），必须以 JSON 为准并明确说明。
 
 【输入 JSON 列表】
 {{ANALYSES_JSON}}
