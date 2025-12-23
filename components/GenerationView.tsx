@@ -209,8 +209,6 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
           p.id === id ? { ...p, referenceImages: [...(p.referenceImages || []), ...newImages] } : p
         )
       );
-
-      await handleAnalyzeVariableImages(id, newImages);
   };
 
   const handleAnalyzeVariableImages = async (
@@ -804,7 +802,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                               className="flex items-center justify-center w-full p-3 border-2 border-dashed border-slate-700 rounded-xl text-slate-500 hover:border-fuchsia-500 hover:text-fuchsia-400 cursor-pointer transition-colors text-sm font-bold gap-2"
                             >
                               <PlusIcon className="w-4 h-4" />
-                              <span>上传参考图（可多张，自动解析）</span>
+                              <span>上传参考图（可多张）</span>
                             </label>
                           ) : (
                             <div className="bg-slate-900/50 rounded-xl p-3 border border-slate-700">
