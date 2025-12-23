@@ -1,5 +1,6 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { 
     getKnowledgeBase, 
     softDeleteKnowledgeBaseEntries, 
@@ -177,9 +178,9 @@ export const KnowledgeBaseModal: React.FC<KnowledgeBaseModalProps> = ({ onClose,
 
     const categories = ['全部', ...Object.values(KnowledgeBaseCategory)];
 
-    return (
+    const modal = (
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4 backdrop-blur-sm" onClick={onClose}>
-            <div 
+            <div
                 className="bg-slate-950 border border-slate-700 rounded-3xl shadow-2xl w-full max-w-5xl h-[85vh] flex flex-col overflow-hidden animate-fade-in"
                 onClick={(e) => e.stopPropagation()}
             >
@@ -401,4 +402,7 @@ export const KnowledgeBaseModal: React.FC<KnowledgeBaseModalProps> = ({ onClose,
             </div>
         </div>
     );
+
+    if (typeof document === 'undefined') return modal;
+    return createPortal(modal, document.body);
 };

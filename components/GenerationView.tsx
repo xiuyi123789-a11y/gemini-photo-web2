@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { AnalysisResult, ImageFile, VariablePrompt, GeneratedImageState, KnowledgeBaseEntry, KnowledgeBaseCategory, ReferenceImageFile, KnowledgeBaseAnalysis } from '../types';
-import { MagicWandIcon, PlusIcon, TrashIcon, RefreshIcon, DownloadIcon, ZoomInIcon, EyeIcon, PlayIcon, BookOpenIcon, ChevronDownIcon } from './IconComponents';
+import { MagicWandIcon, PlusIcon, TrashIcon, RefreshIcon, DownloadIcon, ZoomInIcon, EyeIcon, PlayIcon, BookOpenIcon, ChevronDownIcon, CheckIcon } from './IconComponents';
 import { generateMasterImage, modifyMasterImage, generateSingleFromMaster, analyzeAndMergeReferenceImagesForGeneration, analyzeAndCategorizeImageForKB } from '../services/replicateService';
 import { getKnowledgeBase, incrementEntryUsage, KB_UPDATE_EVENT, saveKBAnalysisToKB } from '../services/knowledgeBaseService';
 import { LoadingSpinner } from './LoadingSpinner';
@@ -77,13 +77,7 @@ const VARIABLE_PROMPT_TERM_CATEGORIES: Array<{
       { cn: '膝处裁切', en: 'Cropped at knees' },
       { cn: '聚焦手部', en: 'Focus on hands' },
       { cn: '肚脐/腹部聚焦', en: 'Navel focus / Belly shot' },
-      { cn: '锁骨特写', en: 'Clavicle shot' }
-    ]
-  },
-  {
-    id: 'headless_exclusion',
-    label: '去头排除',
-    items: [
+      { cn: '锁骨特写', en: 'Clavicle shot' },
       { cn: '无头照', en: 'Headless shot' },
       { cn: '脖子以下', en: 'Neck down' },
       { cn: '头部出框/被裁', en: 'Cropped head / Head out of frame' },
@@ -159,8 +153,6 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
   ]);
 
   const [kbCache, setKbCache] = useState<KnowledgeBaseEntry[]>([]);
-  const [copyRecommendations, setCopyRecommendations] = useState<Record<string, string[]>>({});
-  const [autoFillBackups, setAutoFillBackups] = useState<Record<string, string>>({});
   
   const [masterImage, setMasterImage] = useState<{ src: string | null; isLoading: boolean }>({ src: null, isLoading: false });
   const [masterPromptStale, setMasterPromptStale] = useState(false);
@@ -336,6 +328,24 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
     });
   };
 
+  const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  const isVariableTermSelected = (promptText: string, term: string) => {
+    if (!promptText) return false;
+    return promptText.includes(term);
+  };
+
+  const removeVariablePromptTerm = (promptText: string, term: string) => {
+    const escaped = escapeRegExp(term);
+    const re = new RegExp(`(^|[\\s,，;；\\n]+)${escaped}(?=([\\s,，;；\\n]+|$))`, 'g');
+    let next = promptText.replace(re, (match, prefix) => (prefix ? '，' : ''));
+    next = next
+      .replace(/[,\s，;；\n]+/g, '，')
+      .replace(/^，+/, '')
+      .replace(/，+$/, '');
+    return next.trim();
+  };
+
   const insertVariablePromptTerm = (promptId: string, term: string) => {
     const currentPrompt = variablePrompts.find(p => p.id === promptId)?.prompt || '';
     const textarea = variableTextareaRefs.current[promptId];
@@ -343,10 +353,16 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
     const end = textarea?.selectionEnd ?? currentPrompt.length;
     const before = currentPrompt.slice(0, start);
     const after = currentPrompt.slice(end);
-    const needsSpaceBefore = before.length > 0 && !/[\s,，;；\n]$/.test(before);
-    const needsSpaceAfter = after.length > 0 && !/^[\s,，;；\n]/.test(after);
-    const nextPrompt = `${before}${needsSpaceBefore ? ' ' : ''}${term}${needsSpaceAfter ? ' ' : ''}${after}`;
-    const caretPos = (before + (needsSpaceBefore ? ' ' : '') + term + (needsSpaceAfter ? ' ' : '')).length;
+
+    const beforeTrimmed = before.replace(/\s+$/, '');
+    const afterTrimmed = after.replace(/^\s+/, '');
+    const needsDelimiterBefore = beforeTrimmed.length > 0 && !/[，,;；\n]$/.test(beforeTrimmed);
+    const needsDelimiterAfter = afterTrimmed.length > 0 && !/^[，,;；\n]/.test(afterTrimmed);
+
+    const left = `${beforeTrimmed}${needsDelimiterBefore ? '，' : ''}`;
+    const right = `${needsDelimiterAfter ? '，' : ''}${afterTrimmed}`;
+    const nextPrompt = `${left}${term}${right}`;
+    const caretPos = left.length + term.length;
 
     setVariablePrompts(prev => prev.map(p => (p.id === promptId ? { ...p, prompt: nextPrompt } : p)));
 
@@ -356,6 +372,17 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
       el.focus();
       el.setSelectionRange(caretPos, caretPos);
     }, 0);
+  };
+
+  const toggleVariablePromptTerm = (promptId: string, term: string) => {
+    const currentPrompt = variablePrompts.find(p => p.id === promptId)?.prompt || '';
+    const selected = isVariableTermSelected(currentPrompt, term);
+    if (selected) {
+      const next = removeVariablePromptTerm(currentPrompt, term);
+      setVariablePrompts(prev => prev.map(p => (p.id === promptId ? { ...p, prompt: next } : p)));
+      return;
+    }
+    insertVariablePromptTerm(promptId, term);
   };
 
   const addVariablePrompt = () => {
@@ -575,140 +602,6 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
     setIsKbModalOpen(true);
   };
 
-  const tokenize = (text: string) => {
-    return new Set(
-      text
-        .toLowerCase()
-        .replace(/[^\w\u4e00-\u9fa5\s]/g, ' ')
-        .split(/\s+/)
-        .filter(Boolean)
-    );
-  };
-
-  const calculateSimilarity = (text1: string, text2: string) => {
-    const set1 = tokenize(text1);
-    const set2 = tokenize(text2);
-    if (set1.size === 0 || set2.size === 0) return 0;
-
-    let intersection = 0;
-    set1.forEach(token => {
-      if (set2.has(token)) intersection++;
-    });
-
-    const union = set1.size + set2.size - intersection;
-    return union === 0 ? 0 : intersection / union;
-  };
-
-  const pickEntryTextForField = (entry: KnowledgeBaseEntry, field: 'consistent' | 'variable') => {
-    if (entry.fullPrompt && entry.category === KnowledgeBaseCategory.FULL_PROMPT) {
-      const content = field === 'consistent' ? entry.fullPrompt.consistentPrompt : entry.fullPrompt.variablePrompt;
-      if (content && content.trim()) return content.trim();
-      return `${entry.fullPrompt.consistentPrompt || ''}\n${entry.fullPrompt.variablePrompt || ''}`.trim() || entry.promptFragment;
-    }
-    return entry.promptFragment;
-  };
-
-  const buildRecommendations = (fieldKey: string, currentText: string): string[] => {
-    const context = currentText.trim();
-    const activeEntries = kbCache.filter(e => !e.deletedAt);
-    const maxUsage = Math.max(...activeEntries.map(e => e.usageCount || 0), 1);
-
-    const scored = activeEntries
-      .map(entry => {
-        let entryText = entry.promptFragment;
-        if (entry.fullPrompt) {
-          entryText += ` ${entry.fullPrompt.consistentPrompt} ${entry.fullPrompt.variablePrompt}`;
-        }
-        const usageScore = (entry.usageCount || 0) / maxUsage;
-        const relevanceScore = context ? calculateSimilarity(context, entryText) : 0;
-        const finalScore = (usageScore * 0.4) + (relevanceScore * 0.6);
-        return { entry, finalScore };
-      })
-      .sort((a, b) => b.finalScore - a.finalScore);
-
-    const fieldType: 'consistent' | 'variable' = fieldKey === 'consistent' ? 'consistent' : 'variable';
-
-    const unique = new Set<string>();
-    const options: string[] = [];
-    for (const item of scored) {
-      const text = pickEntryTextForField(item.entry, fieldType).trim();
-      if (!text) continue;
-      const key = text.replace(/\s+/g, ' ').slice(0, 180);
-      if (unique.has(key)) continue;
-      unique.add(key);
-      options.push(text);
-      if (options.length >= 5) break;
-    }
-
-    const fallbackBase = context || (fieldType === 'consistent' ? '写一段高度一致的母版描述，包含主体、服装、场景、光影与风格。' : '写一条清晰的镜头指令，包含景别、构图、动作与焦点。');
-    const fallback = [
-      fallbackBase,
-      `${fallbackBase}\n高细节，真实质感，商业摄影风格。`,
-      `${fallbackBase}\n明确镜头焦段、景深与光源方向，保持主体一致。`,
-      `${fallbackBase}\n强调材质纹理、光影层次与色彩倾向。`,
-      `${fallbackBase}\n干净背景或可控场景，避免无关元素。`
-    ];
-
-    for (const text of fallback) {
-      if (options.length >= 3) break;
-      const key = text.replace(/\s+/g, ' ').slice(0, 180);
-      if (unique.has(key)) continue;
-      unique.add(key);
-      options.push(text);
-    }
-
-    return options.slice(0, Math.min(Math.max(options.length, 3), 5));
-  };
-
-  const getFieldText = (fieldKey: string) => {
-    if (fieldKey === 'consistent') return consistentPrompt;
-    return variablePrompts.find(p => p.id === fieldKey)?.prompt || '';
-  };
-
-  const setFieldText = (fieldKey: string, value: string) => {
-    if (fieldKey === 'consistent') {
-      setConsistentPrompt(value);
-      return;
-    }
-    setVariablePrompts(prev => prev.map(p => (p.id === fieldKey ? { ...p, prompt: value } : p)));
-  };
-
-  const handleGetInspiration = (fieldKey: string) => {
-    const start = performance.now();
-    const currentText = getFieldText(fieldKey);
-    const options = buildRecommendations(fieldKey, currentText);
-
-    setCopyRecommendations(prev => ({ ...prev, [fieldKey]: options }));
-    setAutoFillBackups(prev => (fieldKey in prev ? prev : { ...prev, [fieldKey]: currentText }));
-    setFieldText(fieldKey, options[0] || currentText);
-
-    logOperation('copy_autofill', {
-      fieldKey,
-      optionCount: options.length,
-      kbCacheCount: kbCache.length,
-      elapsedMs: Math.round(performance.now() - start)
-    });
-  };
-
-  const handleUndoAutoFill = (fieldKey: string) => {
-    const backup = autoFillBackups[fieldKey];
-    if (backup === undefined) return;
-    setFieldText(fieldKey, backup);
-    setAutoFillBackups(prev => {
-      const next = { ...prev };
-      delete next[fieldKey];
-      return next;
-    });
-    logOperation('copy_autofill_undo', { fieldKey });
-  };
-
-  const handleApplyRecommendation = (fieldKey: string, text: string) => {
-    const currentText = getFieldText(fieldKey);
-    setAutoFillBackups(prev => (fieldKey in prev ? prev : { ...prev, [fieldKey]: currentText }));
-    setFieldText(fieldKey, text);
-    logOperation('copy_recommendation_apply', { fieldKey, length: text.length });
-  };
-
   const handleSelectKbEntry = async (entry: KnowledgeBaseEntry) => {
     try {
         await incrementEntryUsage(entry.id);
@@ -842,14 +735,6 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                     </h3>
                     <div className="flex items-center gap-2">
                       <button
-                        onClick={() => handleGetInspiration('consistent')}
-                        className="px-3 py-1.5 text-fuchsia-300 bg-fuchsia-500/10 hover:bg-fuchsia-500/20 rounded-full transition-colors flex items-center gap-1.5 text-sm font-semibold border border-fuchsia-500/20"
-                        title="智能推荐并自动填充"
-                      >
-                        <MagicWandIcon className="w-4 h-4" />
-                        获取灵感
-                      </button>
-                      <button
                         onClick={() => openKbModal('consistent')}
                         className="px-3 py-1.5 text-slate-300 bg-slate-800/70 hover:bg-slate-700 rounded-full transition-colors flex items-center gap-1.5 text-sm font-semibold border border-slate-700"
                         title="从知识库选择"
@@ -867,33 +752,6 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                   className="w-full p-4 bg-slate-800/50 border border-slate-600 rounded-2xl focus:ring-2 focus:ring-fuchsia-500 focus:border-transparent transition-all text-slate-200 placeholder-slate-500 resize-y shadow-inner"
                   placeholder="例如：一名19岁的女大学生，穿着白色超大T恤和浅蓝色宽松牛仔裤..."
                 />
-                {copyRecommendations['consistent'] && copyRecommendations['consistent'].length > 0 && (
-                  <div className="mt-3 p-4 bg-slate-900/40 border border-white/5 rounded-2xl shadow-inner">
-                    <div className="flex items-center justify-between mb-3">
-                      <span className="text-xs font-semibold text-slate-400">智能推荐 (3-5)</span>
-                      {autoFillBackups['consistent'] !== undefined && (
-                        <button
-                          onClick={() => handleUndoAutoFill('consistent')}
-                          className="text-xs font-bold text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 px-3 py-1.5 rounded-full border border-amber-500/20 transition-colors"
-                        >
-                          撤销自动填充
-                        </button>
-                      )}
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {copyRecommendations['consistent'].map((opt, i) => (
-                        <button
-                          key={`${i}-${opt.slice(0, 24)}`}
-                          onClick={() => handleApplyRecommendation('consistent', opt)}
-                          className="text-xs bg-slate-800 border border-slate-700 hover:border-fuchsia-500 text-slate-300 hover:text-white px-3 py-2 rounded-xl transition max-w-full text-left"
-                          title={opt}
-                        >
-                          {opt.length > 42 ? `${opt.slice(0, 42)}...` : opt}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
               </div>
 
               <div>
@@ -912,9 +770,6 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                       <div className="flex items-center justify-between mb-2">
                          <span className="text-sm font-bold text-fuchsia-400 uppercase tracking-wider">图片 #{index + 1}</span>
                          <div className="flex space-x-1">
-                            <button onClick={() => handleGetInspiration(vp.id)} className="p-2 text-slate-400 hover:text-fuchsia-400 hover:bg-white/5 rounded-full transition-colors" title="智能推荐并自动填充">
-                                <MagicWandIcon className="w-4 h-4" />
-                            </button>
                             <button onClick={() => openKbModal(vp.id)} className="p-2 text-slate-400 hover:text-slate-200 hover:bg-white/5 rounded-full transition-colors" title="从知识库选择">
                                 <BookOpenIcon className="w-4 h-4" />
                             </button>
@@ -954,19 +809,27 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                               </button>
 
                               {isOpen && (
-                                <div className="absolute left-0 mt-2 z-50 w-[360px] max-w-[calc(100vw-3rem)] bg-slate-950/95 border border-slate-700 rounded-2xl shadow-2xl backdrop-blur-md overflow-hidden">
+                                <div className="absolute left-0 mt-2 z-[9999] w-[360px] max-w-[calc(100vw-3rem)] bg-slate-950/95 border border-slate-700 rounded-2xl shadow-2xl backdrop-blur-md overflow-hidden">
                                   <div className="max-h-72 overflow-y-auto p-2">
-                                    {cat.items.map((item) => (
-                                      <button
-                                        key={`${cat.id}-${item.en}`}
-                                        type="button"
-                                        onClick={() => insertVariablePromptTerm(vp.id, item.en)}
-                                        className="w-full text-left px-3 py-2 rounded-xl hover:bg-slate-800/60 transition-colors flex items-center justify-between gap-3"
-                                      >
-                                        <span className="text-xs text-slate-200 truncate">{item.cn}</span>
-                                        <span className="text-[11px] text-slate-400 font-mono truncate">{item.en}</span>
-                                      </button>
-                                    ))}
+                                    {cat.items.map((item) => {
+                                      const selected = isVariableTermSelected(vp.prompt || '', item.en);
+                                      return (
+                                        <button
+                                          key={`${cat.id}-${item.en}`}
+                                          type="button"
+                                          onClick={() => toggleVariablePromptTerm(vp.id, item.en)}
+                                          className={`w-full text-left px-3 py-2 rounded-xl transition-colors flex items-center justify-between gap-3 ${selected ? 'bg-fuchsia-500/15 hover:bg-fuchsia-500/20 border border-fuchsia-500/30' : 'hover:bg-slate-800/60 border border-transparent'}`}
+                                        >
+                                          <div className="flex items-center gap-2 min-w-0">
+                                            <div className={`w-5 h-5 rounded-md border flex items-center justify-center flex-shrink-0 ${selected ? 'bg-fuchsia-600/30 border-fuchsia-500/40 text-fuchsia-200' : 'bg-slate-900/60 border-slate-700 text-transparent'}`}>
+                                              <CheckIcon className="w-3.5 h-3.5" />
+                                            </div>
+                                            <span className={`text-xs truncate ${selected ? 'text-fuchsia-100 font-semibold' : 'text-slate-200'}`}>{item.cn}</span>
+                                          </div>
+                                          <span className="text-[11px] text-slate-400 font-mono truncate">{item.en}</span>
+                                        </button>
+                                      );
+                                    })}
                                   </div>
                                 </div>
                               )}
@@ -974,33 +837,6 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                           );
                         })}
                       </div>
-                      {copyRecommendations[vp.id] && copyRecommendations[vp.id].length > 0 && (
-                        <div className="mb-3 p-3 bg-slate-900/40 border border-white/5 rounded-2xl shadow-inner">
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="text-[11px] font-semibold text-slate-400">智能推荐 (3-5)</span>
-                            {autoFillBackups[vp.id] !== undefined && (
-                              <button
-                                onClick={() => handleUndoAutoFill(vp.id)}
-                                className="text-[11px] font-bold text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 px-2.5 py-1 rounded-full border border-amber-500/20 transition-colors"
-                              >
-                                撤销自动填充
-                              </button>
-                            )}
-                          </div>
-                          <div className="flex flex-wrap gap-2">
-                            {copyRecommendations[vp.id].map((opt, i) => (
-                              <button
-                                key={`${i}-${opt.slice(0, 24)}`}
-                                onClick={() => handleApplyRecommendation(vp.id, opt)}
-                                className="text-[11px] bg-slate-800 border border-slate-700 hover:border-fuchsia-500 text-slate-300 hover:text-white px-2.5 py-2 rounded-xl transition max-w-full text-left"
-                                title={opt}
-                              >
-                                {opt.length > 42 ? `${opt.slice(0, 42)}...` : opt}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
                       
                       {/* Image Upload Area */}
                       <div className="mb-3">
