@@ -124,6 +124,7 @@ export interface SmartRetouchRow {
     originalImage: ImageFile | null;
     analysisText: string; // The visible "Improvement Instructions"
     understandingText?: string; // The internal "Original Image Understanding"
+    retouchStrength: number;
     isAnalyzing: boolean;
     generatedImage: string | null;
     isGenerating: boolean;

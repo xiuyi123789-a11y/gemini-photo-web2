@@ -824,19 +824,40 @@ ${e.promptFragment}
         const understanding = await runVisionAnalysis(imageFile, IMAGE_UNDERSTANDING_PROMPT);
 
         const suggestionsPrompt = `
-你是一个专业的商业摄影修图与重绘创意总监。你会基于输入图片与“图像理解 Prompt”，输出可执行的修图/重绘指令。
+你是一个专业的商业摄影修图与重绘创意总监。你会基于输入图片与“图像理解 Prompt”，产出一份可执行的修图方案，并把“给用户看的解释”与“给图生图模型的英文提示词”严格分开输出。你的输出将被直接粘贴到工具里使用，因此格式必须稳定。
 
 【输入】
 图像理解 Prompt：
 ${understanding}
 
+【重绘幅度（0-1）规则】
+- 0.10–0.30：只做微调，尽量保持原图细节，背景与光影很难大改。
+- 0.50–0.70：可以明显调整光影与背景，但保持主体轮廓与身份。
+- 0.80+：大幅重绘，有较高风险改动物品外观（例如鞋子变样）。
+
 【任务】
-提出 3-5 条具体、可执行的修图或 AI 重绘建议，重点围绕：构图、光影、色调、质感、背景控制、人物状态与穿搭展示。
-建议要像可直接粘贴到图生图指令区那样可用，避免空泛词。
+- 给出 1 个“重绘幅度”建议值（0-1 小数，保留两位）。
+- 提出 3–5 条具体、可执行、可验证的优化点，聚焦：构图、光影、色调、质感、背景控制、人物状态与穿搭展示（偏商业摄影表达）。
+- 把这些优化点转写成适合图生图模型的英文提示词：偏“摄影语言 + 可执行的细节”，不要把“调整色调/更高级/更有氛围”这类中文口号直接翻译成空话。
+- 英文提示词必须包含权重语法，例如：(warm lighting:1.3)，并且至少出现 5 处带权重的短语；权重建议范围 1.1–1.6。
+
 ${learnedContext}
 
-【输出要求】
-只输出建议文本，允许多行，不输出 JSON，不输出编号列表，不要解释。
+【输出格式（必须严格遵守，除标题外不要出现任何编号：不要 1) 2) 3)；不要 1. 2. 3.；不要 ①②③）】
+【参数】
+重绘幅度：<0-1 小数>
+
+【给用户看的】
+用中文解释“要改什么 + 为什么 + 预期效果”。可分多行，允许以“- ”开头，但不要出现任何编号。
+
+【给AI看的】
+只输出英文提示词（可多行），不要中文解释，不要 JSON，不要编号。
+至少包含这些信息：
+- Lighting：光源方向/光质/色温，并使用权重
+- Color grading：具体色调与对比曲线倾向，并使用权重
+- Texture/detail：皮肤/织物/材质细节，并使用权重
+- Composition/camera：镜头焦段/景深/机位或构图策略
+- Quality：photorealistic, commercial photography, high detail, clean background（不要水印/文字）
 `.trim();
 
         const suggestions = await runVisionAnalysis(imageFile, suggestionsPrompt);
@@ -889,7 +910,8 @@ Return ONLY the final Merged Description text. Do not add explanations.
 
 export const generateSmartRetouchImage = async (
     originalImageFile: File,
-    fullDescription: string
+    fullDescription: string,
+    strength: number = 0.65
 ): Promise<string> => {
     const base64Image = await fileToBase64(originalImageFile);
     const directives = createBaseDirectives();
@@ -916,7 +938,7 @@ ${directives}
     const result = await callApi('/retouch-image', {
         image: base64Image,
         prompt: prompt,
-        strength: 0.65 
+        strength: Math.min(1, Math.max(0, strength))
     });
 
     return result.imageUrl;

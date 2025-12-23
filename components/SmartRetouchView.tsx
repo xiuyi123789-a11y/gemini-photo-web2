@@ -10,9 +10,9 @@ import { KnowledgeBaseModal } from './KnowledgeBaseModal';
 
 export const SmartRetouchView: React.FC = () => {
     const [rows, setRows] = useState<SmartRetouchRow[]>([
-        { id: '1', originalImage: null, analysisText: '', understandingText: '', isAnalyzing: false, generatedImage: null, isGenerating: false, error: null },
-        { id: '2', originalImage: null, analysisText: '', understandingText: '', isAnalyzing: false, generatedImage: null, isGenerating: false, error: null },
-        { id: '3', originalImage: null, analysisText: '', understandingText: '', isAnalyzing: false, generatedImage: null, isGenerating: false, error: null },
+        { id: '1', originalImage: null, analysisText: '', understandingText: '', retouchStrength: 0.65, isAnalyzing: false, generatedImage: null, isGenerating: false, error: null },
+        { id: '2', originalImage: null, analysisText: '', understandingText: '', retouchStrength: 0.65, isAnalyzing: false, generatedImage: null, isGenerating: false, error: null },
+        { id: '3', originalImage: null, analysisText: '', understandingText: '', retouchStrength: 0.65, isAnalyzing: false, generatedImage: null, isGenerating: false, error: null },
     ]);
     const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
     const [saveStatus, setSaveStatus] = useState<Record<string, boolean>>({});
@@ -29,6 +29,32 @@ export const SmartRetouchView: React.FC = () => {
         
         // Auto-trigger analysis silently
         handleAnalyze(rowId, file);
+    };
+
+    const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
+
+    const parseStrengthFromText = (text: string) => {
+        const match = (text || '').match(/重绘幅度\s*[:：]\s*(0(?:\.\d+)?|1(?:\.0+)?)/);
+        if (!match) return null;
+        const n = Number(match[1]);
+        if (Number.isNaN(n)) return null;
+        return clamp01(n);
+    };
+
+    const extractAiInstructions = (text: string) => {
+        const raw = (text || '').trim();
+        if (!raw) return '';
+
+        const match = raw.match(/【\s*给\s*AI\s*看\s*的\s*】([\s\S]*)$/i);
+        const section = (match?.[1] || raw).trim();
+
+        const cleaned = section
+            .split(/\r?\n/)
+            .filter(line => !/重绘幅度|retouch_strength|strength\s*[:：]/i.test(line))
+            .join('\n')
+            .trim();
+
+        return cleaned || raw;
     };
 
     const handleAnalyze = async (rowId: string, file?: File) => {
@@ -57,7 +83,8 @@ export const SmartRetouchView: React.FC = () => {
                     ...r, 
                     isAnalyzing: false, 
                     analysisText: analysis.suggestions,
-                    understandingText: analysis.understanding
+                    understandingText: analysis.understanding,
+                    retouchStrength: parseStrengthFromText(analysis.suggestions) ?? r.retouchStrength
                 } : r);
             });
         } catch (e: any) {
@@ -72,19 +99,20 @@ export const SmartRetouchView: React.FC = () => {
         setRows(prev => prev.map(r => r.id === rowId ? { ...r, isGenerating: true, error: null } : r));
         try {
             // 1. Merge Prompts: Original Description + User Instructions
-            let fullPrompt = row.analysisText;
+            const aiInstructions = extractAiInstructions(row.analysisText);
+            let fullPrompt = aiInstructions;
             
             if (row.understandingText) {
                 // Use AI to merge logic
                  fullPrompt = await mergeRetouchPromptsWithImage(
                     row.originalImage.file,
                     row.understandingText,
-                    row.analysisText
+                    aiInstructions
                 );
             }
 
             // 2. Generate Image
-            const result = await generateSmartRetouchImage(row.originalImage.file, fullPrompt);
+            const result = await generateSmartRetouchImage(row.originalImage.file, fullPrompt, row.retouchStrength);
             
             setRows(prev => prev.map(r => r.id === rowId ? { ...r, generatedImage: result, isGenerating: false } : r));
         } catch (e: any) {
@@ -209,11 +237,40 @@ export const SmartRetouchView: React.FC = () => {
                                 <div className="relative aspect-[3/4] bg-slate-900/60 rounded-2xl border border-slate-700 p-4 overflow-hidden">
                                     {row.originalImage ? (
                                         <>
+                                            <div className="absolute top-3 left-3 right-3 z-10 flex items-center gap-3 bg-slate-950/40 border border-slate-700/60 rounded-xl px-3 py-2 backdrop-blur">
+                                                <span className="text-[11px] font-semibold text-slate-200 whitespace-nowrap">重绘幅度</span>
+                                                <input
+                                                    type="range"
+                                                    min={0}
+                                                    max={1}
+                                                    step={0.01}
+                                                    value={row.retouchStrength}
+                                                    onChange={(e) => {
+                                                        const next = clamp01(Number(e.target.value));
+                                                        setRows(prev => prev.map(r => r.id === row.id ? { ...r, retouchStrength: next } : r));
+                                                    }}
+                                                    className="flex-1 accent-fuchsia-500"
+                                                />
+                                                <input
+                                                    type="number"
+                                                    min={0}
+                                                    max={1}
+                                                    step={0.01}
+                                                    value={Number(row.retouchStrength.toFixed(2))}
+                                                    onChange={(e) => {
+                                                        const raw = e.target.value;
+                                                        const n = raw === '' ? 0 : Number(raw);
+                                                        const next = clamp01(Number.isNaN(n) ? 0 : n);
+                                                        setRows(prev => prev.map(r => r.id === row.id ? { ...r, retouchStrength: next } : r));
+                                                    }}
+                                                    className="w-20 bg-slate-950/40 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-100 focus:ring-2 focus:ring-fuchsia-500 focus:border-transparent"
+                                                />
+                                            </div>
                                             <textarea 
                                                 value={row.analysisText}
                                                 onChange={(e) => setRows(prev => prev.map(r => r.id === row.id ? {...r, analysisText: e.target.value} : r))}
                                                 placeholder="在此输入修图指令，或等待 AI 解析..."
-                                                className="w-full h-full bg-transparent border-none resize-none text-slate-300 text-sm focus:ring-0 placeholder-slate-500 custom-scrollbar pb-10"
+                                                className="w-full h-full bg-transparent border-none resize-none text-slate-300 text-sm focus:ring-0 placeholder-slate-500 custom-scrollbar pt-16 pb-10"
                                             />
                                             <button
                                                 onClick={() => openKbModal(row.id)}
