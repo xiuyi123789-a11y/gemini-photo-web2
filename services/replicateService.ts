@@ -360,6 +360,32 @@ export const analyzeImages = async (
     return results;
 };
 
+export const analyzeAndMergeReferenceImagesForGeneration = async (files: File[]): Promise<string> => {
+    if (!Array.isArray(files) || files.length === 0) return '';
+
+    const perImageRaw = await Promise.all(
+        files.map(file => runVisionAnalysis(file, GENERATION_REFERENCE_IMAGE_SINGLE_JSON_PROMPT))
+    );
+
+    const analyses = perImageRaw.map((text, idx) => {
+        const parsed = tryParseJsonObject(text);
+        if (parsed) return parsed;
+        return { image_index: idx + 1, raw: (text || '').trim() };
+    });
+
+    const mergePrompt = GENERATION_REFERENCE_IMAGE_MERGE_PROMPT.replace(
+        '{{ANALYSES_JSON}}',
+        JSON.stringify(analyses, null, 2)
+    );
+
+    const result = await callApi('/merge-generation-understanding', { prompt: mergePrompt });
+    const merged = (result?.analysis || result?.prompt || result?.text || '').toString();
+    if (!merged.trim()) {
+        return perImageRaw.map((t, i) => `[Image ${i + 1}]\n${t}`).join('\n\n');
+    }
+    return merged.trim();
+};
+
 export const analyzeAndCategorizeImageForKB = async (imageFile: File): Promise<KnowledgeBaseAnalysis> => {
     try {
         const resultText = await runVisionAnalysis(imageFile, IMAGE_UNDERSTANDING_PROMPT);
@@ -432,6 +458,130 @@ const createBaseDirectives = () => `
 ## 1. STRICT OUTPUT FORMAT:
 - **Aspect Ratio:** The output image MUST BE a **3:4 vertical portrait**. DO NOT generate landscape or square images. This is a mandatory instruction.
 `;
+
+const GENERATION_REFERENCE_IMAGE_SINGLE_JSON_PROMPT = `
+你是一个为「多参考图合成」服务的图像解析器。你的输出会被程序读取并用于“融合主体信息”，所以必须严格输出 JSON。
+
+【输入】
+- 你将收到一张图片。
+
+【任务】
+1) 判断这张图的主类型：人物 / 产品 / 场景 / 混合（人物+产品、人物+场景、产品+场景等）。
+2) 只提取“主体相关”的可见信息：结构、元素、颜色、材质、服装、配饰、脸部/发型（若可见）、场景、光照、氛围、后期风格。
+3) 严禁虚构看不到的信息：没有的就写 null 或 ""，并在 notes 里明确原因（例如：未露脸/被遮挡/裁切）。
+4) 人物：默认亚洲女性、小红书风格，但如果图中明显不符，请显式标注。
+5) 人物身材数字化：身高/体重/三围只能在“可以从画面明确判断或存在明显尺度参照”时填写；否则必须填 null，并写明无法确定。
+
+【输出要求（必须严格遵守）】
+- 只输出一个 JSON 对象，不要 markdown，不要代码块，不要额外解释文字。
+- 字段必须齐全，缺失信息用 null 或 ""。
+
+JSON 结构：
+{
+  "image_type": "person" | "product" | "scene" | "mixed",
+  "subject_priority": "person" | "product" | "scene" | null,
+  "person": {
+    "present": boolean,
+    "gender": string | null,
+    "age_range": string | null,
+    "ethnicity": string | null,
+    "vibe": string | null,
+    "body": {
+      "height_cm": number | null,
+      "weight_kg": number | null,
+      "bust_cm": number | null,
+      "waist_cm": number | null,
+      "hip_cm": number | null,
+      "notes": string
+    },
+    "face": {
+      "visible": boolean,
+      "details": string | null,
+      "makeup": string | null,
+      "notes": string
+    },
+    "hair": string | null,
+    "clothing": string | null,
+    "accessories": string | null,
+    "pose": string | null,
+    "framing": string | null,
+    "notes": string
+  },
+  "product": {
+    "present": boolean,
+    "category": string | null,
+    "overall": string | null,
+    "structure": string | null,
+    "colors": string | null,
+    "materials": string | null,
+    "details": string | null,
+    "notes": string
+  },
+  "scene": {
+    "present": boolean,
+    "location_type": string | null,
+    "elements": string | null,
+    "materials": string | null,
+    "cleanliness": string | null,
+    "notes": string
+  },
+  "lighting": {
+    "source": string | null,
+    "direction": string | null,
+    "softness": string | null,
+    "shadows": string | null,
+    "color_temperature": string | null,
+    "notes": string
+  },
+  "style": {
+    "overall_style": string | null,
+    "post_processing": string | null,
+    "not_style": string | null,
+    "notes": string
+  },
+  "negative_constraints": string
+}
+`.trim();
+
+const GENERATION_REFERENCE_IMAGE_MERGE_PROMPT = `
+你是一个为「图像生成模型」服务的多参考图融合器。你将收到多个 JSON（由图片解析器产出），这些 JSON 只包含可见事实与约束。
+
+【目标】
+把多张参考图的主体信息融合成“一张完整的目标画面描述”，用于图像生成的可复刻提示词。
+
+【融合规则（必须严格遵守）】
+1) 主体统一：
+   - 如果任意图片包含人物（person.present=true），最终主体必须包含人物；人物的穿搭/身材/脸部（若可见）以人物图为准。
+   - 如果存在产品专门图（product.present=true 且更像白底或特写），产品结构/元素/颜色/材质以该产品图为最高优先级。
+   - 如果存在场景图（scene.present=true），场景元素/结构/材质/氛围以场景图为最高优先级。
+2) 替换与剔除：
+   - 若人物图里出现鞋/包等产品，但另有产品图提供更清晰的产品信息，必须用产品图的信息替换人物图中的该产品描述。
+   - 删除所有不属于最终主体的无关信息（例如路人、无关摆件、无关文字）。
+3) 严令禁止无中生有：
+   - 所有细节只能来自输入 JSON；JSON 里为 null/"" 的信息不得补全或猜测。
+   - 若所有图片都不包含人物（所有 person.present=false），严禁在输出中出现人物相关描述。此时默认这是“产品的场景图”，主体为产品 + 场景（若有）。
+4) 输出格式固定（不要编号列表、不要 JSON）：
+   只输出以下 5 段标题 + 一段“其他描述”，每段用自然语言写清楚、具体、工程化：
+   【主体（人物/产品/人物+产品）】
+   【服装&造型】
+   【场景&环境】
+   【光照&氛围】
+   【风格&后期】
+   其他描述：人物默认全身照、三视图（左视/正视/右视）、平视视角；产品默认三视图、三维视角。若与输入 JSON 冲突（例如裁切到无脸），必须以 JSON 为准并明确说明。
+
+【输入 JSON 列表】
+{{ANALYSES_JSON}}
+`.trim();
+
+const tryParseJsonObject = (text: string): any | null => {
+    const raw = (text || '').trim();
+    if (!raw) return null;
+    try {
+        return JSON.parse(raw);
+    } catch {
+        return null;
+    }
+};
 
 export const generateMasterImage = async (
     referenceImages: string[],

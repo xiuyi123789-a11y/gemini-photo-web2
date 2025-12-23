@@ -384,6 +384,37 @@ app.post('/api/analyze-image', upload.single('image'), async (req, res) => {
   }
 });
 
+app.post('/api/merge-generation-understanding', validateUserId, async (req, res) => {
+  try {
+    const replicateClient = getReplicateClient(req);
+    const prompt = (req.body && req.body.prompt) ? String(req.body.prompt) : '';
+
+    if (!prompt.trim()) {
+      return res.status(400).json({ error: 'Missing prompt' });
+    }
+
+    const SYSTEM_PROMPT = `你是一个为「图像生成模型」服务的多参考图融合器。只使用输入内容中的事实与约束，不得补全或猜测。输出必须是中文自然语言，且只输出最终可复刻提示词文本。`;
+
+    const input = {
+      top_p: 1,
+      prompt,
+      messages: [],
+      temperature: 0.2,
+      system_prompt: SYSTEM_PROMPT,
+      presence_penalty: 0,
+      frequency_penalty: 0,
+      max_completion_tokens: 2500
+    };
+
+    const output = await executeWithRetry(() => replicateClient.run("openai/gpt-4o-mini", { input }));
+    const text = Array.isArray(output) ? output.join('') : output.toString();
+    res.json({ success: true, analysis: text });
+  } catch (error) {
+    console.error('[Server Error] merge-generation-understanding', error);
+    res.status(500).json({ success: false, error: error.message || '合并理解服务出错' });
+  }
+});
+
 // 3. POST /api/generate-image (Image Generation)
 app.post('/api/generate-image', validateUserId, async (req, res) => {
     try {

@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { AnalysisResult, ImageFile, VariablePrompt, GeneratedImageState, KnowledgeBaseEntry, KnowledgeBaseCategory, ReferenceImageFile, KnowledgeBaseAnalysis } from '../types';
 import { MagicWandIcon, PlusIcon, TrashIcon, RefreshIcon, DownloadIcon, ZoomInIcon, EyeIcon, PlayIcon, BookOpenIcon } from './IconComponents';
-import { generateMasterImage, modifyMasterImage, generateSingleFromMaster, analyzeImages, preprocessImageForGeneration, removeWatermark, analyzeAndCategorizeImageForKB } from '../services/replicateService';
+import { generateMasterImage, modifyMasterImage, generateSingleFromMaster, analyzeAndMergeReferenceImagesForGeneration, analyzeAndCategorizeImageForKB } from '../services/replicateService';
 import { getKnowledgeBase, incrementEntryUsage, KB_UPDATE_EVENT, saveKBAnalysisToKB } from '../services/knowledgeBaseService';
 import { LoadingSpinner } from './LoadingSpinner';
 import { KnowledgeBaseModal } from './KnowledgeBaseModal';
@@ -94,21 +94,6 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
          }
    };
 
-   const triggerAutoAnalysis = async () => {
-     const validImages = referenceImages.filter(img => !img.isProcessing && img.processedPreview).map(img => img.file);
-     if (validImages.length === 0) return;
-     
-     setIsAnalyzing(true);
-     try {
-         const result = await analyzeImages(validImages);
-         populateFromAnalysis(result, false); // Only update consistency
-     } catch (e) {
-         console.error("Auto analysis failed", e);
-     } finally {
-         setIsAnalyzing(false);
-     }
-   };
-
   // Removed automatic trigger of old analysis to prevent overwriting the new specific subject identification
   /*
   useEffect(() => {
@@ -141,8 +126,8 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
         id: uuidv4(),
         file: imgFile.file,
         originalPreview: imgFile.preview,
-        processedPreview: null, // Will be set after manual analysis
-        isProcessing: false,    // Not processing yet
+        processedPreview: imgFile.preview,
+        isProcessing: false,
     }));
 
     setReferenceImages(prev => [...prev, ...newImageStates]);
@@ -158,43 +143,11 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
     setError(null);
 
     try {
-        // 1. Process Images (Watermark Removal)
-        const processedRefImages: ReferenceImageFile[] = [];
-        
-        for (const img of referenceImages) {
-            // If already processed, skip re-processing
-            if (img.processedPreview) {
-                processedRefImages.push(img);
-                continue;
-            }
-
-            // Update status to processing
-            setReferenceImages(prev => prev.map(p => p.id === img.id ? { ...p, isProcessing: true } : p));
-
-            let processedUrl = img.originalPreview;
-            try {
-                const analysis = await preprocessImageForGeneration(img.file);
-                if (analysis.hasWatermark) {
-                    processedUrl = await removeWatermark(img.file);
-                }
-            } catch (e) {
-                console.error(`Failed to process image ${img.id}`, e);
-                // Fallback to original
-            }
-
-            const updatedImg = { ...img, processedPreview: processedUrl, isProcessing: false };
-            processedRefImages.push(updatedImg);
-            
-            // Update state immediately
-            setReferenceImages(prev => prev.map(p => p.id === img.id ? updatedImg : p));
-        }
-
-        // 2. Analyze All Images together
-        const validFiles = processedRefImages.map(img => img.file);
+        const validFiles = referenceImages.map(img => img.file);
         if (validFiles.length > 0) {
-            const result = await analyzeImages(validFiles);
-            // 3. Populate UI (Replace existing content)
-            populateFromAnalysis(result, true);
+            const mergedPrompt = await analyzeAndMergeReferenceImagesForGeneration(validFiles);
+            setConsistentPrompt(mergedPrompt.trim());
+            setVariablePrompts([{ id: uuidv4(), prompt: '' }]);
         }
 
     } catch (e: any) {
@@ -235,12 +188,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
   };
 
   const getProcessedImages = () => {
-      const processed = referenceImages.map(img => img.processedPreview).filter((p): p is string => p !== null);
-      if (processed.length !== referenceImages.length) {
-          setError("请等待所有参考图处理（例如，去水印）完成。");
-          return null;
-      }
-      return processed;
+      return referenceImages.map(img => img.originalPreview);
   };
 
   const handleVariableImageUpload = async (id: string, files: File[]) => {
