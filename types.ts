@@ -61,11 +61,12 @@ export interface AnalysisResult {
 export interface VariablePrompt {
   id: string;
   prompt: string;
-  referenceImage?: {
-      file: File;
-      preview: string;
-  };
-  analysis?: KnowledgeBaseAnalysis;
+  referenceImages?: Array<{
+    id: string;
+    file: File;
+    preview: string;
+  }>;
+  imageAnalyses?: Record<string, KnowledgeBaseAnalysis>;
   isAnalyzing?: boolean;
 }
 

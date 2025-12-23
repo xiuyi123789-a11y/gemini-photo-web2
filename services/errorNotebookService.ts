@@ -1,5 +1,5 @@
 
-const API_BASE_URL = '/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
 
 export interface ErrorEntry {
     id: string;
@@ -8,6 +8,10 @@ export interface ErrorEntry {
     timestamp: string;
     tags?: string[];
 }
+
+export type NotebookWriteInput =
+    | { issue: string; solution: string; tags?: string[] }
+    | { type: string; details: string; tags?: string[] };
 
 const callApi = async (endpoint: string, method: string = 'GET', body?: any) => {
     const headers: HeadersInit = {
@@ -27,13 +31,39 @@ const callApi = async (endpoint: string, method: string = 'GET', body?: any) => 
     return await response.json();
 };
 
-export const addToErrorNotebook = async (issue: string, solution: string, tags: string[] = []) => {
+export const addToErrorNotebook = async (
+    issueOrEntry: string | NotebookWriteInput,
+    solution?: string,
+    tags: string[] = []
+) => {
     try {
-        await callApi('/error-notebook', 'POST', { issue, solution, tags });
-        console.log(`Added entry to error notebook: ${issue}`);
+        const payload =
+            typeof issueOrEntry === 'string'
+                ? { issue: issueOrEntry, solution: solution || '', tags }
+                : 'issue' in issueOrEntry
+                    ? { issue: issueOrEntry.issue, solution: issueOrEntry.solution, tags: issueOrEntry.tags || [] }
+                    : { issue: issueOrEntry.type, solution: issueOrEntry.details, tags: issueOrEntry.tags || [] };
+
+        await callApi('/error-notebook', 'POST', payload);
+        console.log(`Added entry to error notebook: ${payload.issue}`);
     } catch (error) {
         console.error("Failed to write to error notebook:", error);
     }
+};
+
+export const logOperation = (action: string, data?: Record<string, any>, tags: string[] = []) => {
+    void addToErrorNotebook(
+        `[op] ${action}`,
+        JSON.stringify(
+            {
+                ...data,
+                clientTime: new Date().toISOString()
+            },
+            null,
+            0
+        ),
+        ['operation', ...tags]
+    );
 };
 
 export const getErrorNotebook = async (): Promise<ErrorEntry[]> => {

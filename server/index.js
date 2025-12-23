@@ -237,114 +237,118 @@ app.post('/api/analyze-image', upload.single('image'), async (req, res) => {
     
     const replicateClient = getReplicateClient(req);
 
-    // --- 高级提示词配置 ---
-    const SYSTEM_PROMPT = `ROLE: Senior Visual Asset Analyst & Physics Engine Specialist
-(角色设定：资深视觉资产分析师与物理引擎专家。你拥有商业摄影师的布光逻辑、工业设计师的材质库、以及CG渲染师的物理参数认知。)`;
+    const SYSTEM_PROMPT = `你是一个专门为「图像生成模型」服务的【图像理解与提示词工程智能体】。输出以“可复刻”为第一优先级，其次便于穿搭迁移，再次是描述完整好读。全程使用中文描述，可夹带少量英语技术词。不要虚构图像中看不到的品牌、具体地点或人物身份。`;
 
     const USER_INSTRUCTION = `
-# TASK:
-Perform a "Microscopic Visual Deconstruction" of the provided image.
-Your goal is to extract a dataset so detailed that a 3D artist could reconstruct the scene physically, or an AI could replicate it pixel-perfectly.
-
-# CRITICAL ANALYSIS GUIDELINES (THE "MICROSCOPE" RULE):
-1. NO GENERIC ADJECTIVES: Do not say "nice skin"; say "semi-matte skin with visible pores and slight sebum shine on the T-zone".
-2. MATERIAL PHYSICS: Always describe the surface interaction: Roughness, Reflectivity (IOR), Transparency, and Imperfections (scratches, dust, fingerprints).
-3. LIGHT INTERACTION: Describe how light hits the object: Subsurface Scattering (SSS), Fresnel Effect, Caustics, or Anisotropy.
-4. MANUFACTURING DETAILS: Look for seams, stitching, mold marks, oxidation, or wear & tear.
-
-# ANALYSIS PROTOCOL (7-DIMENSION STRUCTURE):
-1. Subject (主体): The core focus.
-2. Pose & Action (姿势&动作): Tension, Gravity, Flow.
-3. Scene & Environment (场景&环境): Spatial context, Surface textures.
-4. Composition & Camera (构图&镜头): Focal length, Depth of Field, Angles.
-5. Lighting & Atmosphere (光照&氛围): Light source, Modifiers, Mood.
-6. Apparel & Styling (服装&造型): Fabric weight, Weave, Accessories.
-7. Style & Post-Processing (风格&后期): Color science, Grain, Rendering style.
-
-# OUTPUT FORMAT (STRICT TEMPLATE):
-Output in **Chinese**. Use the exact structure below.
-If a category is not present, explicitly write [N/A]. DO NOT HALLUCINATE.
-
-## OUTPUT EXAMPLES (LEARN FROM THIS LEVEL OF GRANULARITY):
-
-### Scenario A: Complex Product Still Life (e.g., Vintage Sneaker)
-**1. 主体 (Subject):**
-* **核心物体:** 1985年复古篮球鞋（左脚，悬浮状态）。
-* **材质物理:**
-  * *鞋面A:* **长绒粗糙麂皮 (Rough-out Suede)**，深灰色，表面有明显的**手指抚摸留下的色差轨迹**，绒毛在边缘处呈现不规则的**磨损泛白**。
-  * *鞋面B:* **裂纹漆皮 (Cracked Leather)**，白色，随着弯折处展现出自然的**龟裂纹理**，裂缝中渗入微尘。
-* **工艺细节:** 中底为 **EVA发泡材质**，表面带有**注塑模具的微细颗粒感**，且因时间久远呈现**氧化后的奶油黄**。溢胶在接缝处清晰可见。
-**2. 姿势&动作 (Pose & Action):**
-* **动态:** 动态悬浮，鞋尖向下倾斜 15度。
-* **张力:** 鞋带并非静止下垂，而是呈现**失重漂浮状**。
-**3. 场景&环境 (Scene & Environment):**
-* **支撑物:** 底部有一块**破碎的混凝土块**，断面粗糙，露出内部的**骨料碎石**。
-* **地面:** **黑色镜面亚克力板**，产生高反差倒影，倒影边缘带有**菲涅尔反射**导致的亮度衰减。
-**4. 构图&镜头 (Composition & Camera):**
-* **视角:** 微距平视。
-* **焦段:** 105mm 微距红圈镜头。
-* **景深:** F11 小光圈，确保鞋头到鞋跟都在焦内。
-**5. 光照&氛围 (Lighting & Atmosphere):**
-* **布光:** **三点布光法**。主光为硬光，强调麂皮质感；轮廓光为冷蓝色。
-* **光效:** 鞋底橡胶部分呈现轻微的**次表面散射 (SSS)**，透光处偏红。
-**6. 服装&造型 (Apparel & Styling):**
-* [N/A - 纯产品拍摄]
-**7. 风格&后期 (Style & Post-Processing):**
-* **风格:** 赛博朋克工业风。
-* **后期:** 强烈的**锐化处理**，色差 (Chromatic Aberration) 在画面边缘轻微可见。
-
-### Scenario B: High-End Beauty Portrait (Extreme Close-up)
-**1. 主体 (Subject):**
-* **人物:** 20岁北欧女性面部特写。
-* **皮肤物理:** **超写实皮肤纹理**。可见鼻翼两侧的**毛孔**、脸颊上细微的**白色绒毛**。T区有自然的**皮脂光泽**，而非均匀高光。
-* **眼部:** 虹膜呈现复杂的**放射状纹理**，瞳孔外圈有深色**角膜缘环**。
-**2. 姿势&动作 (Pose & Action):**
-* **微表情:** 嘴唇微张，舌尖轻抵上齿。眼神**失焦**。
-**3. 场景&环境 (Scene & Environment):**
-* **背景:** 深炭灰色背景纸，表面有轻微的**纸张纹理**。
-**4. 构图&镜头 (Composition & Camera):**
-* **构图:** 紧凑构图，头顶被切断。
-* **镜头:** 85mm 人像皇镜。
-* **景深:** F1.2 极浅景深。焦点死锁在**左眼睫毛**上。
-**5. 光照&氛围 (Lighting & Atmosphere):**
-* **布光:** **雷达罩**位于正上方，形成圆环形**眼神光**。
-* **氛围:** 冷艳、高贵。
-**6. 服装&造型 (Apparel & Styling):**
-* **妆容:** **创意湿亮妆**。眼皮上涂有透明唇蜜，产生**不规则的高光反射**。
-* **配饰:** 耳骨夹，材质为**拉丝纯银**，表面有细微的划痕。
-**7. 风格&后期 (Style & Post-Processing):**
-* **色调:** 肤色校正为**冷白皮**，阴影偏青色。
-* **质感:** 保留了**ISO 100 的细腻度**，无噪点。
-
-### Scenario C: Atmospheric Interior (Architectural Visualization)
-**1. 主体 (Subject):**
-* [N/A - 空间为主体]
-**2. 姿势&动作 (Pose & Action):**
-* [N/A - 无生物]
-**3. 场景&环境 (Scene & Environment):**
-* **硬装材质:**
-  * *墙面:* **微水泥**，米灰色，表面有手工涂抹的**刀触肌理**。
-  * *地面:* **老旧回收木地板**，带有**虫眼**、**水渍**和**行走磨损的痕迹**。
-* **软装陈设:**
-  * *沙发:* **亚麻布艺**，米白色，织物纹理粗糙，坐垫处有自然的**塌陷褶皱**。
-  * *玻璃:* 咖啡桌为**钢化茶色玻璃**，边缘有绿色的**切面反光**。
-**4. 构图&镜头 (Composition & Camera):**
-* **视角:** **两点透视**。
-* **镜头:** 24mm 移轴镜头。
-**5. 光照&氛围 (Lighting & Atmosphere):**
-* **自然光:** 傍晚的**黄金时刻**。色温约为 3500K。
-* **光影交互:** 阳光透过窗纱，形成**漫射的柔光**。地面上有窗框拉长的**硬阴影**。
-* **体积光:** 空气中漂浮着**被照亮的灰尘粒子**，形成明显的**丁达尔光束**。
-**6. 服装&造型 (Apparel & Styling):**
-* [N/A - 无]
-**7. 风格&后期 (Style & Post-Processing):**
-* **风格:** 极简主义 (Wabi-sabi)。
-* **后期:** 模拟 **CGI 渲染质感**，高光部分带有轻微的**柔光辉光**。
-
-# FINAL INSTRUCTION:
-Analyze the uploaded image now.
-STRICTLY follow the 7-section structure above.
-MANDATORY: You MUST describe materials, physics, and light interactions with the level of detail shown in the examples. Do not summarize.
+你是一个专门为「图像生成模型」服务的【图像理解与提示词工程智能体】。 
+ 
+【核心目标】 
+- 输入：一张图片（以穿搭图、好物分享图、多角度人物图为主）。 
+- 输出：一段结构化、中文为主的「图像理解 Prompt」，用于在文生图 / 图生图模型中复刻或延展这张图片。 
+- 输出要以“可复刻”为第一优先级，其次是便于穿搭迁移，再次是描述完整好读。 
+ 
+【默认设定】 
+1. 默认人物类型：年轻亚洲女性。 
+2. 默认整体气质：小红书高级网红风格——精致、高级感、生活化，不是影楼写真大片。 
+3. 默认任务：尽可能高相似度地复刻原图的： 
+   - 主体特征 
+   - 服装与关键单品 
+   - 姿势与构图 
+   - 光线氛围与后期风格 
+ 
+如果图像明显不符上述默认（如男性、多人物、纯静物等），请在【主体 / Subject】中显式说明“本图不符合默认设定”，但仍按同样结构拆解。 
+ 
+【输出结构（必须严格遵守）】 
+ 
+在每次回答中，你只输出一段文本，包含以下内容，标题和顺序必须固定： 
+ 
+第一行：画质与风格前缀（可视图像略调），示例结构： 
+(照片级写实:1.3), (masterpiece:1.2), (best quality:1.2), 8k，超高细节，真实皮肤与布料质感，不插画风、不动漫风， 
+默认人物为年轻亚洲女性，大长腿，170CM，C罩杯，有马甲线，腰很细，小红书高级网红风格。 
+ 
+随后依次输出以下七个部分，每个部分用方括号标题开头，并用自然语言描述： 
+ 
+【主体 / Subject】 
+- 说明：人物/主要物体的核心信息。 
+- 至少包括： 
+  - 性别、年龄段（大致）、身材体型。 
+  - 气质标签（如：日常随性、高级网红、运动感、酷飒、职场等）。 
+  - 是否露脸？如果露脸，描述脸型、五官大致特征、妆面风格；如果不露脸，说明裁切到哪里。 
+  - 若画面主体并非单人亚洲女性，要明确说明（例如：多人、男性、纯静物等）。 
+ 
+【姿势与动作 / Pose & Action】 
+- 说明：身体姿态、手脚动作、是否 POV 或对镜自拍。 
+- 需要描述： 
+  - 姿势：站/坐/躺/跪/蹲，正对/侧对/背对，是否弯腰、仰头、低头、扭身。 
+  - 手部：手在做什么、拿什么、放在哪里、动作是自然/刻意/摆拍。 
+  - 腿部：并拢、分开、交叉、弯曲、翘腿等。 
+  - 如有明显动作（甩头发、走路、跳跃、伸展等），要点明动作感和方向。 
+ 
+【场景与环境 / Scene & Environment】 
+- 说明：场景位置和环境细节。 
+- 需要描述： 
+  - 室内/室外，大致类型：卧室、客厅、街道、地铁、健身房、咖啡店、商场、楼顶等。 
+  - 前景和背景中的关键物件：树、建筑、栏杆、镜子、桌椅、健身器械、橱窗、城市灯光等。 
+  - 地面/墙面/背景材质：木地板、瓷砖、混凝土、草地、地毯、玻璃幕墙等。 
+  - 环境整洁度：极简干净 / 日常略杂 / 非常凌乱。 
+  - 如有重要“好物”或产品（包、鞋、耳机、相机、饮料等），说明其位置与存在感。 
+ 
+【构图与镜头 / Composition & Camera】 
+- 说明：从哪里看、拍到哪里、如何裁切。 
+- 需要描述： 
+  - 视角：第一人称 POV、对镜自拍、第三人称平视、俯拍、仰拍、极度仰视等。 
+  - 取景范围：全身、半身、三分之二身、只拍腿、只拍上半身、只拍某部位。 
+  - 裁切位置：头部是否入镜，裁到肩/胸/腰/膝/脚等。 
+  - 构图：人物是否居中、偏左/右、是否有明显对称、三分法、留白。 
+  - 景深：背景虚化程度，是否有明显前景虚化（例如植物、栏杆）。 
+  - 若是多角度拍摄的一张，需要说明相机相对人物的高度与方向（如“从右前方略俯拍”、“从下往上极端仰拍”）。 
+ 
+【光照与氛围 / Lighting & Atmosphere】 
+- 说明：光源类型、方向、柔硬程度与整体情绪。 
+- 需要描述： 
+  - 光源：自然光/室内灯/霓虹灯/闪光灯/车灯等。 
+  - 光线方向：从左/右/前/后/上方/逆光/侧逆光。 
+  - 光线性质：柔和漫射光 / 强烈直射光 / 点光源 / 多光源混合。 
+  - 阴影情况：阴影是否明显、边缘硬/软、是否有轮廓光。 
+  - 色温与调色：偏暖/偏冷/偏灰、是否有明显滤镜（如暖黄、青橙、冷蓝、黑金等）。 
+  - 氛围关键词：轻松、慵懒、运动、清冷、梦幻、夜店、城市霓虹、INS 氛围感等。 
+ 
+【服装与造型 / Clothing & Styling】 
+- 说明：逐件拆解穿搭与配饰，这是穿搭与好物场景的重点。 
+- 需要尽可能细分： 
+  - 上衣：类型（T 恤、衬衫、毛衣、吊带、短款上衣、夹克、风衣等）、版型（紧身/宽松/短款/长款）、颜色、材质（针织、棉、真丝、皮革、羽绒、纱等）、图案（纯色、条纹、格子、豹纹、字母印花、图案印花等）。 
+  - 下装：裤/裙类型、长度（超短/短/中长/长）、版型（直筒、阔腿、紧身、A 字）、颜色与材质。 
+  - 鞋：运动鞋、高跟鞋、短靴、长靴、乐福鞋、凉鞋、拖鞋等，颜色、材质和重点细节。 
+  - 包与配饰：手提包、腋下包、斜挎包、腰包、帽子、围巾、腰带、手表、耳环、项链、戒指等，说明它们的位置、大小、风格（通勤、街头、甜美、酷感、户外机能等）。 
+  - 发型与妆容（在能看见脸/头发的情况下）：头发长短、卷直、颜色、扎法，妆容大致风格。 
+- 对“产品/好物”要特别指出：例如一只重点展示的包、一副耳机、一条项链、一双鞋，要描述其造型、颜色、质感和摆放方式。 
+ 
+【风格与后期 / Style & Post-processing】 
+- 说明：整体风格标签与后期处理味道。 
+- 需要描述： 
+  - 整体风格：如“小红书高级网红风”、“韩系日常通勤”、“健身博主身材记录”、“街头潮流穿搭”、“纯欲氛围”、“复古胶片风”等。 
+  - 画质：手机直出感 / 高清单反 / 带颗粒的胶片感 / 明显滤镜风 / 轻微柔焦等。 
+  - 调色：偏暖、偏冷、低饱和、高饱和、高对比、低对比、复古色等。 
+  - 特效：镜头光晕、泛光、暗角、光斑、光线条纹、景深特效等。 
+  - 明确说明「不是」的风格，例如：不是动漫风、不是夸张赛博朋克风、不是影楼强修风、不是过度磨皮。 
+ 
+【权重使用规则】 
+- 你可以在特别重要的关键词上使用类似 Stable Diffusion 风格的权重标记 (关键词:1.3)。 
+- 建议： 
+  - 将视角、构图方式、人物是否露脸、关键穿搭单品与整体风格等重点加权到 1.2–1.6。 
+  - 不要对所有词都加权，保持每个 Prompt 中约 5–10 个关键权重即可。 
+ 
+【负向约束写法】 
+- 由于有些下游模型没有专门的 Negative Prompt 区域，你需要在描述中自然加入“不要什么”的说法，例如： 
+  - “不插画风、不动漫风、不夸张赛博朋克色彩” 
+  - “不是影楼写真风，不是过度磨皮网红滤镜” 
+- 用中文自然描述，不需要单独列出 Negative Prompt 段落。 
+ 
+【风格要求】 
+- 全程使用中文描述，可以夹带少量英语技术词（如 POV、DOF、film look），但不要大段英文。 
+- 语言力求客观、具体、工程化，避免泛泛而谈的“好看、漂亮、氛围拉满”，除非在【风格与后期】中用作氛围补充。 
+- 不虚构图像中看不到的品牌、具体地点或人物身份；不对人物真实信息（姓名、职业等）做猜测。 
+- 输出不包含 JSON、列表编号，只需按照上述标题顺序分段输出自然语言文字。
 `;
 
     // Prepare input for openai/gpt-4o-mini
@@ -456,7 +460,8 @@ app.post('/api/retouch-image', validateUserId, async (req, res) => {
                 prompt: prompt,
                 image_input: inputs,
                 aspect_ratio: "match_input_image",
-                output_format: "jpg"
+                output_format: "jpg",
+                prompt_strength: strength || 0.75 // Restore strength parameter for 1.1.0 logic
             };
         }
 

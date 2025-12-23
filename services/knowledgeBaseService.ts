@@ -3,7 +3,7 @@ import { KnowledgeBaseEntry, AnalysisResult, ImageFile, KnowledgeBaseCategory } 
 
 const KB_STORAGE_KEY = 'quantum_leap_ai_studio_kb';
 const USER_ID_KEY = 'quantum_leap_user_id';
-const API_BASE_URL = '/api'; // Use proxy path
+const API_BASE_URL = import.meta.env.VITE_API_URL || '/api'; // Use proxy path or env var
 
 // Polyfill for uuid if crypto.randomUUID is not available (e.g. non-secure context)
 function uuidv4() {
@@ -127,6 +127,65 @@ export const addMultipleKnowledgeBaseEntries = async (entries: Omit<KnowledgeBas
   return newEntries;
 }
 
+const parseStringAnalysisSections = (analysis: string): Array<{ title: string; content: string }> => {
+  const lines = analysis.split(/\r?\n/);
+  const sections: Array<{ title: string; contentLines: string[] }> = [];
+  let current: { title: string; contentLines: string[] } | null = null;
+
+  const commit = () => {
+    if (!current) return;
+    const content = current.contentLines.join('\n').trim();
+    if (current.title.trim() && content) {
+      sections.push({ title: current.title.trim(), contentLines: content.split('\n') });
+    }
+    current = null;
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    const bracketHeaderMatch = line.trim().match(/^(?:\d+\.\s*)?【\s*(.+?)\s*】\s*$/);
+    const boldHeaderMatch = line.trim().match(/^\*\*\s*(?:\d+\.\s*)?(.+?)\s*\*\*\s*$/);
+    const mdHeaderMatch = line.trim().match(/^#{1,6}\s*(?:\d+\.\s*)?(.+?)\s*$/);
+    const headerText = bracketHeaderMatch?.[1] || boldHeaderMatch?.[1] || mdHeaderMatch?.[1];
+
+    if (headerText) {
+      commit();
+      const normalized = headerText.replace(/[：:]\s*$/, '').trim();
+      current = { title: normalized, contentLines: [] };
+      continue;
+    }
+
+    if (!current) continue;
+    current.contentLines.push(rawLine);
+  }
+
+  commit();
+  return sections.map(s => ({ title: s.title, content: s.contentLines.join('\n').trim() }));
+};
+
+const mapSectionsToKBCategories = (analysis: string): Partial<Record<KnowledgeBaseCategory, string>> => {
+  const sections = parseStringAnalysisSections(analysis);
+  const result: Partial<Record<KnowledgeBaseCategory, string>> = {};
+
+  const setIf = (cat: KnowledgeBaseCategory, content: string) => {
+    const value = content.trim();
+    if (!value) return;
+    result[cat] = value;
+  };
+
+  for (const section of sections) {
+    const t = section.title;
+    if (/(姿势|动作|Pose)/i.test(t)) setIf(KnowledgeBaseCategory.POSE, section.content);
+    else if (/(场景|环境|Scene|Environment)/i.test(t)) setIf(KnowledgeBaseCategory.SCENE, section.content);
+    else if (/(构图|镜头|Composition|Camera)/i.test(t)) setIf(KnowledgeBaseCategory.COMPOSITION, section.content);
+    else if (/(光照|氛围|Lighting|Atmosphere)/i.test(t)) setIf(KnowledgeBaseCategory.LIGHTING, section.content);
+    else if (/(服装|造型|Apparel|Styling)/i.test(t)) setIf(KnowledgeBaseCategory.CLOTHING, section.content);
+    else if (/(风格|后期|Style|Post)/i.test(t)) setIf(KnowledgeBaseCategory.STYLE, section.content);
+  }
+
+  return result;
+};
+
 export const addAnalysisResultToKB = async (result: AnalysisResult, imageFiles: ImageFile[]): Promise<void> => {
     const newEntries: Omit<KnowledgeBaseEntry, 'id' | 'usageCount'>[] = [];
     
@@ -147,6 +206,17 @@ export const addAnalysisResultToKB = async (result: AnalysisResult, imageFiles: 
                 variablePrompt: ""
             },
             groupId
+        });
+
+        const fragments = mapSectionsToKBCategories(result.analysis);
+        Object.entries(fragments).forEach(([category, content]) => {
+          if (typeof content !== 'string' || !content.trim()) return;
+          newEntries.push({
+            category: category as KnowledgeBaseCategory,
+            promptFragment: content.trim(),
+            sourceImagePreview: thumbnail,
+            groupId
+          });
         });
 
         await addMultipleKnowledgeBaseEntries(newEntries);

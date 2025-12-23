@@ -8,7 +8,6 @@ import { GenerationView } from './components/GenerationView';
 import { KnowledgeBaseView } from './components/KnowledgeBaseView';
 import { SmartRetouchView } from './components/SmartRetouchView';
 import { AnalysisResult } from './types';
-import { initializeAi } from './services/geminiService';
 
 
 type View = 'analyze' | 'generate' | 'retouch' | 'knowledge';

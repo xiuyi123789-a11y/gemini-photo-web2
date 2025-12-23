@@ -1,17 +1,61 @@
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { analyzeImages } from '../services/replicateService';
 import { addAnalysisResultToKB } from '../services/knowledgeBaseService';
 import { AnalysisResult, ImageFile } from '../types';
 import { FileUpload } from './FileUpload';
 import { LoadingSpinner } from './LoadingSpinner';
 import { BookOpenIcon } from './IconComponents';
+import { logOperation } from '../services/errorNotebookService';
 
 interface AnalysisViewProps {
   onAnalysisComplete: (result: AnalysisResult[]) => void;
 }
 
 const FormattedMarkdownResultDisplay: React.FC<{ results: AnalysisResult[] }> = ({ results }) => {
+    const parseSections = (analysis: string): Array<{ title: string; content: string }> => {
+        const lines = analysis.split(/\r?\n/);
+        const sections: Array<{ title: string; contentLines: string[] }> = [];
+        let current: { title: string; contentLines: string[] } | null = null;
+
+        const commit = () => {
+            if (!current) return;
+            const content = current.contentLines.join('\n').trim();
+            if (current.title.trim() && content) {
+                sections.push({ title: current.title.trim(), contentLines: content.split('\n') });
+            }
+            current = null;
+        };
+
+        for (const rawLine of lines) {
+            const line = rawLine.trimEnd();
+            const bracketHeaderMatch = line.trim().match(/^(?:\d+\.\s*)?【\s*(.+?)\s*】\s*$/);
+            const boldHeaderMatch = line.trim().match(/^\*\*\s*(?:\d+\.\s*)?(.+?)\s*\*\*\s*$/);
+            const mdHeaderMatch = line.trim().match(/^#{1,6}\s*(?:\d+\.\s*)?(.+?)\s*$/);
+            const headerText = bracketHeaderMatch?.[1] || boldHeaderMatch?.[1] || mdHeaderMatch?.[1];
+
+            if (headerText) {
+                commit();
+                const normalized = headerText.replace(/[：:]\s*$/, '').trim();
+                current = { title: normalized, contentLines: [] };
+                continue;
+            }
+
+            if (!current) continue;
+            current.contentLines.push(rawLine);
+        }
+
+        commit();
+        return sections.map(s => ({ title: s.title, content: s.contentLines.join('\n').trim() }));
+    };
+
+    const [modeByIndex, setModeByIndex] = useState<Record<number, 'full' | 'split'>>({});
+    const [activeSectionByIndex, setActiveSectionByIndex] = useState<Record<number, string>>({});
+
+    const sectionsByIndex = useMemo(() => {
+        return results.map(r => parseSections(r.analysis || ''));
+    }, [results]);
+
     return (
         <div className="space-y-6">
             {results.map((res, idx) => (
@@ -20,7 +64,72 @@ const FormattedMarkdownResultDisplay: React.FC<{ results: AnalysisResult[] }> = 
                         <span>📄 {res.fileName}</span>
                         <span className="text-slate-500 font-normal text-xs">{new Date(res.timestamp || '').toLocaleString()}</span>
                     </h4>
-                    <div className="whitespace-pre-wrap font-sans leading-relaxed">{res.analysis}</div>
+                    <div className="flex flex-wrap gap-2 mb-4">
+                        <button
+                            onClick={() => {
+                                setModeByIndex(prev => ({ ...prev, [idx]: 'full' }));
+                                logOperation('analysis_result_view_mode', { fileName: res.fileName, mode: 'full' });
+                            }}
+                            className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all border ${
+                                (modeByIndex[idx] || 'full') === 'full'
+                                    ? 'bg-fuchsia-600 text-white border-fuchsia-500 shadow-lg shadow-fuchsia-500/20'
+                                    : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700 hover:text-white'
+                            }`}
+                        >
+                            完整复刻
+                        </button>
+                        <button
+                            onClick={() => {
+                                const sections = sectionsByIndex[idx] || [];
+                                if (sections.length === 0) return;
+                                setModeByIndex(prev => ({ ...prev, [idx]: 'split' }));
+                                const firstTitle = sections[0]?.title || '';
+                                if (firstTitle) {
+                                    setActiveSectionByIndex(prev => ({ ...prev, [idx]: prev[idx] || firstTitle }));
+                                }
+                                logOperation('analysis_result_view_mode', { fileName: res.fileName, mode: 'split' });
+                            }}
+                            disabled={(sectionsByIndex[idx] || []).length === 0}
+                            className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all border disabled:opacity-50 disabled:cursor-not-allowed ${
+                                (modeByIndex[idx] || 'full') === 'split'
+                                    ? 'bg-fuchsia-600 text-white border-fuchsia-500 shadow-lg shadow-fuchsia-500/20'
+                                    : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700 hover:text-white'
+                            }`}
+                        >
+                            分区拆解
+                        </button>
+                    </div>
+
+                    {(modeByIndex[idx] || 'full') === 'split' && (sectionsByIndex[idx] || []).length > 0 && (
+                        <div className="flex gap-2 overflow-x-auto pb-2 custom-scrollbar mb-4">
+                            {(sectionsByIndex[idx] || []).map(section => {
+                                const active = (activeSectionByIndex[idx] || (sectionsByIndex[idx]?.[0]?.title || '')) === section.title;
+                                return (
+                                    <button
+                                        key={section.title}
+                                        onClick={() => {
+                                            setActiveSectionByIndex(prev => ({ ...prev, [idx]: section.title }));
+                                            logOperation('analysis_result_section_select', { fileName: res.fileName, section: section.title });
+                                        }}
+                                        className={`px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition-all border ${
+                                            active
+                                                ? 'bg-slate-700 text-white border-white/10'
+                                                : 'bg-slate-900/60 text-slate-400 border-slate-700 hover:bg-slate-800 hover:text-white'
+                                        }`}
+                                        title={section.title}
+                                    >
+                                        {section.title}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    )}
+
+                    <div className="whitespace-pre-wrap font-sans leading-relaxed">
+                        {(modeByIndex[idx] || 'full') === 'split' && (sectionsByIndex[idx] || []).length > 0
+                            ? (sectionsByIndex[idx].find(s => s.title === (activeSectionByIndex[idx] || sectionsByIndex[idx][0].title))?.content || res.analysis)
+                            : res.analysis}
+                    </div>
                     {res.error && <p className="text-red-400 mt-2 text-xs">⚠️ 此文件解析遇到错误</p>}
                 </div>
             ))}
@@ -35,12 +144,14 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({ onAnalysisComplete }
   const [kbSaveSuccess, setKbSaveSuccess] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [analysisResults, setAnalysisResults] = useState<AnalysisResult[] | null>(null);
+  const [progress, setProgress] = useState<{ completed: number; total: number; currentFileName?: string } | null>(null);
 
   const handleFileSelect = (files: ImageFile[]) => {
     setImageFiles(files);
     setAnalysisResults(null);
     setError(null);
     setKbSaveSuccess(false);
+    setProgress(null);
   };
 
   const handleAnalyze = async () => {
@@ -48,18 +159,26 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({ onAnalysisComplete }
       setError('请至少上传一张图片。');
       return;
     }
+    const start = performance.now();
     setIsLoading(true);
     setError(null);
     setAnalysisResults(null);
     setKbSaveSuccess(false);
+    setProgress({ completed: 0, total: imageFiles.length });
 
     try {
-      const results = await analyzeImages(imageFiles.map(f => f.file));
+      const results = await analyzeImages(imageFiles.map(f => f.file), {
+        onProgress: setProgress,
+        retry: { retries: 3, minDelayMs: 800, maxDelayMs: 8000, timeoutMs: 180000 }
+      });
       setAnalysisResults(results);
+      logOperation('analysis_run_success', { count: results.length, elapsedMs: Math.round(performance.now() - start) });
     } catch (e: any) {
       setError(e.message || '发生未知错误。');
+      logOperation('analysis_run_failed', { message: e?.message || 'unknown', elapsedMs: Math.round(performance.now() - start) });
     } finally {
       setIsLoading(false);
+      setProgress(null);
     }
   };
   
@@ -72,6 +191,7 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({ onAnalysisComplete }
   const handleSaveToKB = async () => {
         if (!analysisResults || analysisResults.length === 0) return;
         
+        const start = performance.now();
         setIsSavingToKB(true);
         try {
             // Save each result individually
@@ -80,9 +200,11 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({ onAnalysisComplete }
             }
             setKbSaveSuccess(true);
             setTimeout(() => setKbSaveSuccess(false), 3000);
+            logOperation('analysis_save_to_kb_success', { count: analysisResults.length, elapsedMs: Math.round(performance.now() - start) });
         } catch (e) {
             console.error("Failed to save to KB", e);
             setError("保存到知识库失败，请重试。");
+            logOperation('analysis_save_to_kb_failed', { message: (e as any)?.message || 'unknown', elapsedMs: Math.round(performance.now() - start) });
         } finally {
             setIsSavingToKB(false);
         }
@@ -116,11 +238,18 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({ onAnalysisComplete }
           disabled={isLoading || imageFiles.length === 0}
           className="bg-gradient-to-r from-fuchsia-600 to-violet-600 hover:from-fuchsia-500 hover:to-violet-500 text-white font-bold py-3 px-10 rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-all transform hover:scale-105 shadow-lg shadow-fuchsia-500/30"
         >
-          {isLoading ? 'AI 正在思考...' : `开始分析 ${imageFiles.length > 0 ? imageFiles.length + ' 张图片' : ''}`}
+          {isLoading
+            ? `AI 正在思考...${progress ? `（${progress.completed}/${progress.total}）` : ''}`
+            : `开始分析 ${imageFiles.length > 0 ? imageFiles.length + ' 张图片' : ''}`}
         </button>
       </div>
 
       {isLoading && <div className="mt-8"><LoadingSpinner text="AI 正在观察您的图片..." /></div>}
+      {isLoading && progress && (
+        <div className="mt-3 text-center text-slate-400 text-sm">
+          正在解析：{progress.currentFileName || '...'}（{progress.completed}/{progress.total}）
+        </div>
+      )}
 
       {analysisResults && (
         <div className="mt-10 p-6 md:p-8 bg-slate-800/50 rounded-3xl border border-white/10 shadow-2xl backdrop-blur-sm">

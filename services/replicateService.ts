@@ -2,7 +2,126 @@ import { AnalysisResult, KnowledgeBaseAnalysis, KnowledgeBaseCategory } from '..
 import { getKnowledgeBase } from './knowledgeBaseService';
 import { addToErrorNotebook } from './errorNotebookService';
 
-const API_BASE_URL = '/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
+
+type RetryOptions = {
+    retries?: number;
+    minDelayMs?: number;
+    maxDelayMs?: number;
+    timeoutMs?: number;
+};
+
+const IMAGE_UNDERSTANDING_PROMPT = `
+你是一个专门为「图像生成模型」服务的【图像理解与提示词工程智能体】。 
+ 
+【核心目标】 
+- 输入：一张图片（以穿搭图、好物分享图、多角度人物图为主）。 
+- 输出：一段结构化、中文为主的「图像理解 Prompt」，用于在文生图 / 图生图模型中复刻或延展这张图片。 
+- 输出要以“可复刻”为第一优先级，其次是便于穿搭迁移，再次是描述完整好读。 
+ 
+【默认设定】 
+1. 默认人物类型：年轻亚洲女性。 
+2. 默认整体气质：小红书高级网红风格——精致、高级感、生活化，不是影楼写真大片。 
+3. 默认任务：尽可能高相似度地复刻原图的： 
+   - 主体特征 
+   - 服装与关键单品 
+   - 姿势与构图 
+   - 光线氛围与后期风格 
+ 
+如果图像明显不符上述默认（如男性、多人物、纯静物等），请在【主体 / Subject】中显式说明“本图不符合默认设定”，但仍按同样结构拆解。 
+ 
+【输出结构（必须严格遵守）】 
+ 
+在每次回答中，你只输出一段文本，包含以下内容，标题和顺序必须固定： 
+ 
+第一行：画质与风格前缀（可视图像略调），示例结构： 
+(照片级写实:1.3), (masterpiece:1.2), (best quality:1.2), 8k，超高细节，真实皮肤与布料质感，不插画风、不动漫风， 
+默认人物为年轻亚洲女性，大长腿，170CM，C罩杯，有马甲线，腰很细，小红书高级网红风格。 
+ 
+随后依次输出以下七个部分，每个部分用方括号标题开头，并用自然语言描述： 
+ 
+【主体 / Subject】 
+- 说明：人物/主要物体的核心信息。 
+- 至少包括： 
+  - 性别、年龄段（大致）、身材体型。 
+  - 气质标签（如：日常随性、高级网红、运动感、酷飒、职场等）。 
+  - 是否露脸？如果露脸，描述脸型、五官大致特征、妆面风格；如果不露脸，说明裁切到哪里。 
+  - 若画面主体并非单人亚洲女性，要明确说明（例如：多人、男性、纯静物等）。 
+ 
+【姿势与动作 / Pose & Action】 
+- 说明：身体姿态、手脚动作、是否 POV 或对镜自拍。 
+- 需要描述： 
+  - 姿势：站/坐/躺/跪/蹲，正对/侧对/背对，是否弯腰、仰头、低头、扭身。 
+  - 手部：手在做什么、拿什么、放在哪里、动作是自然/刻意/摆拍。 
+  - 腿部：并拢、分开、交叉、弯曲、翘腿等。 
+  - 如有明显动作（甩头发、走路、跳跃、伸展等），要点明动作感和方向。 
+ 
+【场景与环境 / Scene & Environment】 
+- 说明：场景位置和环境细节。 
+- 需要描述： 
+  - 室内/室外，大致类型：卧室、客厅、街道、地铁、健身房、咖啡店、商场、楼顶等。 
+  - 前景和背景中的关键物件：树、建筑、栏杆、镜子、桌椅、健身器械、橱窗、城市灯光等。 
+  - 地面/墙面/背景材质：木地板、瓷砖、混凝土、草地、地毯、玻璃幕墙等。 
+  - 环境整洁度：极简干净 / 日常略杂 / 非常凌乱。 
+  - 如有重要“好物”或产品（包、鞋、耳机、相机、饮料等），说明其位置与存在感。 
+ 
+【构图与镜头 / Composition & Camera】 
+- 说明：从哪里看、拍到哪里、如何裁切。 
+- 需要描述： 
+  - 视角：第一人称 POV、对镜自拍、第三人称平视、俯拍、仰拍、极度仰视等。 
+  - 取景范围：全身、半身、三分之二身、只拍腿、只拍上半身、只拍某部位。 
+  - 裁切位置：头部是否入镜，裁到肩/胸/腰/膝/脚等。 
+  - 构图：人物是否居中、偏左/右、是否有明显对称、三分法、留白。 
+  - 景深：背景虚化程度，是否有明显前景虚化（例如植物、栏杆）。 
+  - 若是多角度拍摄的一张，需要说明相机相对人物的高度与方向（如“从右前方略俯拍”、“从下往上极端仰拍”）。 
+ 
+【光照与氛围 / Lighting & Atmosphere】 
+- 说明：光源类型、方向、柔硬程度与整体情绪。 
+- 需要描述： 
+  - 光源：自然光/室内灯/霓虹灯/闪光灯/车灯等。 
+  - 光线方向：从左/右/前/后/上方/逆光/侧逆光。 
+  - 光线性质：柔和漫射光 / 强烈直射光 / 点光源 / 多光源混合。 
+  - 阴影情况：阴影是否明显、边缘硬/软、是否有轮廓光。 
+  - 色温与调色：偏暖/偏冷/偏灰、是否有明显滤镜（如暖黄、青橙、冷蓝、黑金等）。 
+  - 氛围关键词：轻松、慵懒、运动、清冷、梦幻、夜店、城市霓虹、INS 氛围感等。 
+ 
+【服装与造型 / Clothing & Styling】 
+- 说明：逐件拆解穿搭与配饰，这是穿搭与好物场景的重点。 
+- 需要尽可能细分： 
+  - 上衣：类型（T 恤、衬衫、毛衣、吊带、短款上衣、夹克、风衣等）、版型（紧身/宽松/短款/长款）、颜色、材质（针织、棉、真丝、皮革、羽绒、纱等）、图案（纯色、条纹、格子、豹纹、字母印花、图案印花等）。 
+  - 下装：裤/裙类型、长度（超短/短/中长/长）、版型（直筒、阔腿、紧身、A 字）、颜色与材质。 
+  - 鞋：运动鞋、高跟鞋、短靴、长靴、乐福鞋、凉鞋、拖鞋等，颜色、材质和重点细节。 
+  - 包与配饰：手提包、腋下包、斜挎包、腰包、帽子、围巾、腰带、手表、耳环、项链、戒指等，说明它们的位置、大小、风格（通勤、街头、甜美、酷感、户外机能等）。 
+  - 发型与妆容（在能看见脸/头发的情况下）：头发长短、卷直、颜色、扎法，妆容大致风格。 
+- 对“产品/好物”要特别指出：例如一只重点展示的包、一副耳机、一条项链、一双鞋，要描述其造型、颜色、质感和摆放方式。 
+ 
+【风格与后期 / Style & Post-processing】 
+- 说明：整体风格标签与后期处理味道。 
+- 需要描述： 
+  - 整体风格：如“小红书高级网红风”、“韩系日常通勤”、“健身博主身材记录”、“街头潮流穿搭”、“纯欲氛围”、“复古胶片风”等。 
+  - 画质：手机直出感 / 高清单反 / 带颗粒的胶片感 / 明显滤镜风 / 轻微柔焦等。 
+  - 调色：偏暖、偏冷、低饱和、高饱和、高对比、低对比、复古色等。 
+  - 特效：镜头光晕、泛光、暗角、光斑、光线条纹、景深特效等。 
+  - 明确说明「不是」的风格，例如：不是动漫风、不是夸张赛博朋克风、不是影楼强修风、不是过度磨皮。 
+ 
+【权重使用规则】 
+- 你可以在特别重要的关键词上使用类似 Stable Diffusion 风格的权重标记 (关键词:1.3)。 
+- 建议： 
+  - 将视角、构图方式、人物是否露脸、关键穿搭单品与整体风格等重点加权到 1.2–1.6。 
+  - 不要对所有词都加权，保持每个 Prompt 中约 5–10 个关键权重即可。 
+ 
+【负向约束写法】 
+- 由于有些下游模型没有专门的 Negative Prompt 区域，你需要在描述中自然加入“不要什么”的说法，例如： 
+  - “不插画风、不动漫风、不夸张赛博朋克色彩” 
+  - “不是影楼写真风，不是过度磨皮网红滤镜” 
+- 用中文自然描述，不需要单独列出 Negative Prompt 段落。 
+ 
+【风格要求】 
+- 全程使用中文描述，可以夹带少量英语技术词（如 POV、DOF、film look），但不要大段英文。 
+- 语言力求客观、具体、工程化，避免泛泛而谈的“好看、漂亮、氛围拉满”，除非在【风格与后期】中用作氛围补充。 
+- 不虚构图像中看不到的品牌、具体地点或人物身份；不对人物真实信息（姓名、职业等）做猜测。 
+- 输出不包含 JSON、列表编号，只需按照上述标题顺序分段输出自然语言文字。
+`.trim();
 
 const getUserId = () => {
     return localStorage.getItem('userId') || 'default-user';
@@ -10,6 +129,69 @@ const getUserId = () => {
 
 const getReplicateApiKey = () => {
     return localStorage.getItem('replicate_api_token') || '';
+};
+
+const sleep = (ms: number) => new Promise<void>(resolve => window.setTimeout(resolve, ms));
+
+const getBackoffDelayMs = (attempt: number, minDelayMs: number, maxDelayMs: number) => {
+    const exp = minDelayMs * Math.pow(2, Math.max(0, attempt - 1));
+    const capped = Math.min(maxDelayMs, exp);
+    const jitter = capped * (0.2 * (Math.random() - 0.5) * 2);
+    return Math.max(0, Math.round(capped + jitter));
+};
+
+const isRetryableStatus = (status: number) => {
+    return status === 408 || status === 429 || (status >= 500 && status <= 599);
+};
+
+const fetchWithTimeout = async (url: string, init: RequestInit, timeoutMs: number) => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, { ...init, signal: controller.signal });
+    } finally {
+        window.clearTimeout(timer);
+    }
+};
+
+const requestWithRetry = async (makeRequest: (attempt: number) => Promise<Response>, options?: RetryOptions) => {
+    const retries = Math.max(0, options?.retries ?? 3);
+    const minDelayMs = Math.max(0, options?.minDelayMs ?? 800);
+    const maxDelayMs = Math.max(minDelayMs, options?.maxDelayMs ?? 8000);
+
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= retries + 1; attempt++) {
+        try {
+            const response = await makeRequest(attempt);
+            if (response.ok) return response;
+
+            if (isRetryableStatus(response.status) && attempt <= retries) {
+                const retryAfterHeader = response.headers.get('retry-after');
+                const retryAfterMs = retryAfterHeader ? (Number(retryAfterHeader) + 1) * 1000 : 0;
+                const backoffMs = getBackoffDelayMs(attempt, minDelayMs, maxDelayMs);
+                await sleep(Math.max(backoffMs, retryAfterMs));
+                continue;
+            }
+
+            const errorData = await response.json().catch(() => ({} as any));
+            throw new Error(errorData?.error || `API call failed: ${response.status} ${response.statusText}`);
+        } catch (error) {
+            lastError = error;
+            const isAbort = error instanceof DOMException && error.name === 'AbortError';
+            const isNetworkError = error instanceof TypeError;
+
+            if ((isAbort || isNetworkError) && attempt <= retries) {
+                const delayMs = getBackoffDelayMs(attempt, minDelayMs, maxDelayMs);
+                await sleep(delayMs);
+                continue;
+            }
+
+            throw error;
+        }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error('Request failed');
 };
 
 const fileToBase64 = (file: File): Promise<string> => {
@@ -41,7 +223,7 @@ const urlToBase64 = async (url: string): Promise<string> => {
     }
 };
 
-const callApi = async (endpoint: string, body: any, stream: boolean = false) => {
+const callApi = async (endpoint: string, body: any, stream: boolean = false, retryOptions?: RetryOptions) => {
     const userId = getUserId();
     const apiKey = getReplicateApiKey();
     const headers: any = {
@@ -53,23 +235,30 @@ const callApi = async (endpoint: string, body: any, stream: boolean = false) => 
         headers['x-replicate-token'] = apiKey;
     }
 
-    const fullUrl = `${window.location.origin}${API_BASE_URL}${endpoint}`;
+    const fullUrl = API_BASE_URL.startsWith('http') 
+        ? `${API_BASE_URL}${endpoint}`
+        : `${window.location.origin}${API_BASE_URL}${endpoint}`;
+        
     console.log(`[Frontend] Calling ${fullUrl}`);
     console.log(`[Frontend] Headers:`, { 
         'x-user-id': userId,
         'x-replicate-token': apiKey ? '(present)' : '(missing)'
     });
 
-    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body)
-    });
-
-    if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `API call failed: ${response.statusText}`);
-    }
+    const response = await requestWithRetry(
+        async () => {
+            return await fetchWithTimeout(
+                fullUrl,
+                {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify(body)
+                },
+                retryOptions?.timeoutMs ?? 120000
+            );
+        },
+        retryOptions
+    );
 
     if (stream) {
         const reader = response.body?.getReader();
@@ -89,42 +278,64 @@ const callApi = async (endpoint: string, body: any, stream: boolean = false) => 
     }
 };
 
-export const analyzeImages = async (files: File[]): Promise<AnalysisResult[]> => {
-    const results: AnalysisResult[] = [];
+const runVisionAnalysis = async (imageFile: File, prompt?: string, retryOptions?: RetryOptions) => {
+    const headers: HeadersInit = {};
+    const userId = getUserId();
+    const apiKey = getReplicateApiKey();
+    if (userId) headers['x-user-id'] = userId;
+    if (apiKey) headers['x-replicate-token'] = apiKey;
 
-    for (const file of files) {
-        try {
-            // 1. 构建 FormData
+    const fullUrl = API_BASE_URL.startsWith('http')
+        ? `${API_BASE_URL}/analyze-image`
+        : `${window.location.origin}${API_BASE_URL}/analyze-image`;
+
+    const response = await requestWithRetry(
+        async () => {
             const formData = new FormData();
-            formData.append('image', file); // 这里的 'image' 必须对应后端 upload.single('image')
+            formData.append('image', imageFile);
+            if (prompt) formData.append('prompt', prompt);
 
-            // 2. 发送请求到我们自己的后端
-            // 注意：这里不要手动加 Content-Type header，浏览器会自动处理
-            const headers: HeadersInit = {};
-            const userId = getUserId();
-            const apiKey = getReplicateApiKey();
-            
-            if (userId) headers['x-user-id'] = userId;
-            if (apiKey) headers['x-replicate-token'] = apiKey;
+            return await fetchWithTimeout(
+                fullUrl,
+                {
+                    method: 'POST',
+                    headers,
+                    body: formData
+                },
+                retryOptions?.timeoutMs ?? 180000
+            );
+        },
+        retryOptions
+    );
 
-            const response = await fetch(`${API_BASE_URL}/analyze-image`, {
-                method: 'POST',
-                headers,
-                body: formData,
-            });
+    const data = await response.json().catch(() => ({} as any));
+    const analysis = data?.analysis;
+    if (typeof analysis !== 'string') {
+        throw new Error(data?.error || '无法获取解析结果');
+    }
+    return analysis;
+};
 
-            if (!response.ok) {
-                // 尝试读取错误信息
-                const errorData = await response.json().catch(() => ({}));
-                throw new Error(errorData.error || `Server error: ${response.status}`);
-            }
+export const analyzeImages = async (
+    files: File[],
+    options?: {
+        onProgress?: (progress: { completed: number; total: number; currentFileName?: string }) => void;
+        retry?: RetryOptions;
+    }
+): Promise<AnalysisResult[]> => {
+    const results: AnalysisResult[] = [];
+    const total = files.length;
 
-            const data = await response.json();
+    for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        options?.onProgress?.({ completed: i, total, currentFileName: file.name });
+        try {
+            const analysisText = await runVisionAnalysis(file, undefined, options?.retry);
 
             // 3. 格式化结果
             results.push({
                 fileName: file.name,
-                analysis: data.analysis || '无法获取解析结果',
+                analysis: analysisText || '无法获取解析结果',
                 timestamp: new Date().toISOString()
             });
 
@@ -145,83 +356,74 @@ export const analyzeImages = async (files: File[]): Promise<AnalysisResult[]> =>
         }
     }
 
+    options?.onProgress?.({ completed: total, total });
     return results;
 };
 
 export const analyzeAndCategorizeImageForKB = async (imageFile: File): Promise<KnowledgeBaseAnalysis> => {
-    const prompt = `
-# ROLE: 资深提示词工程师与图像解构专家 (v3.0)
-
-# TASK:
-对提供的图片进行两次分析。首先，生成一段完整的、连贯的、极度详细的“母版”描述。然后，从该描述中提炼并拆解出独立的、可复用的高质量提示词片段，并为每个片段分配最合适的类别。
-你需要捕捉图像中的每一个**超细节 (Ultra-Detailed)** 元素，包括微小的纹理、光影的微妙变化、材质的触感以及整体的空气感。
-
-# STEP 1: HOLISTIC DESCRIPTION (母版描述 - ULTRA-DETAILED)
-创作一段单一的、综合性的文字，捕捉图像的全部精髓。这段描述应该足够详细，包含人物特征、服装细节、环境氛围、光影质感等所有方面，以便AI可以仅凭此文字就高度复刻出原图。
-
-# STEP 2: FRAGMENT EXTRACTION (片段拆解 - ULTRA-DETAILED)
-基于你上面写的“母版描述”，将其拆解为以下类别的独立提示词片段。
-【重要】：每个类别只生成**一条**完整的、包含所有细节的描述段落。不要使用列表或多个短句。
-
-- **${KnowledgeBaseCategory.POSE}**: (一条描述) 极详细地描述人物的姿势、身体朝向、动作张力、手势细节、视线方向和微表情。
-- **${KnowledgeBaseCategory.SCENE}**: (一条描述) 极详细地描述具体环境、空间结构、背景材质、关键道具、天气和整体氛围。
-- **${KnowledgeBaseCategory.COMPOSITION}**: (一条描述) 极详细地描述构图方式（如对称、引导线）、景别、相机高度、拍摄角度、镜头焦段和透视关系。
-- **${KnowledgeBaseCategory.LIGHTING}**: (一条描述) 极详细地描述光源类型（自然/人造）、方向（顺/逆/侧）、质感（硬/软）、色温以及光影对比度。
-- **${KnowledgeBaseCategory.CLOTHING}**: (一条描述) 极详细地描述从头到脚的服装款式、面料质感（如丝绸、丹宁）、剪裁细节、褶皱表现、配饰和品牌特征。
-- **${KnowledgeBaseCategory.STYLE}**: (一条描述) 极详细地描述图像的整体艺术风格、色彩倾向（如青橙色调）、后期处理风格（如胶片颗粒、柔光）和美学流派。
-
-# LANGUAGE INSTRUCTION:
-**CRITICAL:** All content values in the JSON output MUST be in **Simplified Chinese (简体中文)**.
-- The JSON keys must remain in **English**.
-- The values must be fully translated to Simplified Chinese.
-
-# OUTPUT_FORMAT:
-以结构化的JSON格式提供输出。
-{
-  "holistic_description": "（在这里填写完整的母版描述...）",
-  "fragments": {
-    "${KnowledgeBaseCategory.POSE}": "...",
-    "${KnowledgeBaseCategory.COMPOSITION}": "...",
-    "${KnowledgeBaseCategory.SCENE}": "...",
-    "${KnowledgeBaseCategory.LIGHTING}": "...",
-    "${KnowledgeBaseCategory.CLOTHING}": "...",
-    "${KnowledgeBaseCategory.STYLE}": "..."
-  }
-}
-`;
-
     try {
-        // Construct FormData for the new backend
-        const formData = new FormData();
-        formData.append('image', imageFile);
-        formData.append('prompt', prompt);
-
-        const headers: HeadersInit = {};
-        const userId = getUserId();
-        const apiKey = getReplicateApiKey();
-        if (userId) headers['x-user-id'] = userId;
-        if (apiKey) headers['x-replicate-token'] = apiKey;
-
-        const response = await fetch(`${API_BASE_URL}/analyze-image`, {
-            method: 'POST',
-            headers,
-            body: formData
-        });
-
-        if (!response.ok) {
-             const errorData = await response.json().catch(() => ({}));
-             throw new Error(errorData.error || `Server error: ${response.status}`);
-        }
-
-        const data = await response.json();
-        const resultText = data.analysis;
-
-        const jsonString = resultText.replace(/```json\n?|\n?```/g, '').trim();
-        return JSON.parse(jsonString) as KnowledgeBaseAnalysis;
+        const resultText = await runVisionAnalysis(imageFile, IMAGE_UNDERSTANDING_PROMPT);
+        const parsed = parseImageUnderstandingPrompt(resultText);
+        return parsed;
     } catch (error) {
         console.error("KB Analysis failed:", error);
         throw new Error("知识库图像解析失败。");
     }
+};
+
+const parseImageUnderstandingPrompt = (analysis: string): KnowledgeBaseAnalysis => {
+    const text = (analysis || '').trim();
+    const lines = text.split(/\r?\n/);
+    const sections: Array<{ title: string; contentLines: string[] }> = [];
+    let current: { title: string; contentLines: string[] } | null = null;
+
+    const commit = () => {
+        if (!current) return;
+        const content = current.contentLines.join('\n').trim();
+        if (current.title.trim() && content) {
+            sections.push({ title: current.title.trim(), contentLines: content.split('\n') });
+        }
+        current = null;
+    };
+
+    for (const rawLine of lines) {
+        const line = rawLine.trimEnd();
+        const bracketMatch = line.trim().match(/^(?:\d+\.\s*)?[【\[]\s*(.+?)\s*[】\]]\s*$/);
+        const headerText = bracketMatch?.[1];
+
+        if (headerText) {
+            commit();
+            current = { title: headerText.trim(), contentLines: [] };
+            continue;
+        }
+
+        if (!current) continue;
+        current.contentLines.push(rawLine);
+    }
+
+    commit();
+
+    const fragments: Partial<Record<KnowledgeBaseCategory, string>> = {};
+    const setIf = (cat: KnowledgeBaseCategory, content: string) => {
+        const value = content.trim();
+        if (!value) return;
+        fragments[cat] = value;
+    };
+
+    for (const section of sections.map(s => ({ title: s.title, content: s.contentLines.join('\n').trim() }))) {
+        const t = section.title;
+        if (/(姿势|动作|Pose)/i.test(t)) setIf(KnowledgeBaseCategory.POSE, section.content);
+        else if (/(场景|环境|Scene|Environment)/i.test(t)) setIf(KnowledgeBaseCategory.SCENE, section.content);
+        else if (/(构图|镜头|Composition|Camera)/i.test(t)) setIf(KnowledgeBaseCategory.COMPOSITION, section.content);
+        else if (/(光照|氛围|Lighting|Atmosphere)/i.test(t)) setIf(KnowledgeBaseCategory.LIGHTING, section.content);
+        else if (/(服装|造型|Clothing|Apparel|Styling)/i.test(t)) setIf(KnowledgeBaseCategory.CLOTHING, section.content);
+        else if (/(风格|后期|Style|Post)/i.test(t)) setIf(KnowledgeBaseCategory.STYLE, section.content);
+    }
+
+    return {
+        holistic_description: text,
+        fragments
+    } as KnowledgeBaseAnalysis;
 };
 
 const createBaseDirectives = () => `
@@ -448,65 +650,27 @@ ${e.promptFragment}
         console.warn("Could not load knowledge base for context", e);
     }
 
-    const prompt = `
-# ROLE: 资深视觉分析师与商业摄影创意总监 (v3.0)
+    try {
+        const understanding = await runVisionAnalysis(imageFile, IMAGE_UNDERSTANDING_PROMPT);
 
-# TASK:
-对上传的图片进行双重分析。
-1. **深度解构 (Understanding):** 生成一段极度详细的“母版描述”，捕捉图像的每一个细节，包括微小的纹理、光影变化、材质触感及整体氛围。
-2. **优化诊断 (Suggestions):** 像创意总监一样，指出画面的不足并给出大胆的、专业的修图与重绘指令。
+        const suggestionsPrompt = `
+你是一个专业的商业摄影修图与重绘创意总监。你会基于输入图片与“图像理解 Prompt”，输出可执行的修图/重绘指令。
 
-# STEP 1: IMAGE UNDERSTANDING (母版描述 - ULTRA-DETAILED)
-创作一段单一的、综合性的文字，捕捉图像的全部精髓。这段描述应该足够详细，包含人物特征、服装细节、环境氛围、光影质感等所有方面。
-必须包含：
-- **主体 (Subject):** 生理特征、面部细节、发丝质感。
-- **场景 (Scene):** 空间结构、背景材质、关键道具。
-- **光影 (Lighting):** 光源类型、方向、质感。
-- **风格 (Style):** 摄影风格、色调分级。
+【输入】
+图像理解 Prompt：
+${understanding}
 
-# STEP 2: IMPROVEMENT SUGGESTIONS (优化指令)
-基于画面现状，提出3-5条具体的修图或AI重绘建议。
-建议必须具体、可执行。例如：“将背景替换为简约的灰色大理石纹理”、“增强人物面部的高光对比度”、“将色调调整为暖色调的复古风格”。
+【任务】
+提出 3-5 条具体、可执行的修图或 AI 重绘建议，重点围绕：构图、光影、色调、质感、背景控制、人物状态与穿搭展示。
+建议要像可直接粘贴到图生图指令区那样可用，避免空泛词。
 ${learnedContext}
 
-# LANGUAGE INSTRUCTION:
-**CRITICAL:** All content values in the JSON output MUST be in **Simplified Chinese (简体中文)**.
-- The JSON keys must remain in **English**.
-- The values must be fully translated to Simplified Chinese.
+【输出要求】
+只输出建议文本，允许多行，不输出 JSON，不输出编号列表，不要解释。
+`.trim();
 
-# OUTPUT_FORMAT:
-以结构化的JSON格式提供输出。
-{
-  "understanding": "（在这里填写完整的母版描述...）",
-  "suggestions": "（在这里填写优化建议列表，用换行符分隔...）"
-}
-`;
-
-    try {
-        const formData = new FormData();
-        formData.append('image', imageFile);
-        formData.append('prompt', prompt);
-
-        const headers: HeadersInit = {};
-        const userId = getUserId();
-        if (userId) headers['x-user-id'] = userId;
-
-        const response = await fetch(`${API_BASE_URL}/analyze-image`, {
-            method: 'POST',
-            headers,
-            body: formData
-        });
-
-        if (!response.ok) {
-             const errorData = await response.json().catch(() => ({}));
-             throw new Error(errorData.error || `Server error: ${response.status}`);
-        }
-
-        const data = await response.json();
-        const resultText = data.analysis;
-
-        const jsonString = resultText.replace(/```json\n?|\n?```/g, '').trim();
-        return JSON.parse(jsonString) as SmartRetouchAnalysisResult;
+        const suggestions = await runVisionAnalysis(imageFile, suggestionsPrompt);
+        return { understanding: (understanding || '').trim(), suggestions: (suggestions || '').trim() };
     } catch (error) {
         console.error("Smart Retouch Analysis failed:", error);
         throw new Error("智能修图分析失败。");
@@ -518,7 +682,6 @@ export const mergeRetouchPromptsWithImage = async (
     originalDescription: string,
     userInstructions: string
 ): Promise<string> => {
-    const base64Image = await fileToBase64(imageFile);
     const prompt = `
 # ROLE: Advanced Prompt Engineer & Logic Merger
 
@@ -547,10 +710,7 @@ Return ONLY the final Merged Description text. Do not add explanations.
 `;
 
     try {
-        return await callApi('/analyze-image', {
-            images: [base64Image],
-            prompt: prompt
-        }, true);
+        return await runVisionAnalysis(imageFile, prompt);
     } catch (error) {
         console.error("Prompt Merge failed:", error);
         return originalDescription + " " + userInstructions; 
@@ -685,8 +845,6 @@ export interface PreprocessResult {
 }
 
 export const preprocessImageForGeneration = async (imageFile: File): Promise<PreprocessResult> => {
-    const base64Image = await fileToBase64(imageFile);
-    
     const prompt = `
 # ROLE: Image Quality & Content Analyzer
 # TASK: Analyze the image for two specific criteria:
@@ -705,11 +863,7 @@ Return ONLY a JSON object.
 `;
 
     try {
-        const resultText = await callApi('/analyze-image', {
-            images: [base64Image],
-            prompt: prompt
-        }, true);
-
+        const resultText = await runVisionAnalysis(imageFile, prompt);
         const jsonString = resultText.replace(/```json\n?|\n?```/g, '').trim();
         return JSON.parse(jsonString) as PreprocessResult;
     } catch (error) {

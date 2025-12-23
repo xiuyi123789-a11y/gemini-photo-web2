@@ -84,7 +84,7 @@ export const KnowledgeBaseView: React.FC = () => {
 
     const handleSelectAll = () => {
         // Get all currently visible IDs
-        const allVisibleIds = Object.values(filteredAndGroupedEntries).flat().map(e => e.id);
+        const allVisibleIds = (Object.values(filteredAndGroupedEntries) as KnowledgeBaseEntry[][]).flat().map(e => e.id);
         
         if (selectedIds.size === allVisibleIds.length && allVisibleIds.length > 0) {
             setSelectedIds(new Set());
@@ -448,7 +448,7 @@ export const KnowledgeBaseView: React.FC = () => {
                                  onClick={handleSelectAll}
                                  className="text-xs text-slate-500 hover:text-fuchsia-400 transition-colors ml-2"
                              >
-                                 {selectedIds.size === Object.values(filteredAndGroupedEntries).flat().length ? '取消全选' : '全选'}
+                                 {selectedIds.size === (Object.values(filteredAndGroupedEntries) as KnowledgeBaseEntry[][]).flat().length ? '取消全选' : '全选'}
                              </button>
                          </div>
  
