@@ -51,6 +51,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const prevRefImagesCount = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const consistentTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     let alive = true;
@@ -148,6 +149,11 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
             const mergedPrompt = await analyzeAndMergeReferenceImagesForGeneration(validFiles);
             setConsistentPrompt(mergedPrompt.trim());
             setVariablePrompts([{ id: uuidv4(), prompt: '' }]);
+            setEditingField('consistent');
+            requestAnimationFrame(() => {
+                consistentTextareaRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                consistentTextareaRef.current?.focus();
+            });
         }
 
     } catch (e: any) {
@@ -678,6 +684,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                     </div>
                 </div>
                 <textarea
+                  ref={consistentTextareaRef}
                   value={consistentPrompt}
                   onChange={handleConsistentPromptChange}
                   rows={5}
