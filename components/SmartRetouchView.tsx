@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { SmartRetouchRow, KnowledgeBaseEntry } from '../types';
-import { analyzeImageSmartRetouch, generateSmartRetouchImage, mergeRetouchPromptsWithImage } from '../services/replicateService';
+import { analyzeImageSmartRetouch, generateSmartRetouchImage, mergeRetouchPromptsWithImage, upscaleImage, DEFAULT_CLARITY_PARAMS, DEFAULT_REAL_ESRGAN_PARAMS } from '../services/replicateService';
 import { addRetouchLearningEntry } from '../services/knowledgeBaseService';
 import { MagicWandIcon, PlayIcon, DownloadIcon, ZoomInIcon, TrashIcon, PlusIcon, FireIcon, RefreshIcon } from './IconComponents';
 import { LoadingSpinner } from './LoadingSpinner';
@@ -15,6 +15,7 @@ export const SmartRetouchView: React.FC = () => {
     ]);
     const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
     const [saveStatus, setSaveStatus] = useState<Record<string, boolean>>({});
+    const [upscaleStatus, setUpscaleStatus] = useState<Record<string, boolean>>({});
     
     // Knowledge Base Modal State
     const [isKbModalOpen, setIsKbModalOpen] = useState(false);
@@ -208,6 +209,52 @@ export const SmartRetouchView: React.FC = () => {
         }
     };
 
+    const imageSrcToFile = async (src: string, filenameBase: string) => {
+        const response = await fetch(src);
+        if (!response.ok) {
+            throw new Error(`获取图片失败: ${response.status} ${response.statusText}`);
+        }
+        const blob = await response.blob();
+        const type = blob.type || 'image/png';
+        const ext = type.includes('jpeg') ? 'jpg' : (type.includes('webp') ? 'webp' : 'png');
+        return new File([blob], `${filenameBase}.${ext}`, { type });
+    };
+
+    const handleUpscale = async (rowId: string, mode: 'fast' | 'quality') => {
+        const row = rows.find(r => r.id === rowId);
+        if (!row?.generatedImage) return;
+
+        setUpscaleStatus(prev => ({ ...prev, [rowId]: true }));
+        setRows(prev => prev.map(r => r.id === rowId ? { ...r, error: null } : r));
+
+        try {
+            const file = await imageSrcToFile(row.generatedImage, `retouch_${rowId}_upscale_${Date.now()}`);
+
+            const imageUrl = await upscaleImage(
+                file,
+                mode === 'fast' ? 'real-esrgan' : 'clarity-upscaler',
+                mode === 'fast'
+                    ? { ...DEFAULT_REAL_ESRGAN_PARAMS, scale: 4 }
+                    : { ...DEFAULT_CLARITY_PARAMS, scale_factor: 2 }
+            );
+
+            setRows(prev => prev.map(r => {
+                if (r.id !== rowId) return r;
+                if (r.generatedImage?.startsWith('blob:')) {
+                    URL.revokeObjectURL(r.generatedImage);
+                }
+                return { ...r, generatedImage: imageUrl };
+            }));
+        } catch (e: any) {
+            setRows(prev => prev.map(r => r.id === rowId ? {
+                ...r,
+                error: e?.message || '放大失败，请重试'
+            } : r));
+        } finally {
+            setUpscaleStatus(prev => ({ ...prev, [rowId]: false }));
+        }
+    };
+
     return (
         <div>
             {enlargedImage && <ImageModal src={enlargedImage} onClose={() => setEnlargedImage(null)} />}
@@ -312,12 +359,12 @@ export const SmartRetouchView: React.FC = () => {
                                 </div>
 
                                 {/* Instructions Textarea */}
-                                <div className="relative flex-1 min-h-[300px]">
+                                <div className="relative">
                                     <textarea 
                                         value={row.analysisText}
                                         onChange={(e) => setRows(prev => prev.map(r => r.id === row.id ? {...r, analysisText: e.target.value} : r))}
                                         placeholder="在此输入修图指令，或等待 AI 解析..."
-                                        className="w-full h-full bg-slate-950/60 border border-slate-700 rounded-xl resize-none text-slate-300 text-sm focus:ring-2 focus:ring-fuchsia-500 focus:border-transparent placeholder-slate-600 p-4 custom-scrollbar"
+                                        className="w-full bg-slate-950/60 border border-slate-700 rounded-xl resize-y text-slate-300 text-sm focus:ring-2 focus:ring-fuchsia-500 focus:border-transparent placeholder-slate-600 p-4 pb-16 min-h-[420px] lg:min-h-[520px] custom-scrollbar"
                                         disabled={!row.originalImage}
                                     />
                                     
@@ -412,6 +459,43 @@ export const SmartRetouchView: React.FC = () => {
                                         </>
                                     )}
                                 </button>
+
+                                <div className="grid grid-cols-2 gap-3">
+                                    <button
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleUpscale(row.id, 'fast');
+                                        }}
+                                        disabled={!row.generatedImage || row.isGenerating || !!upscaleStatus[row.id]}
+                                        className="w-full py-3 rounded-xl font-bold text-white shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all bg-slate-700 hover:bg-slate-600"
+                                    >
+                                        {upscaleStatus[row.id] ? (
+                                            <LoadingSpinner text="" />
+                                        ) : (
+                                            <>
+                                                <ZoomInIcon className="w-5 h-5" />
+                                                快速放大
+                                            </>
+                                        )}
+                                    </button>
+                                    <button
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleUpscale(row.id, 'quality');
+                                        }}
+                                        disabled={!row.generatedImage || row.isGenerating || !!upscaleStatus[row.id]}
+                                        className="w-full py-3 rounded-xl font-bold text-white shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all bg-slate-700 hover:bg-slate-600"
+                                    >
+                                        {upscaleStatus[row.id] ? (
+                                            <LoadingSpinner text="" />
+                                        ) : (
+                                            <>
+                                                <ZoomInIcon className="w-5 h-5" />
+                                                高质量放大
+                                            </>
+                                        )}
+                                    </button>
+                                </div>
                             </div>
                         </div>
 
