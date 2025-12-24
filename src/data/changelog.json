@@ -1,5 +1,16 @@
 [
   {
+    "version": "v1.1.7",
+    "date": "2025-12-24",
+    "changes": [
+      {
+        "summary": "feat: add upscale buttons to smart retouch",
+        "details": ""
+      }
+    ],
+    "type": "Feature"
+  },
+  {
     "version": "v1.1.6",
     "date": "2025-12-24",
     "changes": [

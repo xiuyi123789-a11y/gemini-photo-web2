@@ -522,83 +522,118 @@ app.post('/api/retouch-image', validateUserId, async (req, res) => {
     }
 });
 
-// 图片放大 API
-app.post('/api/upscale-image', async (req, res) => {
+app.post('/api/upscale-image', validateUserId, async (req, res) => {
     try {
-        const { model, image, params } = req.body;
-        const userId = req.headers['x-user-id'] || 'default-user';
-        const apiKey = req.headers['x-replicate-token'];
+        const { model, image, params } = req.body || {};
 
-        // 验证 API Key
-        if (!apiKey) {
-            return res.status(401).json({ error: 'Replicate API token required' });
+        if (!model || !image) {
+            return res.status(400).json({ error: '缺少必要参数：model / image' });
         }
 
-        const replicate = new Replicate({ auth: apiKey });
+        const replicateClient = getReplicateClient(req);
 
-        // 处理 Base64 图片
-        const base64Data = image.replace(/^data:image\/\w+;base64,/, '');
+        const base64Data = typeof image === 'string'
+            ? image.replace(/^data:image\/\w+;base64,/, '')
+            : '';
+
+        if (!base64Data) {
+            return res.status(400).json({ error: '图片数据无效' });
+        }
+
+        const safeParams = (params && typeof params === 'object') ? params : {};
 
         let output;
 
-        // 根据模型类型调用不同的 API
         if (model === 'real-esrgan') {
-            // Real-ESRGAN: 快速放大模型
-            console.log('[Upscale] Using Real-ESRGAN, scale:', params.scale);
+            console.log('[Upscale] Using Real-ESRGAN, scale:', safeParams.scale);
 
-            output = await replicate.run(
-                "nightmareai/real-esrgan:f121d640bd286e1fdc67f9799164c1d5be36ff74576ee11c803ae5b665dd46aa",
-                {
-                    input: {
-                        image: `data:image/png;base64,${base64Data}`,
-                        scale: params.scale || 2,
-                        face_enhance: params.face_enhance || false
+            output = await executeWithRetry(
+                () => replicateClient.run(
+                    "nightmareai/real-esrgan:f121d640bd286e1fdc67f9799164c1d5be36ff74576ee11c803ae5b665dd46aa",
+                    {
+                        input: {
+                            image: `data:image/png;base64,${base64Data}`,
+                            scale: safeParams.scale || 2,
+                            face_enhance: safeParams.face_enhance || false
+                        }
                     }
-                }
+                ),
+                6
             );
         } else if (model === 'clarity-upscaler') {
-            // Clarity Upscaler: 高质量放大模型
-            console.log('[Upscale] Using Clarity Upscaler, scale_factor:', params.scale_factor);
+            console.log('[Upscale] Using Clarity Upscaler, scale_factor:', safeParams.scale_factor);
 
-            output = await replicate.run(
-                "philz1337x/clarity-upscaler:dfad41707589d68ecdccd1dfa600d55a208f9310748e44bfe35b4a6291453d5e",
-                {
-                    input: {
-                        image: `data:image/png;base64,${base64Data}`,
-                        prompt: params.prompt || 'masterpiece, best quality, highres',
-                        dynamic: params.dynamic || 6,
-                        sd_model: 'juggernaut_reborn.safetensors [338b85bc4f]',
-                        scheduler: params.scheduler || 'DPM++ 3M SDE Karras',
-                        creativity: params.creativity || 0.35,
-                        resemblance: params.resemblance || 0.6,
-                        scale_factor: params.scale_factor || 2,
-                        tiling_width: 112,
-                        tiling_height: 144,
-                        output_format: 'png',
-                        negative_prompt: params.negative_prompt || '(worst quality, low quality, normal quality:2)',
-                        num_inference_steps: params.num_inference_steps || 18,
-                        downscaling: false,
-                        downscaling_resolution: 768,
-                        handfix: 'disabled',
-                        pattern: false,
-                        sharpen: 0
+            output = await executeWithRetry(
+                () => replicateClient.run(
+                    "philz1337x/clarity-upscaler:dfad41707589d68ecdccd1dfa600d55a208f9310748e44bfe35b4a6291453d5e",
+                    {
+                        input: {
+                            image: `data:image/png;base64,${base64Data}`,
+                            prompt: safeParams.prompt || 'masterpiece, best quality, highres',
+                            dynamic: safeParams.dynamic || 6,
+                            sd_model: 'juggernaut_reborn.safetensors [338b85bc4f]',
+                            scheduler: safeParams.scheduler || 'DPM++ 3M SDE Karras',
+                            creativity: safeParams.creativity || 0.35,
+                            resemblance: safeParams.resemblance || 0.6,
+                            scale_factor: safeParams.scale_factor || 2,
+                            tiling_width: 112,
+                            tiling_height: 144,
+                            output_format: 'png',
+                            negative_prompt: safeParams.negative_prompt || '(worst quality, low quality, normal quality:2)',
+                            num_inference_steps: safeParams.num_inference_steps || 18,
+                            downscaling: false,
+                            downscaling_resolution: 768,
+                            handfix: 'disabled',
+                            pattern: false,
+                            sharpen: 0
+                        }
                     }
-                }
+                ),
+                6
             );
         } else {
-            return res.status(400).json({ error: 'Invalid model type. Use "real-esrgan" or "clarity-upscaler"' });
+            return res.status(400).json({ error: '模型类型不支持，请使用 real-esrgan 或 clarity-upscaler' });
         }
 
-        // 处理返回结果
         const imageUrl = Array.isArray(output) ? output[0] : output;
+        if (!imageUrl || typeof imageUrl !== 'string') {
+            throw new Error(`Invalid output from Replicate: ${JSON.stringify(output)}`);
+        }
 
         console.log('[Upscale] Success, output URL:', imageUrl);
         res.json({ imageUrl });
     } catch (error) {
+        const message = (error && typeof error === 'object' && 'message' in error)
+            ? String(error.message)
+            : 'Upscale failed';
+
+        const isRateLimit = error?.status === 429 ||
+            (message && message.includes('429')) ||
+            (error?.response && error.response.status === 429);
+
+        if (isRateLimit) {
+            let retryAfterSeconds;
+            try {
+                const headerVal = error?.response?.headers?.get?.('retry-after');
+                if (headerVal) retryAfterSeconds = Number(headerVal) + 1;
+                const match = message.match(/"retry_after":\s*(\d+)/);
+                if (!retryAfterSeconds && match) retryAfterSeconds = Number(match[1]) + 1;
+            } catch (e) {
+            }
+            if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+                res.set('Retry-After', String(Math.round(retryAfterSeconds)));
+            }
+            return res.status(429).json({ error: 'Replicate 请求过于频繁(429)，请稍后重试' });
+        }
+
+        if (message.includes('token') && message.includes('missing')) {
+            return res.status(401).json({ error: message });
+        }
+
         console.error('[Upscale] Error:', error);
         res.status(500).json({
-            error: error.message || 'Upscale failed',
-            details: error.toString()
+            error: message || 'Upscale failed',
+            details: error?.toString?.() || String(error)
         });
     }
 });
