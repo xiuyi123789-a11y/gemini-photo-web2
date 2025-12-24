@@ -1,5 +1,6 @@
 
 import React, { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { XIcon } from './IconComponents';
 
 interface ImageModalProps {
@@ -100,7 +101,7 @@ export const ImageModal: React.FC<ImageModalProps> = ({ src, onClose }) => {
     }, [onClose]);
 
 
-    return (
+    const modal = (
         <div 
             className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 backdrop-blur-md"
             onClick={onClose} // Clicking backdrop closes
@@ -144,4 +145,7 @@ export const ImageModal: React.FC<ImageModalProps> = ({ src, onClose }) => {
             </div>
         </div>
     );
+
+    if (typeof document === 'undefined') return modal;
+    return createPortal(modal, document.body);
 };

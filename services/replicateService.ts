@@ -944,6 +944,46 @@ ${directives}
     return result.imageUrl;
 };
 
+export type UpscaleModel = 'real-esrgan' | 'clarity-upscaler';
+
+export type RealEsrganUpscaleParams = {
+    scale: number;
+    face_enhance: boolean;
+};
+
+export type ClarityUpscalerParams = {
+    seed: number;
+    prompt: string;
+    negative_prompt: string;
+    dynamic: number;
+    scheduler: string;
+    sd_model: string;
+    num_inference_steps: number;
+    creativity: number;
+    resemblance: number;
+    scale_factor: number;
+    tiling_width: number;
+    tiling_height: number;
+    output_format: string;
+    handfix: string;
+    pattern: boolean;
+    sharpen: number;
+    lora_links: string;
+    downscaling: boolean;
+    downscaling_resolution: number;
+    custom_sd_model: string;
+};
+
+export const upscaleImage = async (
+    imageFile: File,
+    model: UpscaleModel,
+    params: RealEsrganUpscaleParams | ClarityUpscalerParams
+): Promise<string> => {
+    const base64Image = await fileToBase64(imageFile);
+    const result = await callApi('/upscale-image', { model, image: base64Image, params });
+    return result.imageUrl;
+};
+
 const createCornerMask = async (imageFile: File): Promise<string> => {
     return new Promise((resolve, reject) => {
         const img = new Image();

@@ -522,6 +522,88 @@ app.post('/api/retouch-image', validateUserId, async (req, res) => {
     }
 });
 
+// 4.5 POST /api/upscale-image (Upscaling)
+app.post('/api/upscale-image', validateUserId, async (req, res) => {
+    try {
+        const replicateClient = getReplicateClient(req);
+        const { model, image, params } = req.body || {};
+
+        if (!model || typeof model !== 'string') {
+            return res.status(400).json({ error: 'Missing model' });
+        }
+        if (!image || typeof image !== 'string') {
+            return res.status(400).json({ error: 'Missing image' });
+        }
+
+        let replicateModel;
+        let input;
+
+        if (model === 'real-esrgan') {
+            replicateModel = "nightmareai/real-esrgan";
+            input = {
+                image,
+                scale: typeof params?.scale === 'number' ? params.scale : 2,
+                face_enhance: !!params?.face_enhance
+            };
+        } else if (model === 'clarity-upscaler') {
+            replicateModel = "philz1337x/clarity-upscaler:dfad41707589d68ecdccd1dfa600d55a208f9310748e44bfe35b4a6291453d5e";
+            input = {
+                seed: typeof params?.seed === 'number' ? params.seed : 1337,
+                image,
+                prompt: typeof params?.prompt === 'string' ? params.prompt : "masterpiece, best quality, highres, <lora:more_details:0.5> <lora:SDXLrender_v2.0:1>",
+                dynamic: typeof params?.dynamic === 'number' ? params.dynamic : 6,
+                handfix: typeof params?.handfix === 'string' ? params.handfix : "disabled",
+                pattern: !!params?.pattern,
+                sharpen: typeof params?.sharpen === 'number' ? params.sharpen : 0,
+                sd_model: typeof params?.sd_model === 'string' ? params.sd_model : "juggernaut_reborn.safetensors [338b85bc4f]",
+                scheduler: typeof params?.scheduler === 'string' ? params.scheduler : "DPM++ 3M SDE Karras",
+                creativity: typeof params?.creativity === 'number' ? params.creativity : 0.35,
+                lora_links: typeof params?.lora_links === 'string' ? params.lora_links : "",
+                downscaling: !!params?.downscaling,
+                resemblance: typeof params?.resemblance === 'number' ? params.resemblance : 0.6,
+                scale_factor: typeof params?.scale_factor === 'number' ? params.scale_factor : 2,
+                tiling_width: typeof params?.tiling_width === 'number' ? params.tiling_width : 112,
+                output_format: typeof params?.output_format === 'string' ? params.output_format : "png",
+                tiling_height: typeof params?.tiling_height === 'number' ? params.tiling_height : 144,
+                custom_sd_model: typeof params?.custom_sd_model === 'string' ? params.custom_sd_model : "",
+                negative_prompt: typeof params?.negative_prompt === 'string' ? params.negative_prompt : "(worst quality, low quality, normal quality:2) JuggernautNegative-neg",
+                num_inference_steps: typeof params?.num_inference_steps === 'number' ? params.num_inference_steps : 18,
+                downscaling_resolution: typeof params?.downscaling_resolution === 'number' ? params.downscaling_resolution : 768
+            };
+        } else {
+            return res.status(400).json({ error: `Unsupported model: ${model}` });
+        }
+
+        console.log(`Upscaling with ${replicateModel}`);
+        console.log('Upscale input:', JSON.stringify(input, null, 2));
+
+        const output = await runReplicatePrediction(replicateClient, replicateModel, input);
+
+        let outputUrl;
+        if (Array.isArray(output)) {
+            const first = output[0];
+            if (typeof first === 'string') outputUrl = first;
+            else if (first && typeof first === 'object' && typeof first.url === 'function') outputUrl = first.url();
+            else if (first && typeof first === 'object' && typeof first.url === 'string') outputUrl = first.url;
+            else outputUrl = first;
+        } else if (typeof output === 'object' && output?.url) {
+            outputUrl = typeof output.url === 'function' ? output.url() : output.url;
+        } else {
+            outputUrl = output;
+        }
+
+        if (!outputUrl || typeof outputUrl !== 'string') {
+            throw new Error(`Invalid output from Replicate: ${JSON.stringify(output)}`);
+        }
+
+        const imageUrl = await saveReplicateOutput(outputUrl, req.userId);
+        res.json({ imageUrl });
+    } catch (error) {
+        console.error('Upscale error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // 5. GET /api/knowledge
 app.get('/api/knowledge', validateUserId, async (req, res) => {
   try {
