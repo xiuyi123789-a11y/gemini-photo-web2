@@ -944,26 +944,28 @@ ${directives}
     return result.imageUrl;
 };
 
-// ============ 图片放大模型 ============
+// ============================================
+// 图片放大模型支持
+// ============================================
 
 export type UpscaleModel = 'real-esrgan' | 'clarity-upscaler';
 
-// Real-ESRGAN 参数
+// Real-ESRGAN 参数 (快速放大)
 export interface RealEsrganParams {
-    scale: number; // 2 or 4
-    face_enhance: boolean;
+    scale: number; // 2 or 4, 放大倍数
+    face_enhance: boolean; // 是否增强人脸
 }
 
-// Clarity Upscaler 参数
+// Clarity Upscaler 参数 (高质量放大)
 export interface ClarityUpscalerParams {
-    prompt: string;
-    dynamic: number;
-    scheduler: string;
-    creativity: number;
-    resemblance: number;
-    scale_factor: number;
-    negative_prompt: string;
-    num_inference_steps: number;
+    prompt: string; // 正向提示词
+    dynamic: number; // 1-50, HDR强度
+    scheduler: string; // 调度器类型
+    creativity: number; // 0-1, 创意度
+    resemblance: number; // 0-1, 与原图相似度
+    scale_factor: number; // 1-4, 放大倍数
+    negative_prompt: string; // 负向提示词
+    num_inference_steps: number; // 1-100, 推理步数
 }
 
 // 默认配置
@@ -984,10 +986,11 @@ export const DEFAULT_CLARITY_PARAMS: ClarityUpscalerParams = {
 };
 
 /**
- * 放大图片
- * @param imageFile 要放大的图片
- * @param model 模型: 'real-esrgan' 或 'clarity-upscaler'
+ * 放大图片 - 支持两种模型
+ * @param imageFile 要放大的图片文件
+ * @param model 使用的模型: 'real-esrgan' (快速) 或 'clarity-upscaler' (高质量)
  * @param params 模型参数
+ * @returns 放大后的图片 URL
  */
 export const upscaleImage = async (
     imageFile: File,
@@ -996,21 +999,32 @@ export const upscaleImage = async (
 ): Promise<string> => {
     const base64Image = await fileToBase64(imageFile);
 
-    const result = await callApi(
-        '/upscale-image',
-        {
-            model,
-            image: base64Image,
-            params
-        },
-        false,
-        {
-            retries: 2,
-            timeoutMs: 180000
-        }
-    );
+    try {
+        const result = await callApi(
+            '/upscale-image',
+            {
+                model,
+                image: base64Image,
+                params
+            },
+            false,
+            {
+                retries: 2,
+                minDelayMs: 1000,
+                maxDelayMs: 5000,
+                timeoutMs: 180000
+            }
+        );
 
-    return result.imageUrl;
+        return result.imageUrl;
+    } catch (error) {
+        console.error(`${model} upscale failed:`, error);
+        await addToErrorNotebook({
+            type: 'upscale_error',
+            details: `Model: ${model}, Error: ${error instanceof Error ? error.message : 'Unknown'}`
+        });
+        throw error;
+    }
 };
 
 const createCornerMask = async (imageFile: File): Promise<string> => {

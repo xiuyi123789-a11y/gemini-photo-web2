@@ -522,70 +522,84 @@ app.post('/api/retouch-image', validateUserId, async (req, res) => {
     }
 });
 
-// 4.5 POST /api/upscale-image (Upscaling)
-app.post('/api/upscale-image', validateUserId, async (req, res) => {
+// 图片放大 API
+app.post('/api/upscale-image', async (req, res) => {
     try {
-        const { model, image, params } = req.body || {};
+        const { model, image, params } = req.body;
+        const userId = req.headers['x-user-id'] || 'default-user';
         const apiKey = req.headers['x-replicate-token'];
 
+        // 验证 API Key
         if (!apiKey) {
             return res.status(401).json({ error: 'Replicate API token required' });
         }
-        const replicateClient = new Replicate({ auth: apiKey });
 
-        if (!model || typeof model !== 'string') {
-            return res.status(400).json({ error: 'Missing model' });
-        }
-        if (!image || typeof image !== 'string') {
-            return res.status(400).json({ error: 'Missing image' });
-        }
+        const replicate = new Replicate({ auth: apiKey });
 
+        // 处理 Base64 图片
         const base64Data = image.replace(/^data:image\/\w+;base64,/, '');
-        const dataUri = `data:image/png;base64,${base64Data}`;
 
         let output;
 
+        // 根据模型类型调用不同的 API
         if (model === 'real-esrgan') {
-            output = await replicateClient.run(
+            // Real-ESRGAN: 快速放大模型
+            console.log('[Upscale] Using Real-ESRGAN, scale:', params.scale);
+
+            output = await replicate.run(
                 "nightmareai/real-esrgan:f121d640bd286e1fdc67f9799164c1d5be36ff74576ee11c803ae5b665dd46aa",
                 {
                     input: {
-                        image: dataUri,
-                        scale: (typeof params?.scale === 'number' ? params.scale : 2),
-                        face_enhance: !!params?.face_enhance
+                        image: `data:image/png;base64,${base64Data}`,
+                        scale: params.scale || 2,
+                        face_enhance: params.face_enhance || false
                     }
                 }
             );
         } else if (model === 'clarity-upscaler') {
-            output = await replicateClient.run(
+            // Clarity Upscaler: 高质量放大模型
+            console.log('[Upscale] Using Clarity Upscaler, scale_factor:', params.scale_factor);
+
+            output = await replicate.run(
                 "philz1337x/clarity-upscaler:dfad41707589d68ecdccd1dfa600d55a208f9310748e44bfe35b4a6291453d5e",
                 {
                     input: {
-                        image: dataUri,
-                        prompt: params?.prompt,
-                        dynamic: (typeof params?.dynamic === 'number' ? params.dynamic : 6),
-                        scheduler: params?.scheduler || 'DPM++ 3M SDE Karras',
-                        creativity: (typeof params?.creativity === 'number' ? params.creativity : 0.35),
-                        resemblance: (typeof params?.resemblance === 'number' ? params.resemblance : 0.6),
-                        scale_factor: (typeof params?.scale_factor === 'number' ? params.scale_factor : 2),
-                        negative_prompt: params?.negative_prompt,
-                        num_inference_steps: (typeof params?.num_inference_steps === 'number' ? params.num_inference_steps : 18),
+                        image: `data:image/png;base64,${base64Data}`,
+                        prompt: params.prompt || 'masterpiece, best quality, highres',
+                        dynamic: params.dynamic || 6,
+                        sd_model: 'juggernaut_reborn.safetensors [338b85bc4f]',
+                        scheduler: params.scheduler || 'DPM++ 3M SDE Karras',
+                        creativity: params.creativity || 0.35,
+                        resemblance: params.resemblance || 0.6,
+                        scale_factor: params.scale_factor || 2,
                         tiling_width: 112,
                         tiling_height: 144,
-                        sd_model: 'juggernaut_reborn.safetensors [338b85bc4f]',
-                        output_format: 'png'
+                        output_format: 'png',
+                        negative_prompt: params.negative_prompt || '(worst quality, low quality, normal quality:2)',
+                        num_inference_steps: params.num_inference_steps || 18,
+                        downscaling: false,
+                        downscaling_resolution: 768,
+                        handfix: 'disabled',
+                        pattern: false,
+                        sharpen: 0
                     }
                 }
             );
         } else {
-            return res.status(400).json({ error: 'Invalid model type' });
+            return res.status(400).json({ error: 'Invalid model type. Use "real-esrgan" or "clarity-upscaler"' });
         }
 
+        // 处理返回结果
         const imageUrl = Array.isArray(output) ? output[0] : output;
+
+        console.log('[Upscale] Success, output URL:', imageUrl);
         res.json({ imageUrl });
     } catch (error) {
-        console.error('Upscale error:', error);
-        res.status(500).json({ error: error.message });
+        console.error('[Upscale] Error:', error);
+        res.status(500).json({
+            error: error.message || 'Upscale failed',
+            details: error.toString()
+        });
     }
 });
 
