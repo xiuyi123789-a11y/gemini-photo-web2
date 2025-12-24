@@ -1,5 +1,16 @@
 [
   {
+    "version": "v1.1.4",
+    "date": "2025-12-24",
+    "changes": [
+      {
+        "summary": "feat: smart retouch layout & upscale backend",
+        "details": ""
+      }
+    ],
+    "type": "Feature"
+  },
+  {
     "version": "v1.1.3",
     "date": "2025-12-23",
     "changes": [

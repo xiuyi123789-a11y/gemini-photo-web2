@@ -944,43 +944,72 @@ ${directives}
     return result.imageUrl;
 };
 
+// ============ 图片放大模型 ============
+
 export type UpscaleModel = 'real-esrgan' | 'clarity-upscaler';
 
-export type RealEsrganUpscaleParams = {
-    scale: number;
+// Real-ESRGAN 参数
+export interface RealEsrganParams {
+    scale: number; // 2 or 4
     face_enhance: boolean;
-};
+}
 
-export type ClarityUpscalerParams = {
-    seed: number;
+// Clarity Upscaler 参数
+export interface ClarityUpscalerParams {
     prompt: string;
-    negative_prompt: string;
     dynamic: number;
     scheduler: string;
-    sd_model: string;
-    num_inference_steps: number;
     creativity: number;
     resemblance: number;
     scale_factor: number;
-    tiling_width: number;
-    tiling_height: number;
-    output_format: string;
-    handfix: string;
-    pattern: boolean;
-    sharpen: number;
-    lora_links: string;
-    downscaling: boolean;
-    downscaling_resolution: number;
-    custom_sd_model: string;
+    negative_prompt: string;
+    num_inference_steps: number;
+}
+
+// 默认配置
+export const DEFAULT_REAL_ESRGAN_PARAMS: RealEsrganParams = {
+    scale: 2,
+    face_enhance: false
 };
 
+export const DEFAULT_CLARITY_PARAMS: ClarityUpscalerParams = {
+    prompt: 'masterpiece, best quality, highres, <lora:more_details:0.5> <lora:SDXLrender_v2.0:1>',
+    dynamic: 6,
+    scheduler: 'DPM++ 3M SDE Karras',
+    creativity: 0.35,
+    resemblance: 0.6,
+    scale_factor: 2,
+    negative_prompt: '(worst quality, low quality, normal quality:2) JuggernautNegative-neg',
+    num_inference_steps: 18
+};
+
+/**
+ * 放大图片
+ * @param imageFile 要放大的图片
+ * @param model 模型: 'real-esrgan' 或 'clarity-upscaler'
+ * @param params 模型参数
+ */
 export const upscaleImage = async (
     imageFile: File,
     model: UpscaleModel,
-    params: RealEsrganUpscaleParams | ClarityUpscalerParams
+    params: RealEsrganParams | ClarityUpscalerParams
 ): Promise<string> => {
     const base64Image = await fileToBase64(imageFile);
-    const result = await callApi('/upscale-image', { model, image: base64Image, params });
+
+    const result = await callApi(
+        '/upscale-image',
+        {
+            model,
+            image: base64Image,
+            params
+        },
+        false,
+        {
+            retries: 2,
+            timeoutMs: 180000
+        }
+    );
+
     return result.imageUrl;
 };
 
