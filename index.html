@@ -12,8 +12,8 @@
     <style>
       body {
         font-family: 'Nunito', sans-serif;
-        background: linear-gradient(135deg, #1a1625 0%, #2e2a42 100%);
-        color: #f3f4f6;
+        background: var(--ql-bg, #f6f7fb);
+        color: var(--ql-text, #0f172a);
       }
       /* Custom Scrollbar for a cuter look */
       ::-webkit-scrollbar {
@@ -21,14 +21,14 @@
         height: 8px;
       }
       ::-webkit-scrollbar-track {
-        background: #1f1b2e; 
+        background: transparent; 
       }
       ::-webkit-scrollbar-thumb {
-        background: #4c4666; 
+        background: rgba(15, 23, 42, 0.2); 
         border-radius: 4px;
       }
       ::-webkit-scrollbar-thumb:hover {
-        background: #ec4899; 
+        background: rgba(15, 23, 42, 0.35); 
       }
     </style>
 

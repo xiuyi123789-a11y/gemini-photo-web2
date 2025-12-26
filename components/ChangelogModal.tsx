@@ -74,17 +74,17 @@ export const ChangelogModal: React.FC<ChangelogModalProps> = ({ isOpen, onClose,
     return (
         <div className="fixed inset-0 z-50 flex items-start justify-center pt-24 px-4 pointer-events-none">
             <div 
-                className="bg-slate-950 border border-slate-700 rounded-2xl w-full max-w-5xl h-[80vh] flex flex-col shadow-2xl overflow-hidden animate-fade-in pointer-events-auto"
+                className="bg-white/90 border border-slate-200 rounded-2xl w-full max-w-5xl h-[80vh] flex flex-col shadow-2xl overflow-hidden animate-fade-in pointer-events-auto"
                 onClick={(e) => e.stopPropagation()}
             >
                 {/* Header */}
-                <div className="flex items-center justify-between p-6 border-b border-slate-800 bg-slate-900/50 shrink-0">
-                    <h2 className="text-xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-fuchsia-400 to-purple-400">
+                <div className="flex items-center justify-between p-6 border-b border-slate-200 bg-white/60 shrink-0">
+                    <h2 className="text-xl font-bold text-slate-900">
                         版本更新记录
                     </h2>
                     <button 
                         onClick={onClose}
-                        className="text-slate-400 hover:text-white transition-colors p-1 hover:bg-slate-800 rounded-lg"
+                        className="text-slate-500 hover:text-slate-900 transition-colors p-1 hover:bg-slate-100 rounded-lg"
                     >
                         <XIcon className="w-6 h-6" />
                     </button>
@@ -92,15 +92,15 @@ export const ChangelogModal: React.FC<ChangelogModalProps> = ({ isOpen, onClose,
 
                 {/* Content */}
                 <div className="overflow-y-auto p-6 custom-scrollbar">
-                    <div className="relative border-l border-slate-700 ml-3 space-y-8">
+                    <div className="relative border-l border-slate-200 ml-3 space-y-8">
                         {changelogData.map((entry, index) => {
                             const isExpanded = expandedVersions.has(entry.version);
                             
                             return (
                                 <div key={index} className="relative pl-8">
                                     {/* Timeline Dot */}
-                                    <div className={`absolute -left-[5px] top-1.5 w-2.5 h-2.5 rounded-full border-2 border-slate-900 ${
-                                        index === 0 ? 'bg-fuchsia-500 shadow-[0_0_10px_rgba(217,70,239,0.5)]' : 'bg-slate-600'
+                                    <div className={`absolute -left-[5px] top-1.5 w-2.5 h-2.5 rounded-full border-2 border-white ${
+                                        index === 0 ? 'bg-fuchsia-600 shadow-[0_0_10px_rgba(217,70,239,0.35)]' : 'bg-slate-400'
                                     }`}></div>
                                     
                                     {/* Version Header (Clickable) */}
@@ -108,15 +108,15 @@ export const ChangelogModal: React.FC<ChangelogModalProps> = ({ isOpen, onClose,
                                         className="flex flex-wrap items-center gap-3 mb-2 cursor-pointer group select-none"
                                         onClick={() => toggleVersion(entry.version)}
                                     >
-                                        <span className={`text-lg font-bold transition-colors ${index === 0 ? 'text-white' : 'text-slate-300 group-hover:text-white'}`}>
+                                        <span className={`text-lg font-bold transition-colors ${index === 0 ? 'text-slate-900' : 'text-slate-700 group-hover:text-slate-900'}`}>
                                             {entry.version}
                                         </span>
                                         <span className={`px-2 py-0.5 text-xs rounded-full font-medium border ${
                                             entry.type === 'Feature' 
-                                                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' 
+                                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
                                                 : entry.type === 'Fix' 
-                                                ? 'bg-blue-500/10 text-blue-400 border-blue-500/20'
-                                                : 'bg-purple-500/10 text-purple-400 border-purple-500/20'
+                                                ? 'bg-blue-50 text-blue-700 border-blue-200'
+                                                : 'bg-purple-50 text-purple-700 border-purple-200'
                                         }`}>
                                             {entry.type}
                                         </span>
@@ -137,16 +137,16 @@ export const ChangelogModal: React.FC<ChangelogModalProps> = ({ isOpen, onClose,
                                                 const isDetailOpen = expandedDetails.has(detailId);
 
                                                 return (
-                                                    <li key={idx} className="text-slate-400 text-sm leading-relaxed">
+                                                    <li key={idx} className="text-slate-700 text-sm leading-relaxed">
                                                         <div 
-                                                            className={`flex items-start ${details ? 'cursor-pointer hover:text-slate-200 transition-colors' : ''}`}
+                                                            className={`flex items-start ${details ? 'cursor-pointer hover:text-slate-900 transition-colors' : ''}`}
                                                             onClick={() => details && toggleDetail(detailId)}
                                                         >
-                                                            <span className="mr-2 text-slate-600 mt-1">•</span>
+                                                            <span className="mr-2 text-slate-400 mt-1">•</span>
                                                             <span className="flex-1">
                                                                 {summary}
                                                                 {details && (
-                                                                    <span className="ml-2 text-xs text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700 inline-block align-middle">
+                                                                    <span className="ml-2 text-xs text-slate-600 bg-white px-1.5 py-0.5 rounded border border-slate-200 inline-block align-middle">
                                                                         {isDetailOpen ? '收起' : '详情'}
                                                                     </span>
                                                                 )}
@@ -155,7 +155,7 @@ export const ChangelogModal: React.FC<ChangelogModalProps> = ({ isOpen, onClose,
                                                         
                                                         {/* Detail View */}
                                                         {details && isDetailOpen && (
-                                                            <div className="mt-2 ml-5 p-3 bg-slate-800/50 border border-slate-700/50 rounded-lg text-xs text-slate-400 whitespace-pre-wrap animate-fade-in">
+                                                            <div className="mt-2 ml-5 p-3 bg-white border border-slate-200 rounded-lg text-xs text-slate-700 whitespace-pre-wrap animate-fade-in">
                                                                 {details}
                                                             </div>
                                                         )}

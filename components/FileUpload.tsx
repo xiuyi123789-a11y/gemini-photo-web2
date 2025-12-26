@@ -57,7 +57,7 @@ export const FileUpload: React.FC<FileUploadProps> = ({ onFilesSelected, multipl
       onDragLeave={onDragLeave}
       onDragOver={onDragOver}
       onDrop={onDrop}
-      className={`relative border-3 border-dashed rounded-3xl p-12 text-center transition-all duration-300 group cursor-pointer ${isDragging ? 'border-fuchsia-400 bg-fuchsia-500/10 scale-[1.02]' : 'border-slate-600 hover:border-fuchsia-400/60 hover:bg-slate-800/40'}`}
+      className={`relative border-2 border-dashed rounded-3xl p-12 text-center transition-all duration-300 group cursor-pointer ${isDragging ? 'border-blue-500 bg-blue-50 scale-[1.01]' : 'border-slate-200 hover:border-blue-400 hover:bg-white/70'}`}
     >
       <input
         type="file"
@@ -67,11 +67,11 @@ export const FileUpload: React.FC<FileUploadProps> = ({ onFilesSelected, multipl
         className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
       />
       <div className="flex flex-col items-center relative z-0 pointer-events-none">
-        <div className={`p-4 rounded-full mb-4 transition-colors ${isDragging ? 'bg-fuchsia-500 text-white' : 'bg-slate-700 text-slate-400 group-hover:bg-slate-600 group-hover:text-fuchsia-300'}`}>
+        <div className={`p-4 rounded-full mb-4 transition-colors ${isDragging ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600 group-hover:bg-blue-50 group-hover:text-blue-700'}`}>
              <UploadIcon className="h-10 w-10" />
         </div>
-        <p className="mt-2 text-lg text-slate-300 font-semibold">
-          拖放图片到此处，或 <span className="text-fuchsia-400 group-hover:underline">点击浏览</span>
+        <p className="mt-2 text-lg text-slate-800 font-semibold">
+          拖放图片到此处，或 <span className="text-blue-700 group-hover:underline">点击浏览</span>
         </p>
         <p className="text-sm text-slate-500 mt-1">支持 JPEG, PNG, WEBP</p>
       </div>

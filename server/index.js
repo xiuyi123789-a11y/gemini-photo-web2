@@ -415,6 +415,42 @@ app.post('/api/merge-generation-understanding', validateUserId, async (req, res)
   }
 });
 
+app.post('/api/task-chat', validateUserId, async (req, res) => {
+  try {
+    const replicateClient = getReplicateClient(req);
+    const rawMessages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+
+    const messages = rawMessages
+      .filter((m) => m && typeof m === 'object')
+      .map((m) => ({
+        role: m.role === 'assistant' ? 'assistant' : 'user',
+        content: typeof m.content === 'string' ? m.content : ''
+      }))
+      .filter((m) => m.content.trim().length > 0)
+      .slice(-20);
+
+    const reasoningEffort = typeof req.body?.reasoning_effort === 'string' ? req.body.reasoning_effort : 'minimal';
+    const verbosity = typeof req.body?.verbosity === 'string' ? req.body.verbosity : 'medium';
+    const maxCompletionTokens = Number.isFinite(Number(req.body?.max_completion_tokens)) ? Number(req.body.max_completion_tokens) : 1200;
+
+    const SYSTEM = `你是电商图片任务型对话智能体。你的职责是：识别意图、补全关键槽位、在信息齐全时产出可用于图像生成器的最终提示词。\n\n你必须且只能输出一个 JSON 对象，不要 markdown，不要解释，不要多余文本。\n\n输出格式二选一：\n1) 需要追问时：{\"type\":\"clarify\",\"missing_slots\":[\"aspect_ratio\",\"style\"],\"question\":\"...\"}\n2) 可以生成时：{\"type\":\"generate\",\"aspect_ratio\":\"3:4\",\"prompt\":\"...\"}\n\n规则：\n- aspect_ratio 只能是 1:1 / 3:4 / 9:16 之一。\n- style 必须是清晰可执行的风格词（如：科技感、极简、轻奢、清新、复古胶片）。\n- 若用户没有明确给出 aspect_ratio 或 style，就必须输出 clarify 并在 question 里一次性把缺的都问完。\n- 当用户给出补充信息后，应输出 generate，并把商品信息与用户补充合并成最终 prompt。\n- 生成 prompt 时，优先保留用户输入的事实与约束，不要虚构品牌、参数或场景。`;
+
+    const input = {
+      messages: [{ role: 'system', content: SYSTEM }, ...messages],
+      reasoning_effort: reasoningEffort,
+      verbosity,
+      max_completion_tokens: Math.max(256, Math.min(4000, maxCompletionTokens))
+    };
+
+    const output = await executeWithRetry(() => replicateClient.run('openai/gpt-5', { input }));
+    const text = Array.isArray(output) ? output.join('') : output.toString();
+    res.json({ success: true, text });
+  } catch (error) {
+    console.error('[Server Error] task-chat', error);
+    res.status(500).json({ success: false, error: error.message || '任务对话服务出错' });
+  }
+});
+
 // 3. POST /api/generate-image (Image Generation)
 app.post('/api/generate-image', validateUserId, async (req, res) => {
     try {
@@ -475,7 +511,7 @@ app.post('/api/retouch-image', validateUserId, async (req, res) => {
                 prompt: prompt,
                 guidance: 30,
                 output_format: "jpg",
-                aspect_ratio: "3:4"
+                aspect_ratio: "match_input_image"
             };
         } else {
             // Creative Mode
@@ -532,13 +568,15 @@ app.post('/api/upscale-image', validateUserId, async (req, res) => {
 
         const replicateClient = getReplicateClient(req);
 
-        const base64Data = typeof image === 'string'
-            ? image.replace(/^data:image\/\w+;base64,/, '')
-            : '';
-
-        if (!base64Data) {
+        const parsed = typeof image === 'string'
+            ? image.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/)
+            : null;
+        const mimeType = parsed?.[1] || 'image/png';
+        const base64Data = parsed?.[2] || (typeof image === 'string' ? image : '');
+        if (!base64Data || typeof base64Data !== 'string') {
             return res.status(400).json({ error: '图片数据无效' });
         }
+        const imageDataUri = `data:${mimeType};base64,${base64Data}`;
 
         const safeParams = (params && typeof params === 'object') ? params : {};
 
@@ -549,12 +587,12 @@ app.post('/api/upscale-image', validateUserId, async (req, res) => {
 
             output = await executeWithRetry(
                 () => replicateClient.run(
-                    "nightmareai/real-esrgan:f121d640bd286e1fdc67f9799164c1d5be36ff74576ee11c803ae5b665dd46aa",
+                    "nightmareai/real-esrgan:latest",
                     {
                         input: {
-                            image: `data:image/png;base64,${base64Data}`,
-                            scale: safeParams.scale || 2,
-                            face_enhance: safeParams.face_enhance || false
+                            image: imageDataUri,
+                            scale: Number.isFinite(Number(safeParams.scale)) ? Number(safeParams.scale) : 2,
+                            face_enhance: Boolean(safeParams.face_enhance)
                         }
                     }
                 ),
@@ -563,28 +601,52 @@ app.post('/api/upscale-image', validateUserId, async (req, res) => {
         } else if (model === 'clarity-upscaler') {
             console.log('[Upscale] Using Clarity Upscaler, scale_factor:', safeParams.scale_factor);
 
+            const handfix =
+                safeParams.handfix === 'hands_only' || safeParams.handfix === 'image_and_hands'
+                    ? safeParams.handfix
+                    : 'disabled';
+            const outputFormat =
+                safeParams.output_format === 'webp' || safeParams.output_format === 'jpg'
+                    ? safeParams.output_format
+                    : 'png';
+            const tilingWidth = Number.isFinite(Number(safeParams.tiling_width)) ? Number(safeParams.tiling_width) : 112;
+            const tilingHeight = Number.isFinite(Number(safeParams.tiling_height)) ? Number(safeParams.tiling_height) : 144;
+            const downscalingResolution = Number.isFinite(Number(safeParams.downscaling_resolution))
+                ? Number(safeParams.downscaling_resolution)
+                : 768;
+            const downscaling = downscalingResolution > 0;
+
             output = await executeWithRetry(
                 () => replicateClient.run(
                     "philz1337x/clarity-upscaler:dfad41707589d68ecdccd1dfa600d55a208f9310748e44bfe35b4a6291453d5e",
                     {
                         input: {
-                            image: `data:image/png;base64,${base64Data}`,
-                            prompt: safeParams.prompt || 'masterpiece, best quality, highres',
-                            dynamic: safeParams.dynamic || 6,
-                            sd_model: 'juggernaut_reborn.safetensors [338b85bc4f]',
-                            scheduler: safeParams.scheduler || 'DPM++ 3M SDE Karras',
-                            creativity: safeParams.creativity || 0.35,
-                            resemblance: safeParams.resemblance || 0.6,
-                            scale_factor: safeParams.scale_factor || 2,
-                            tiling_width: 112,
-                            tiling_height: 144,
-                            output_format: 'png',
-                            negative_prompt: safeParams.negative_prompt || '(worst quality, low quality, normal quality:2)',
-                            num_inference_steps: safeParams.num_inference_steps || 18,
-                            downscaling: false,
-                            downscaling_resolution: 768,
-                            handfix: 'disabled',
-                            pattern: false,
+                            image: imageDataUri,
+                            prompt: typeof safeParams.prompt === 'string' ? safeParams.prompt : 'masterpiece, best quality, highres',
+                            negative_prompt: typeof safeParams.negative_prompt === 'string'
+                                ? safeParams.negative_prompt
+                                : '(worst quality, low quality, normal quality:2) JuggernautNegative-neg',
+                            scale_factor: Number.isFinite(Number(safeParams.scale_factor)) ? Number(safeParams.scale_factor) : 2,
+                            dynamic: Number.isFinite(Number(safeParams.dynamic)) ? Number(safeParams.dynamic) : 6,
+                            creativity: Number.isFinite(Number(safeParams.creativity)) ? Number(safeParams.creativity) : 0.35,
+                            resemblance: Number.isFinite(Number(safeParams.resemblance)) ? Number(safeParams.resemblance) : 0.6,
+                            tiling_width: tilingWidth,
+                            tiling_height: tilingHeight,
+                            sd_model: typeof safeParams.sd_model === 'string'
+                                ? safeParams.sd_model
+                                : 'juggernaut_reborn.safetensors [338b85bc4f]',
+                            scheduler: typeof safeParams.scheduler === 'string'
+                                ? safeParams.scheduler
+                                : 'DPM++ 3M SDE Karras',
+                            num_inference_steps: Number.isFinite(Number(safeParams.num_inference_steps))
+                                ? Math.max(1, Math.round(Number(safeParams.num_inference_steps)))
+                                : 18,
+                            seed: Number.isFinite(Number(safeParams.seed)) ? Math.round(Number(safeParams.seed)) : 1337,
+                            downscaling,
+                            downscaling_resolution: downscalingResolution,
+                            handfix,
+                            pattern: Boolean(safeParams.pattern),
+                            output_format: outputFormat,
                             sharpen: 0
                         }
                     }
@@ -595,7 +657,15 @@ app.post('/api/upscale-image', validateUserId, async (req, res) => {
             return res.status(400).json({ error: '模型类型不支持，请使用 real-esrgan 或 clarity-upscaler' });
         }
 
-        const imageUrl = Array.isArray(output) ? output[0] : output;
+        const candidate = Array.isArray(output) ? output[0] : output;
+        const imageUrl =
+            typeof candidate === 'string'
+                ? candidate
+                : typeof candidate?.url === 'function'
+                    ? candidate.url()
+                    : typeof candidate?.url === 'string'
+                        ? candidate.url
+                        : null;
         if (!imageUrl || typeof imageUrl !== 'string') {
             throw new Error(`Invalid output from Replicate: ${JSON.stringify(output)}`);
         }

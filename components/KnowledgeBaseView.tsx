@@ -14,7 +14,7 @@ import {
     cleanUpTrash
 } from '../services/knowledgeBaseService';
 import { LoadingSpinner } from './LoadingSpinner';
-import { TrashIcon, ChevronDownIcon, FireIcon, CheckIcon, RefreshIcon, SearchIcon, XIcon } from './IconComponents';
+import { TrashIcon, ChevronDownIcon, FireIcon, CheckIcon, RefreshIcon, SearchIcon, XIcon, BookOpenIcon } from './IconComponents';
 
 export const KnowledgeBaseView: React.FC = () => {
     const [entries, setEntries] = useState<KnowledgeBaseEntry[]>([]);
@@ -208,53 +208,53 @@ export const KnowledgeBaseView: React.FC = () => {
         <div>
             {expandedEntry && (
                 <div 
-                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
                     onClick={() => setExpandedEntryId(null)}
                 >
                     <div 
-                        className="bg-slate-800 border border-white/10 rounded-3xl shadow-2xl max-w-3xl w-full h-[80vh] flex flex-col overflow-hidden relative"
+                        className="bg-white border border-slate-200 rounded-3xl shadow-2xl max-w-3xl w-full h-[80vh] flex flex-col overflow-hidden relative"
                         onClick={e => e.stopPropagation()}
                     >
                         <button 
                             onClick={() => setExpandedEntryId(null)}
-                            className="absolute top-4 right-4 p-2 bg-white/10 hover:bg-red-500/80 text-white rounded-full transition-colors z-10"
+                            className="absolute top-4 right-4 p-2 bg-slate-100 hover:bg-red-500 text-slate-700 hover:text-white rounded-full transition-colors z-10"
                         >
                             <XIcon className="w-6 h-6" />
                         </button>
                         
                         <div className="flex flex-col md:flex-row h-full">
-                            <div className="w-full md:w-1/3 h-48 md:h-full bg-black flex items-center justify-center flex-shrink-0">
+                            <div className="w-full md:w-1/3 h-48 md:h-full bg-slate-50 flex items-center justify-center flex-shrink-0">
                                 <img src={expandedEntry.sourceImagePreview} alt="Source" className="w-full h-full object-contain" />
                             </div>
-                            <div className="flex-grow p-6 md:p-8 overflow-y-auto custom-scrollbar bg-slate-800/50">
+                            <div className="flex-grow p-6 md:p-8 overflow-y-auto custom-scrollbar bg-white">
                                 <div className="mb-4">
-                                    <span className="inline-block px-3 py-1 rounded-full text-xs font-bold bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/30 mb-2">
+                                    <span className="inline-block px-3 py-1 rounded-full text-xs font-bold bg-fuchsia-50 text-fuchsia-700 border border-fuchsia-200 mb-2">
                                         {expandedEntry.category}
                                     </span>
                                     {expandedEntry.category === KnowledgeBaseCategory.FULL_PROMPT && expandedEntry.fullPrompt && (
                                         <div className="space-y-6">
                                             <div>
-                                                <h4 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-2">一致性描述 (Consistent)</h4>
-                                                <p className="text-slate-200 leading-relaxed text-lg border-l-4 border-fuchsia-500 pl-4 bg-fuchsia-500/5 p-2 rounded-r-lg">
+                                                <h4 className="text-sm font-bold text-slate-600 uppercase tracking-wider mb-2">一致性描述 (Consistent)</h4>
+                                                <p className="text-slate-800 leading-relaxed text-lg border-l-4 border-fuchsia-500 pl-4 bg-fuchsia-50 p-2 rounded-r-lg">
                                                     {expandedEntry.fullPrompt.consistentPrompt}
                                                 </p>
                                             </div>
                                             <div>
-                                                <h4 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-2">变量描述 (Variable)</h4>
-                                                <p className="text-slate-200 leading-relaxed text-lg border-l-4 border-blue-500 pl-4 bg-blue-500/5 p-2 rounded-r-lg">
+                                                <h4 className="text-sm font-bold text-slate-600 uppercase tracking-wider mb-2">变量描述 (Variable)</h4>
+                                                <p className="text-slate-800 leading-relaxed text-lg border-l-4 border-blue-500 pl-4 bg-blue-50 p-2 rounded-r-lg">
                                                     {expandedEntry.fullPrompt.variablePrompt}
                                                 </p>
                                             </div>
                                         </div>
                                     )}
                                     {(!expandedEntry.fullPrompt) && (
-                                        <p className="text-slate-100 leading-relaxed text-lg whitespace-pre-wrap font-medium">
+                                        <p className="text-slate-900 leading-relaxed text-lg whitespace-pre-wrap font-medium">
                                             {expandedEntry.promptFragment}
                                         </p>
                                     )}
                                 </div>
                                 
-                                <div className="pt-6 border-t border-white/10 flex justify-between items-center text-slate-400 text-sm">
+                                <div className="pt-6 border-t border-slate-200 flex justify-between items-center text-slate-600 text-sm">
                                     <div className="flex items-center gap-2">
                                         <FireIcon className="w-4 h-4 text-amber-500" />
                                         <span>使用次数: {expandedEntry.usageCount || 0}</span>
@@ -265,7 +265,7 @@ export const KnowledgeBaseView: React.FC = () => {
                                                 handleDelete(expandedEntry.id);
                                                 setExpandedEntryId(null);
                                             }}
-                                            className="flex items-center gap-2 text-red-400 hover:text-red-300 hover:bg-red-500/10 px-3 py-1.5 rounded-lg transition-colors"
+                                            className="flex items-center gap-2 text-red-600 hover:text-red-700 hover:bg-red-50 px-3 py-1.5 rounded-lg transition-colors"
                                         >
                                             <TrashIcon className="w-4 h-4" />
                                             删除此条目
@@ -280,8 +280,18 @@ export const KnowledgeBaseView: React.FC = () => {
 
             <div className="text-center mb-8 flex flex-col items-center">
                 <div className="flex items-center gap-4 mb-2">
-                     <h2 className="text-3xl font-bold text-white">
-                        {viewMode === 'active' ? '✨ 灵感知识库' : '🗑️ 回收站'}
+                     <h2 className="text-3xl font-bold text-slate-900">
+                        {viewMode === 'active' ? (
+                            <span className="inline-flex items-center gap-2">
+                                <BookOpenIcon className="w-8 h-8" />
+                                <span>灵感知识库</span>
+                            </span>
+                        ) : (
+                            <span className="inline-flex items-center gap-2">
+                                <TrashIcon className="w-8 h-8" />
+                                <span>回收站</span>
+                            </span>
+                        )}
                     </h2>
                     <button 
                         onClick={() => {
@@ -292,7 +302,7 @@ export const KnowledgeBaseView: React.FC = () => {
                         className={`flex items-center gap-2 px-3 py-1.5 rounded-full transition-all border text-sm ${
                             viewMode === 'trash' 
                                 ? 'bg-fuchsia-600 text-white border-fuchsia-500 shadow-lg shadow-fuchsia-500/20' 
-                                : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700 hover:text-white'
+                                : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
                         }`}
                     >
                         {viewMode === 'active' ? (
@@ -308,7 +318,7 @@ export const KnowledgeBaseView: React.FC = () => {
                         )}
                     </button>
                 </div>
-                <p className="text-slate-400">
+                <p className="text-slate-600">
                     {viewMode === 'active' 
                         ? '上传您喜欢的图片，AI会自动解析其美学基因，转化为您的专属创作素材。' 
                         : '这里保存了最近 30 天删除的内容，您可以随时恢复它们。'}
@@ -316,20 +326,20 @@ export const KnowledgeBaseView: React.FC = () => {
             </div>
 
             {viewMode === 'active' && (
-                <div className="mb-8 p-8 bg-slate-800/50 rounded-3xl border border-white/10 shadow-xl backdrop-blur-sm">
-                    <h3 className="text-lg font-bold text-white mb-4 ml-1">📥 添加新灵感 (AI 自动拆解)</h3>
+                <div className="mb-8 p-8 bg-white/80 rounded-3xl border border-slate-200 shadow-xl backdrop-blur-sm">
+                    <h3 className="text-lg font-bold text-slate-900 mb-4 ml-1">📥 添加新灵感 (AI 自动拆解)</h3>
                     {isLoading ? (
                         <LoadingSpinner text={`正在提取美学基因... (${analysisProgress?.current} / ${analysisProgress?.total})`} />
                     ) : (
                         <FileUpload onFilesSelected={handleFileAnalyze} multiple={true} />
                     )}
-                    {error && <p className="text-red-400 mt-4 text-center">{error}</p>}
+                    {error && <p className="text-red-600 mt-4 text-center">{error}</p>}
                 </div>
             )}
 
-            <div className="bg-slate-900/30 rounded-3xl p-8 border border-white/5 relative">
+            <div className="bg-white/80 rounded-3xl p-8 border border-slate-200 relative">
                 <div className="flex flex-col md:flex-row justify-between items-center mb-6 gap-4">
-                    <h3 className="text-xl font-bold text-white">
+                    <h3 className="text-xl font-bold text-slate-900">
                          {viewMode === 'active' ? '📚 浏览素材' : '🗑️ 已删除内容'}
                     </h3>
                     <input
@@ -337,13 +347,13 @@ export const KnowledgeBaseView: React.FC = () => {
                         placeholder="🔍 搜索提示词或分类..."
                         value={filter}
                         onChange={(e) => setFilter(e.target.value)}
-                        className="w-full md:w-1/3 p-3 bg-slate-800 border border-slate-600 rounded-full focus:ring-2 focus:ring-fuchsia-500 focus:outline-none text-sm"
+                        className="w-full md:w-1/3 p-3 bg-white border border-slate-300 rounded-full focus:ring-2 focus:ring-fuchsia-500 focus:outline-none text-sm text-slate-900 placeholder:text-slate-400"
                     />
                 </div>
 
                 {Object.keys(filteredAndGroupedEntries).length === 0 && !isLoading ? (
-                    <div className="text-center py-16 text-slate-500 flex flex-col items-center">
-                        <div className="w-20 h-20 bg-slate-800 rounded-full flex items-center justify-center mb-4 text-4xl">
+                    <div className="text-center py-16 text-slate-600 flex flex-col items-center">
+                        <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mb-4 text-4xl">
                             {viewMode === 'active' ? '🤷‍♂️' : '🗑️'}
                         </div>
                         <p className="text-lg">
@@ -354,13 +364,13 @@ export const KnowledgeBaseView: React.FC = () => {
                 ) : (
                     <div className="space-y-8 pb-20"> {/* Padding bottom for action bar */}
                         {(Object.values(KnowledgeBaseCategory)).filter(category => filteredAndGroupedEntries[category]?.length > 0).map(category => (
-                            <div key={category} className="bg-slate-800/30 rounded-2xl p-4 border border-white/5">
-                                <button onClick={() => toggleCategory(category)} className="w-full flex justify-between items-center text-left mb-2 p-2 rounded-lg hover:bg-white/5 transition-colors">
-                                    <h4 className="text-xl font-bold text-fuchsia-300 flex items-center gap-2">
+                            <div key={category} className="bg-white rounded-2xl p-4 border border-slate-200">
+                                <button onClick={() => toggleCategory(category)} className="w-full flex justify-between items-center text-left mb-2 p-2 rounded-lg hover:bg-slate-50 transition-colors">
+                                    <h4 className="text-xl font-bold text-fuchsia-700 flex items-center gap-2">
                                         {category}
                                         {category === KnowledgeBaseCategory.RETOUCH_LEARNING && <span className="bg-blue-500/20 text-blue-300 text-xs px-2 py-0.5 rounded-full">AI Memory</span>}
                                     </h4>
-                                    <div className="flex items-center gap-2 text-slate-400 text-sm">
+                                    <div className="flex items-center gap-2 text-slate-600 text-sm">
                                         <span>{filteredAndGroupedEntries[category].length} 个条目</span>
                                         <ChevronDownIcon className={`w-5 h-5 transition-transform duration-300 ${openCategories[category] ? 'rotate-180' : ''}`} />
                                     </div>
@@ -370,8 +380,8 @@ export const KnowledgeBaseView: React.FC = () => {
                                         {filteredAndGroupedEntries[category].map(entry => (
                                             <div 
                                                 key={entry.id} 
-                                                className={`group bg-slate-700/50 rounded-xl p-3 flex gap-3 relative border transition-all hover:bg-slate-700 cursor-pointer ${
-                                                    selectedIds.has(entry.id) ? 'border-fuchsia-500 bg-fuchsia-500/10' : 'border-transparent hover:border-fuchsia-500/30'
+                                                className={`group bg-white rounded-xl p-3 flex gap-3 relative border transition-all hover:bg-slate-50 cursor-pointer ${
+                                                    selectedIds.has(entry.id) ? 'border-fuchsia-500 bg-fuchsia-50' : 'border-slate-200 hover:border-fuchsia-200'
                                                 }`}
                                                 onClick={() => {
                                                     if (isSelectionMode) {
@@ -394,7 +404,7 @@ export const KnowledgeBaseView: React.FC = () => {
                                                     <div className={`w-6 h-6 rounded-lg border-2 flex items-center justify-center transition-colors shadow-lg ${
                                                         selectedIds.has(entry.id) 
                                                             ? 'bg-fuchsia-600 border-fuchsia-600 text-white' 
-                                                            : 'bg-slate-900/80 border-slate-600 hover:border-fuchsia-500 text-transparent'
+                                                            : 'bg-white border-slate-300 hover:border-fuchsia-300 text-transparent'
                                                     }`}>
                                                         <CheckIcon className="w-4 h-4" />
                                                     </div>
@@ -403,11 +413,11 @@ export const KnowledgeBaseView: React.FC = () => {
                                                 {entry.category === KnowledgeBaseCategory.FULL_PROMPT && (
                                                     <span className="absolute top-2 right-2 text-[10px] bg-fuchsia-500 text-white font-bold px-2 py-0.5 rounded-full shadow-sm z-10">复刻</span>
                                                 )}
-                                                <div className="w-20 h-20 flex-shrink-0 rounded-lg overflow-hidden bg-slate-800">
+                                                <div className="w-20 h-20 flex-shrink-0 rounded-lg overflow-hidden bg-slate-100">
                                                     <img src={entry.sourceImagePreview} alt="Source" className="w-full h-full object-cover" />
                                                 </div>
                                                 <div className="flex-grow flex flex-col justify-between min-w-0">
-                                                    <p className="text-slate-200 text-sm mb-1 line-clamp-3 font-medium pl-6">{entry.promptFragment}</p> {/* Added padding-left for checkbox space */}
+                                                    <p className="text-slate-800 text-sm mb-1 line-clamp-3 font-medium pl-6">{entry.promptFragment}</p> {/* Added padding-left for checkbox space */}
                                                     <div className="flex justify-between items-center">
                                                         <div className="flex items-center gap-1 text-xs text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded" title="应用次数">
                                                             <FireIcon className="w-3 h-3" />
@@ -419,7 +429,7 @@ export const KnowledgeBaseView: React.FC = () => {
                                                                     e.stopPropagation();
                                                                     handleDelete(entry.id);
                                                                 }} 
-                                                                className="self-end p-1.5 rounded-full text-slate-500 hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 transition-all"
+                                                                className="self-end p-1.5 rounded-full text-slate-400 hover:text-red-600 hover:bg-red-50 opacity-0 group-hover:opacity-100 transition-all"
                                                             >
                                                                 <TrashIcon className="w-4 h-4" />
                                                             </button>
@@ -437,16 +447,16 @@ export const KnowledgeBaseView: React.FC = () => {
 
                  {/* Batch Action Bar */}
                  {selectedIds.size > 0 && (
-                     <div className="fixed bottom-8 left-1/2 transform -translate-x-1/2 bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl px-6 py-3 flex items-center gap-6 animate-fade-in z-50">
-                         <div className="flex items-center gap-3 border-r border-slate-700 pr-6">
+                     <div className="fixed bottom-8 left-1/2 transform -translate-x-1/2 bg-white border border-slate-200 rounded-2xl shadow-2xl px-6 py-3 flex items-center gap-6 animate-fade-in z-50">
+                         <div className="flex items-center gap-3 border-r border-slate-200 pr-6">
                              <div className="w-5 h-5 bg-fuchsia-500 rounded text-white flex items-center justify-center text-xs font-bold">
                                  {selectedIds.size}
                              </div>
-                             <span className="text-slate-300 text-sm font-medium">已选择</span>
+                             <span className="text-slate-700 text-sm font-medium">已选择</span>
                              
                              <button 
                                  onClick={handleSelectAll}
-                                 className="text-xs text-slate-500 hover:text-fuchsia-400 transition-colors ml-2"
+                                 className="text-xs text-slate-600 hover:text-fuchsia-600 transition-colors ml-2"
                              >
                                  {selectedIds.size === (Object.values(filteredAndGroupedEntries) as KnowledgeBaseEntry[][]).flat().length ? '取消全选' : '全选'}
                              </button>

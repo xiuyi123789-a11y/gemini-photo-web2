@@ -39,6 +39,25 @@ export const ZoomInIcon: React.FC<{ className?: string }> = ({ className }) => (
     </svg>
 );
 
+export const ZoomOutIcon: React.FC<{ className?: string }> = ({ className }) => (
+    <svg className={className} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM7 10h6" />
+    </svg>
+);
+
+export const FitViewIcon: React.FC<{ className?: string }> = ({ className }) => (
+    <svg className={className} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7V5h2M20 7V5h-2M4 17v2h2M20 17v2h-2M9 7h6M7 9v6M17 9v6M9 17h6" />
+    </svg>
+);
+
+export const LayersIcon: React.FC<{ className?: string }> = ({ className }) => (
+    <svg className={className} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3l9 6-9 6-9-6 9-6Z" />
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 15l9 6 9-6" />
+    </svg>
+);
+
 export const XIcon: React.FC<{ className?: string }> = ({ className }) => (
     <svg className={className} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -55,6 +74,12 @@ export const RefreshIcon: React.FC<{ className?: string }> = ({ className }) => 
 export const BookOpenIcon: React.FC<{ className?: string }> = ({ className }) => (
   <svg className={className} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
     <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
+  </svg>
+);
+
+export const HomeIcon: React.FC<{ className?: string }> = ({ className }) => (
+  <svg className={className} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12 11.204 3.045a1.125 1.125 0 0 1 1.592 0L21.75 12M4.5 10.5V20.25a1.5 1.5 0 0 0 1.5 1.5h4.5v-6a1.5 1.5 0 0 1 1.5-1.5h0a1.5 1.5 0 0 1 1.5 1.5v6H18a1.5 1.5 0 0 0 1.5-1.5V10.5" />
   </svg>
 );
 
@@ -98,5 +123,41 @@ export const SearchIcon: React.FC<{ className?: string }> = ({ className }) => (
 export const CheckIcon: React.FC<{ className?: string }> = ({ className }) => (
   <svg className={className} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
     <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+  </svg>
+);
+
+export const CursorIcon: React.FC<{ className?: string }> = ({ className }) => (
+  <svg className={className} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M4 4l7.5 16 2-6 6-2L4 4Z" />
+  </svg>
+);
+
+export const HandIcon: React.FC<{ className?: string }> = ({ className }) => (
+  <svg className={className} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      d="M8 12V6a1 1 0 0 1 2 0v6m0 0V5a1 1 0 1 1 2 0v7m0 0V6a1 1 0 1 1 2 0v7m0 0V8a1 1 0 1 1 2 0v7a5 5 0 0 1-5 5H12a5 5 0 0 1-5-5v-3a2 2 0 0 1 1-1.732"
+    />
+  </svg>
+);
+
+export const TextIcon: React.FC<{ className?: string }> = ({ className }) => (
+  <svg className={className} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M4 7V5h16v2M9 19h6M12 5v14" />
+  </svg>
+);
+
+export const UndoIcon: React.FC<{ className?: string }> = ({ className }) => (
+  <svg className={className} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M9 14 4 9l5-5" />
+    <path strokeLinecap="round" strokeLinejoin="round" d="M20 20a9 9 0 0 0-9-9H4" />
+  </svg>
+);
+
+export const RedoIcon: React.FC<{ className?: string }> = ({ className }) => (
+  <svg className={className} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="m15 4 5 5-5 5" />
+    <path strokeLinecap="round" strokeLinejoin="round" d="M4 20a9 9 0 0 1 9-9h7" />
   </svg>
 );

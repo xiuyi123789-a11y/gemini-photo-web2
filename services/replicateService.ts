@@ -4,11 +4,51 @@ import { addToErrorNotebook } from './errorNotebookService';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
 
+const normalizeApiBase = (base: string) => {
+    const raw = (base || '').trim();
+    if (!raw) return '/api';
+    if (raw.startsWith('http')) {
+        try {
+            const url = new URL(raw);
+            const path = url.pathname || '/';
+            if (path === '/' || path === '') {
+                url.pathname = '/api';
+            }
+            return url.toString().replace(/\/$/, '');
+        } catch {
+            const trimmed = raw.replace(/\/+$/, '');
+            return trimmed || '/api';
+        }
+    }
+    const next = (raw.startsWith('/') ? raw : `/${raw}`).replace(/\/+$/, '');
+    return next === '/' ? '/api' : next;
+};
+
+const joinApiUrl = (base: string, endpoint: string) => {
+    const normalizedBase = normalizeApiBase(base);
+    const normalizedEndpoint = (endpoint || '').startsWith('/') ? endpoint : `/${endpoint}`;
+    if (normalizedBase.startsWith('http')) {
+        const baseWithoutTrailing = normalizedBase.replace(/\/+$/, '');
+        const endpointWithoutLeading = normalizedEndpoint.replace(/^\/+/, '/');
+        if (baseWithoutTrailing.endsWith('/api') && endpointWithoutLeading.startsWith('/api/')) {
+            return `${baseWithoutTrailing}${endpointWithoutLeading.slice('/api'.length)}`;
+        }
+        return `${baseWithoutTrailing}${endpointWithoutLeading}`;
+    }
+    const baseWithoutTrailing = normalizedBase.replace(/\/+$/, '');
+    const endpointWithoutLeading = normalizedEndpoint.replace(/^\/+/, '/');
+    if (baseWithoutTrailing.endsWith('/api') && endpointWithoutLeading.startsWith('/api/')) {
+        return `${window.location.origin}${baseWithoutTrailing}${endpointWithoutLeading.slice('/api'.length)}`;
+    }
+    return `${window.location.origin}${baseWithoutTrailing}${endpointWithoutLeading}`;
+};
+
 type RetryOptions = {
     retries?: number;
     minDelayMs?: number;
     maxDelayMs?: number;
     timeoutMs?: number;
+    signal?: AbortSignal;
 };
 
 const IMAGE_UNDERSTANDING_PROMPT = `
@@ -144,13 +184,19 @@ const isRetryableStatus = (status: number) => {
     return status === 408 || status === 429 || (status >= 500 && status <= 599);
 };
 
-const fetchWithTimeout = async (url: string, init: RequestInit, timeoutMs: number) => {
+const fetchWithTimeout = async (url: string, init: RequestInit, timeoutMs: number, signal?: AbortSignal) => {
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    const abortBySignal = () => controller.abort();
+    if (signal) {
+        if (signal.aborted) controller.abort();
+        else signal.addEventListener('abort', abortBySignal, { once: true });
+    }
     try {
         return await fetch(url, { ...init, signal: controller.signal });
     } finally {
         window.clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', abortBySignal);
     }
 };
 
@@ -180,6 +226,10 @@ const requestWithRetry = async (makeRequest: (attempt: number) => Promise<Respon
             lastError = error;
             const isAbort = error instanceof DOMException && error.name === 'AbortError';
             const isNetworkError = error instanceof TypeError;
+
+            if (isAbort && options?.signal?.aborted) {
+                throw error;
+            }
 
             if ((isAbort || isNetworkError) && attempt <= retries) {
                 const delayMs = getBackoffDelayMs(attempt, minDelayMs, maxDelayMs);
@@ -235,9 +285,7 @@ const callApi = async (endpoint: string, body: any, stream: boolean = false, ret
         headers['x-replicate-token'] = apiKey;
     }
 
-    const fullUrl = API_BASE_URL.startsWith('http') 
-        ? `${API_BASE_URL}${endpoint}`
-        : `${window.location.origin}${API_BASE_URL}${endpoint}`;
+    const fullUrl = joinApiUrl(API_BASE_URL, endpoint);
         
     console.log(`[Frontend] Calling ${fullUrl}`);
     console.log(`[Frontend] Headers:`, { 
@@ -254,7 +302,8 @@ const callApi = async (endpoint: string, body: any, stream: boolean = false, ret
                     headers,
                     body: JSON.stringify(body)
                 },
-                retryOptions?.timeoutMs ?? 120000
+                retryOptions?.timeoutMs ?? 120000,
+                retryOptions?.signal
             );
         },
         retryOptions
@@ -278,6 +327,34 @@ const callApi = async (endpoint: string, body: any, stream: boolean = false, ret
     }
 };
 
+type TaskChatMessage = {
+    role: 'user' | 'assistant' | 'system';
+    content: string;
+};
+
+type TaskChatOptions = {
+    reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+    verbosity?: 'low' | 'medium' | 'high';
+    maxCompletionTokens?: number;
+    retry?: RetryOptions;
+};
+
+export const taskChatWithGpt5 = async (messages: TaskChatMessage[], options?: TaskChatOptions): Promise<string> => {
+    const payload = {
+        messages,
+        reasoning_effort: options?.reasoningEffort ?? 'minimal',
+        verbosity: options?.verbosity ?? 'medium',
+        max_completion_tokens: options?.maxCompletionTokens ?? 1200
+    };
+
+    const result = await callApi('/task-chat', payload, false, options?.retry);
+    const text = (result?.text || result?.output || result?.message || result?.analysis || '').toString();
+    if (!text.trim()) {
+        throw new Error(result?.error || 'Empty response');
+    }
+    return text;
+};
+
 const runVisionAnalysis = async (imageFile: File, prompt?: string, retryOptions?: RetryOptions) => {
     const headers: HeadersInit = {};
     const userId = getUserId();
@@ -285,9 +362,7 @@ const runVisionAnalysis = async (imageFile: File, prompt?: string, retryOptions?
     if (userId) headers['x-user-id'] = userId;
     if (apiKey) headers['x-replicate-token'] = apiKey;
 
-    const fullUrl = API_BASE_URL.startsWith('http')
-        ? `${API_BASE_URL}/analyze-image`
-        : `${window.location.origin}${API_BASE_URL}/analyze-image`;
+    const fullUrl = joinApiUrl(API_BASE_URL, '/analyze-image');
 
     const response = await requestWithRetry(
         async () => {
@@ -302,7 +377,8 @@ const runVisionAnalysis = async (imageFile: File, prompt?: string, retryOptions?
                     headers,
                     body: formData
                 },
-                retryOptions?.timeoutMs ?? 180000
+                retryOptions?.timeoutMs ?? 180000,
+                retryOptions?.signal
             );
         },
         retryOptions
@@ -658,7 +734,7 @@ ${firstVariablePrompt}
             prompt: fullPrompt,
             image_input: base64Images, // Pass reference images if available for style/character consistency
             aspect_ratio: "3:4"
-        });
+        }, false, { timeoutMs: 300000 });
 
         return result.imageUrl;
     } catch (error) {
@@ -944,6 +1020,39 @@ ${directives}
     return result.imageUrl;
 };
 
+export type RetouchImageOptions = {
+    strength?: number;
+    mask?: string;
+    image_input?: string[];
+};
+
+export const retouchImageFromBase64 = async (
+    image: string,
+    prompt: string,
+    options?: RetouchImageOptions
+): Promise<string> => {
+    const result = await callApi('/retouch-image', {
+        image,
+        prompt,
+        ...(options?.mask ? { mask: options.mask } : {}),
+        ...(typeof options?.strength === 'number' ? { strength: options.strength } : {}),
+        ...(options?.image_input ? { image_input: options.image_input } : {})
+    });
+    return result.imageUrl;
+};
+
+export const retouchImageFromUrl = async (
+    imageUrl: string,
+    prompt: string,
+    options?: RetouchImageOptions
+): Promise<string> => {
+    const image = await urlToBase64(imageUrl);
+    const image_input =
+        options?.image_input && options.image_input.length > 0 ? await Promise.all(options.image_input.map((u) => urlToBase64(u))) : undefined;
+    const mask = options?.mask ? await urlToBase64(options.mask) : undefined;
+    return retouchImageFromBase64(image, prompt, { ...options, image_input, mask });
+};
+
 // ============================================
 // 图片放大模型支持
 // ============================================
@@ -962,10 +1071,18 @@ export interface ClarityUpscalerParams {
     dynamic: number; // 1-50, HDR强度
     scheduler: string; // 调度器类型
     creativity: number; // 0-1, 创意度
-    resemblance: number; // 0-1, 与原图相似度
+    resemblance: number; // 0-3, 与原图相似度
     scale_factor: number; // 1-4, 放大倍数
     negative_prompt: string; // 负向提示词
     num_inference_steps: number; // 1-100, 推理步数
+    tiling_width: number;
+    tiling_height: number;
+    sd_model: string;
+    seed: number;
+    downscaling_resolution: number;
+    handfix: 'disabled' | 'hands_only' | 'image_and_hands';
+    pattern: boolean;
+    output_format: 'webp' | 'png' | 'jpg';
 }
 
 // 默认配置
@@ -982,7 +1099,15 @@ export const DEFAULT_CLARITY_PARAMS: ClarityUpscalerParams = {
     resemblance: 0.6,
     scale_factor: 2,
     negative_prompt: '(worst quality, low quality, normal quality:2) JuggernautNegative-neg',
-    num_inference_steps: 18
+    num_inference_steps: 18,
+    tiling_width: 112,
+    tiling_height: 144,
+    sd_model: 'juggernaut_reborn.safetensors [338b85bc4f]',
+    seed: 1337,
+    downscaling_resolution: 768,
+    handfix: 'disabled',
+    pattern: false,
+    output_format: 'jpg'
 };
 
 /**
@@ -1144,5 +1269,48 @@ Return ONLY a JSON object.
     } catch (error) {
         console.error("Preprocessing analysis failed:", error);
         return { hasWatermark: false, subjectDescription: "" };
+    }
+};
+
+export const generateWorkbenchImage = async (
+    prompt: string,
+    referenceImages: string[] = [],
+    aspectRatio: string = '3:4',
+    retryOptions?: RetryOptions
+): Promise<string> => {
+    const basePrompt = `
+你是一个电商视觉生成助手。目标是为中国电商平台生成可商用的清晰图片。
+
+【硬性要求】
+- 画面高清、无水印、无文字噪点、无明显瑕疵。
+- 构图干净，主体明确，背景不抢主体。
+- 输出画幅比例：${aspectRatio}
+
+【用户需求】
+${prompt}
+`.trim();
+
+    const base64Images =
+        referenceImages.length > 0 ? await Promise.all(referenceImages.slice(0, 4).map((url) => urlToBase64(url))) : undefined;
+
+    try {
+        const effectiveRetryOptions: RetryOptions = { timeoutMs: 300000, ...(retryOptions || {}) };
+        const result = await callApi(
+            '/generate-image',
+            {
+                prompt: basePrompt,
+                ...(base64Images ? { image_input: base64Images } : {}),
+                aspect_ratio: aspectRatio
+            },
+            false,
+            effectiveRetryOptions
+        );
+
+        return result.imageUrl as string;
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("Workbench image generation failed:", error);
+        await addToErrorNotebook("Workbench Image Generation Failed", message, ["workbench", "generation", "error"]);
+        throw error;
     }
 };

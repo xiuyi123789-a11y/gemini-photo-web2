@@ -657,16 +657,15 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
         {/* Left Column: Inputs */}
         <div className="flex flex-col gap-8">
               <div>
-                <h3 className="text-xl font-bold text-white mb-3 flex items-center gap-2">
-                    <span className="bg-fuchsia-500 w-8 h-8 rounded-full flex items-center justify-center text-sm">1</span>
+                <h3 className="text-xl font-bold text-slate-900 mb-3 flex items-center gap-2">
                     参考图 (支持多张)
                 </h3>
-                <p className="text-slate-400 mb-4 text-sm">上传一张或多张清晰的图片作为主角。</p>
+                <p className="text-slate-600 mb-4 text-sm">上传一张或多张清晰的图片作为主角。</p>
                 <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
                     {referenceImages.map((img) => (
                          <div 
                             key={img.id} 
-                            className="relative group aspect-square bg-slate-800 rounded-2xl overflow-hidden flex items-center justify-center border border-white/5 shadow-inner cursor-pointer"
+                            className="relative group aspect-square bg-white/80 rounded-2xl overflow-hidden flex items-center justify-center border border-slate-200 shadow-sm cursor-pointer"
                             onClick={() => setEnlargedImage(img.originalPreview)}
                          >
                             {img.isProcessing && <LoadingSpinner text=""/>}
@@ -690,7 +689,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                     {referenceImages.length < MAX_REF_IMAGES && (
                         <div 
                             onClick={() => fileInputRef.current?.click()}
-                            className="aspect-square border-2 border-dashed border-slate-600 rounded-2xl flex flex-col items-center justify-center text-center text-slate-500 hover:border-fuchsia-400 hover:text-fuchsia-400 hover:bg-slate-800/50 cursor-pointer transition-all duration-300"
+                            className="aspect-square border-2 border-dashed border-slate-200 rounded-2xl flex flex-col items-center justify-center text-center text-slate-500 hover:border-blue-400 hover:text-blue-700 hover:bg-white/70 cursor-pointer transition-all duration-300"
                         >
                             <PlusIcon className="w-6 h-6 mb-1"/>
                             <span className="text-xs font-bold">添加图片</span>
@@ -710,7 +709,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                     <button
                         onClick={handleStartAnalysis}
                         disabled={isAnalyzing}
-                        className="mt-4 w-full py-3 bg-gradient-to-r from-fuchsia-600 to-purple-600 hover:from-fuchsia-500 hover:to-purple-500 text-white font-bold rounded-xl shadow-lg shadow-fuchsia-500/30 transition-all transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                        className="mt-4 w-full py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl shadow-sm transition-all transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                     >
                         {isAnalyzing ? (
                             <>
@@ -720,7 +719,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                         ) : (
                             <>
                                 <MagicWandIcon className="w-5 h-5" />
-                                <span>开始图片理解 (Step 1)</span>
+                                <span>开始图片理解</span>
                             </>
                         )}
                     </button>
@@ -729,14 +728,13 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
               
               <div>
                  <div className="flex justify-between items-center mb-3">
-                    <h3 className="text-xl font-bold text-white flex items-center gap-2">
-                        <span className="bg-violet-500 w-8 h-8 rounded-full flex items-center justify-center text-sm">2</span>
+                    <h3 className="text-xl font-bold text-slate-900 flex items-center gap-2">
                         一致性内容
                     </h3>
                     <div className="flex items-center gap-2">
                       <button
                         onClick={() => openKbModal('consistent')}
-                        className="px-3 py-1.5 text-slate-300 bg-slate-800/70 hover:bg-slate-700 rounded-full transition-colors flex items-center gap-1.5 text-sm font-semibold border border-slate-700"
+                        className="px-3 py-1.5 text-slate-700 bg-white/80 hover:bg-white rounded-full transition-colors flex items-center gap-1.5 text-sm font-semibold border border-slate-200 shadow-sm"
                         title="从知识库选择"
                       >
                         <BookOpenIcon className="w-4 h-4" />
@@ -749,14 +747,13 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                   value={consistentPrompt}
                   onChange={handleConsistentPromptChange}
                   rows={5}
-                  className="w-full p-4 bg-slate-800/50 border border-slate-600 rounded-2xl focus:ring-2 focus:ring-fuchsia-500 focus:border-transparent transition-all text-slate-200 placeholder-slate-500 resize-y shadow-inner"
+                  className="w-full p-4 bg-white/80 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all text-slate-800 placeholder-slate-400 resize-y shadow-sm"
                   placeholder="例如：一名19岁的女大学生，穿着白色超大T恤和浅蓝色宽松牛仔裤..."
                 />
               </div>
 
               <div>
-                <h3 className="text-xl font-bold text-white mb-3 flex items-center gap-2">
-                    <span className="bg-blue-500 w-8 h-8 rounded-full flex items-center justify-center text-sm">3</span>
+                <h3 className="text-xl font-bold text-slate-900 mb-3 flex items-center gap-2">
                     非一致性内容 (单张定义)
                 </h3>
                 <div className="space-y-5">
@@ -766,14 +763,14 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                     const hasFragments = Object.keys(mergedFragments).length > 0;
 
                     return (
-                    <div key={vp.id} className="bg-slate-800/40 border border-white/5 p-4 rounded-2xl shadow-lg backdrop-blur-sm hover:border-white/10 transition-colors">
+                    <div key={vp.id} className="bg-white/80 border border-slate-200 p-4 rounded-2xl shadow-sm backdrop-blur-sm hover:border-slate-300 transition-colors">
                       <div className="flex items-center justify-between mb-2">
-                         <span className="text-sm font-bold text-fuchsia-400 uppercase tracking-wider">图片 #{index + 1}</span>
+                         <span className="text-sm font-bold text-slate-700 uppercase tracking-wider">图片 #{index + 1}</span>
                          <div className="flex space-x-1">
-                            <button onClick={() => openKbModal(vp.id)} className="p-2 text-slate-400 hover:text-slate-200 hover:bg-white/5 rounded-full transition-colors" title="从知识库选择">
+                            <button onClick={() => openKbModal(vp.id)} className="p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-full transition-colors" title="从知识库选择">
                                 <BookOpenIcon className="w-4 h-4" />
                             </button>
-                            <button onClick={() => removeVariablePrompt(vp.id)} disabled={variablePrompts.length <= 1} className="p-2 text-slate-400 hover:text-red-400 hover:bg-white/5 rounded-full disabled:opacity-30 transition-colors" title="删除此提示">
+                            <button onClick={() => removeVariablePrompt(vp.id)} disabled={variablePrompts.length <= 1} className="p-2 text-slate-500 hover:text-red-600 hover:bg-slate-100 rounded-full disabled:opacity-30 transition-colors" title="删除此提示">
                                 <TrashIcon className="w-4 h-4" />
                             </button>
                          </div>
@@ -785,7 +782,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                         value={vp.prompt}
                         onChange={(e) => handleVariablePromptChange(vp.id, e.target.value)}
                         rows={3}
-                        className="w-full p-3 bg-slate-900/50 border border-slate-700 rounded-xl focus:ring-2 focus:ring-fuchsia-500 focus:border-transparent transition text-slate-300 placeholder-slate-600 mb-3"
+                        className="w-full p-3 bg-white/80 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition text-slate-800 placeholder-slate-400 mb-3"
                         placeholder={index === 0 ? '主图的提示词：全身照，站在镜子前...' : '例如：鞋子特写，无人物...'}
                       />
                       <div className="mb-3 flex flex-wrap gap-2">
@@ -802,14 +799,14 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                               <button
                                 type="button"
                                 onClick={() => toggleVariableTermMenu(vp.id, cat.id)}
-                                className="flex items-center gap-2 px-3 py-2 bg-slate-900/40 border border-slate-700 hover:border-fuchsia-500 text-slate-200 rounded-xl text-xs font-semibold transition-colors"
+                                className="flex items-center gap-2 px-3 py-2 bg-white/80 border border-slate-200 hover:border-blue-400 text-slate-800 rounded-xl text-xs font-semibold transition-colors shadow-sm"
                               >
                                 <span>{cat.label}</span>
-                                <ChevronDownIcon className={`w-4 h-4 text-slate-400 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+                                <ChevronDownIcon className={`w-4 h-4 text-slate-500 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
                               </button>
 
                               {isOpen && (
-                                <div className="absolute left-0 mt-2 z-[9999] w-[360px] max-w-[calc(100vw-3rem)] bg-slate-950/95 border border-slate-700 rounded-2xl shadow-2xl backdrop-blur-md overflow-hidden">
+                                <div className="absolute left-0 mt-2 z-[9999] w-[360px] max-w-[calc(100vw-3rem)] bg-white border border-slate-200 rounded-2xl shadow-2xl backdrop-blur-md overflow-hidden">
                                   <div className="max-h-72 overflow-y-auto p-2">
                                     {cat.items.map((item) => {
                                       const selected = isVariableTermSelected(vp.prompt || '', item.en);
@@ -818,15 +815,15 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                                           key={`${cat.id}-${item.en}`}
                                           type="button"
                                           onClick={() => toggleVariablePromptTerm(vp.id, item.en)}
-                                          className={`w-full text-left px-3 py-2 rounded-xl transition-colors flex items-center justify-between gap-3 ${selected ? 'bg-fuchsia-500/15 hover:bg-fuchsia-500/20 border border-fuchsia-500/30' : 'hover:bg-slate-800/60 border border-transparent'}`}
+                                          className={`w-full text-left px-3 py-2 rounded-xl transition-colors flex items-center justify-between gap-3 ${selected ? 'bg-blue-50 hover:bg-blue-100 border border-blue-200' : 'hover:bg-slate-50 border border-transparent'}`}
                                         >
                                           <div className="flex items-center gap-2 min-w-0">
-                                            <div className={`w-5 h-5 rounded-md border flex items-center justify-center flex-shrink-0 ${selected ? 'bg-fuchsia-600/30 border-fuchsia-500/40 text-fuchsia-200' : 'bg-slate-900/60 border-slate-700 text-transparent'}`}>
+                                            <div className={`w-5 h-5 rounded-md border flex items-center justify-center flex-shrink-0 ${selected ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white border-slate-200 text-transparent'}`}>
                                               <CheckIcon className="w-3.5 h-3.5" />
                                             </div>
-                                            <span className={`text-xs truncate ${selected ? 'text-fuchsia-100 font-semibold' : 'text-slate-200'}`}>{item.cn}</span>
+                                            <span className={`text-xs truncate ${selected ? 'text-slate-900 font-semibold' : 'text-slate-800'}`}>{item.cn}</span>
                                           </div>
-                                          <span className="text-[11px] text-slate-400 font-mono truncate">{item.en}</span>
+                                          <span className="text-[11px] text-slate-500 font-mono truncate">{item.en}</span>
                                         </button>
                                       );
                                     })}
@@ -857,29 +854,29 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                           {!hasImages ? (
                             <label
                               htmlFor={`file-${vp.id}`}
-                              className="flex items-center justify-center w-full p-3 border-2 border-dashed border-slate-700 rounded-xl text-slate-500 hover:border-fuchsia-500 hover:text-fuchsia-400 cursor-pointer transition-colors text-sm font-bold gap-2"
+                              className="flex items-center justify-center w-full p-3 border-2 border-dashed border-slate-200 rounded-xl text-slate-600 hover:border-blue-400 hover:text-blue-700 cursor-pointer transition-colors text-sm font-bold gap-2 bg-white/60"
                             >
                               <PlusIcon className="w-4 h-4" />
                               <span>上传参考图（可多张）</span>
                             </label>
                           ) : (
-                            <div className="bg-slate-900/50 rounded-xl p-3 border border-slate-700">
+                            <div className="bg-white/80 rounded-xl p-3 border border-slate-200 shadow-sm">
                               <div className="flex items-start justify-between gap-3">
-                                <span className="text-xs text-slate-400 truncate">
+                                <span className="text-xs text-slate-600 truncate">
                                   参考图已上传：{vp.referenceImages?.length || 0} 张
                                 </span>
                                 <div className="flex gap-1 flex-shrink-0">
                                   <button
                                     onClick={() => handleSaveVariableToKB(vp.id)}
                                     disabled={!hasFragments}
-                                    className="text-xs bg-fuchsia-500/20 text-fuchsia-300 px-2 py-1 rounded hover:bg-fuchsia-500/40 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                                    className="text-xs bg-blue-600 text-white px-2 py-1 rounded hover:bg-blue-500 transition disabled:opacity-50 disabled:cursor-not-allowed"
                                     title="保存到知识库"
                                   >
                                     保存KB
                                   </button>
                                   <button
                                     onClick={() => handleDeleteVariableImage(vp.id)}
-                                    className="text-xs bg-red-500/20 text-red-300 px-2 py-1 rounded hover:bg-red-500/40 transition"
+                                    className="text-xs bg-red-600 text-white px-2 py-1 rounded hover:bg-red-500 transition"
                                     title="删除图片"
                                   >
                                     删除
@@ -891,7 +888,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                                 {(vp.referenceImages || []).map((img) => (
                                   <div
                                     key={img.id}
-                                    className="relative aspect-square bg-slate-800 rounded-lg overflow-hidden group"
+                                    className="relative aspect-square bg-slate-50 rounded-lg overflow-hidden group border border-slate-200"
                                   >
                                     <img src={img.preview} alt="Ref" className="w-full h-full object-cover" />
                                     {vp.isAnalyzing && (
@@ -901,7 +898,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                                     )}
                                     <button
                                       onClick={() => handleDeleteVariableImage(vp.id, img.id)}
-                                      className="absolute top-1 right-1 p-1 bg-red-500/20 text-red-200 hover:bg-red-500/80 hover:text-white rounded-full backdrop-blur-sm transition-colors"
+                                      className="absolute top-1 right-1 p-1 bg-white/80 text-red-600 hover:bg-red-600 hover:text-white rounded-full backdrop-blur-sm transition-colors border border-slate-200"
                                       title="删除此图"
                                       type="button"
                                     >
@@ -912,7 +909,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
 
                                 <label
                                   htmlFor={`file-${vp.id}`}
-                                  className="aspect-square border-2 border-dashed border-slate-700 rounded-lg flex flex-col items-center justify-center text-slate-500 hover:border-fuchsia-500 hover:text-fuchsia-400 cursor-pointer transition-colors text-xs font-bold gap-1"
+                                  className="aspect-square border-2 border-dashed border-slate-200 rounded-lg flex flex-col items-center justify-center text-slate-600 hover:border-blue-400 hover:text-blue-700 cursor-pointer transition-colors text-xs font-bold gap-1 bg-white/60"
                                 >
                                   <PlusIcon className="w-4 h-4" />
                                   添加
@@ -925,7 +922,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                                     <button
                                       key={key}
                                       onClick={() => handleVariablePromptChange(vp.id, vp.prompt + (vp.prompt ? ' ' : '') + value)}
-                                      className="text-[10px] bg-slate-800 border border-slate-600 hover:border-fuchsia-500 text-slate-300 hover:text-white px-2 py-0.5 rounded-full transition truncate max-w-full text-left"
+                                      className="text-[10px] bg-white border border-slate-200 hover:border-blue-300 text-slate-700 hover:text-slate-900 px-2 py-0.5 rounded-full transition truncate max-w-full text-left"
                                       title={value}
                                       type="button"
                                     >
@@ -938,7 +935,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                               {!hasFragments && !vp.isAnalyzing && (
                                 <button
                                   onClick={() => handleAnalyzeVariableImages(vp.id)}
-                                  className="text-xs text-fuchsia-400 underline mt-2 text-left"
+                                  className="text-xs text-blue-700 underline mt-2 text-left"
                                   type="button"
                                 >
                                   重新解析
@@ -952,7 +949,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                       <div className="mt-3 flex justify-end">
                            <button 
                              onClick={() => handleRegenerateSingle(vp.id)}
-                             className="bg-slate-700 hover:bg-fuchsia-600 text-white text-xs font-bold py-2 px-4 rounded-full flex items-center gap-2 transition-all shadow-md hover:shadow-fuchsia-500/40 group"
+                             className="bg-white hover:bg-slate-50 text-slate-800 text-xs font-bold py-2 px-4 rounded-full flex items-center gap-2 transition-all shadow-sm border border-slate-200 group"
                              title="立即生成此图片"
                            >
                                <PlayIcon className="w-3 h-3 group-hover:scale-110 transition-transform" />
@@ -963,7 +960,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                     );
                   })}
                 </div>
-                <button onClick={addVariablePrompt} className="mt-6 w-full py-3 border-2 border-dashed border-slate-600 rounded-2xl flex items-center justify-center space-x-2 text-slate-400 hover:text-fuchsia-400 hover:border-fuchsia-400 hover:bg-slate-800/50 font-bold transition-all">
+                <button onClick={addVariablePrompt} className="mt-6 w-full py-3 border-2 border-dashed border-slate-200 rounded-2xl flex items-center justify-center space-x-2 text-slate-600 hover:text-blue-700 hover:border-blue-300 hover:bg-white/70 font-bold transition-all">
                   <PlusIcon className="w-5 h-5" />
                   <span>添加另一个画面</span>
                 </button>
@@ -971,18 +968,17 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
         </div>
         
         {/* Right Column: Results */}
-        <div className="bg-slate-800/30 backdrop-blur-md rounded-3xl p-6 border border-white/5 min-h-[400px] flex flex-col gap-8">
+        <div className="bg-white/70 backdrop-blur-md rounded-3xl p-6 border border-slate-200 min-h-[400px] flex flex-col gap-8 shadow-sm">
             {/* Master Image Module */}
             <div>
                  <div className="flex items-center justify-between mb-4">
-                     <h3 className="text-xl font-bold text-white">主图 (视觉基准)</h3>
-                     <span className="text-xs bg-fuchsia-500/20 text-fuchsia-300 px-2 py-1 rounded-full border border-fuchsia-500/30">Step 1</span>
+                     <h3 className="text-xl font-bold text-slate-900">主图 (视觉基准)</h3>
                  </div>
                  
-                 <div 
-                    className="aspect-[3/4] bg-slate-900/80 rounded-2xl flex items-center justify-center relative group text-slate-500 border border-slate-700 overflow-hidden shadow-inner cursor-pointer"
+                  <div 
+                    className="aspect-[3/4] bg-slate-50 rounded-2xl flex items-center justify-center relative group text-slate-500 border border-slate-200 overflow-hidden shadow-sm cursor-pointer w-full max-w-full lg:max-w-[50%] mx-auto"
                     onClick={() => masterImage.src && setEnlargedImage(masterImage.src)}
-                 >
+                  >
                     {masterImage.isLoading && <LoadingSpinner text="主图生成中..."/>}
                     {!masterImage.isLoading && masterImage.src && (
                          <>
@@ -1006,8 +1002,8 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                     )}
                     {!masterImage.isLoading && !masterImage.src && (
                         <div className="text-center p-8">
-                            <div className="w-16 h-16 bg-slate-800 rounded-full mx-auto mb-3 flex items-center justify-center">
-                                <MagicWandIcon className="w-8 h-8 text-slate-600" />
+                            <div className="w-16 h-16 bg-white rounded-full mx-auto mb-3 flex items-center justify-center border border-slate-200">
+                                <MagicWandIcon className="w-8 h-8 text-slate-500" />
                             </div>
                             <p>您的主图将显示在此处。</p>
                         </div>
@@ -1015,25 +1011,25 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                  </div>
                  
                  <div className="mt-4 flex gap-2">
-                    <button onClick={() => handleGenerateMaster(false)} disabled={masterImage.isLoading || referenceImages.some(i => i.isProcessing) || referenceImages.length === 0 || (!variablePrompts[0]?.prompt && !consistentPrompt)} className={`flex-grow font-bold py-3 px-6 rounded-xl transition-all shadow-lg transform active:scale-95 ${masterPromptStale ? 'bg-amber-500 hover:bg-amber-600 text-white shadow-amber-500/30' : 'bg-gradient-to-r from-fuchsia-600 to-purple-600 hover:from-fuchsia-500 hover:to-purple-500 text-white shadow-fuchsia-500/30'} disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none`}>
+                    <button onClick={() => handleGenerateMaster(false)} disabled={masterImage.isLoading || referenceImages.some(i => i.isProcessing) || referenceImages.length === 0 || (!variablePrompts[0]?.prompt && !consistentPrompt)} className={`flex-grow font-bold py-3 px-6 rounded-xl transition-all shadow-sm transform active:scale-95 ${masterPromptStale ? 'bg-amber-500 hover:bg-amber-600 text-white' : 'bg-blue-600 hover:bg-blue-500 text-white'} disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none`}>
                         {masterImage.isLoading ? '处理中...' : (masterImage.src ? (masterPromptStale ? '更新主图' : '重新生成主图') : '生成主图')}
                     </button>
                  </div>
 
                  {masterImage.src && (
-                     <div className="mt-3 bg-slate-900/50 p-2 rounded-xl border border-slate-700 flex items-center gap-2">
-                        <input type="text" value={modificationPrompt} onChange={e => setModificationPrompt(e.target.value)} placeholder="输入修改指令，例如：把地毯换成木地板" className="flex-grow p-2 bg-transparent border-none text-sm text-white focus:ring-0 placeholder-slate-500"/>
+                     <div className="mt-3 bg-white/80 p-2 rounded-xl border border-slate-200 flex items-center gap-2 shadow-sm">
+                        <input type="text" value={modificationPrompt} onChange={e => setModificationPrompt(e.target.value)} placeholder="输入修改指令，例如：把地毯换成木地板" className="flex-grow p-2 bg-transparent border-none text-sm text-slate-800 focus:ring-0 placeholder-slate-400"/>
                         <button onClick={handleModifyMaster} disabled={masterImage.isLoading} className="bg-blue-600 text-white text-xs font-bold py-2 px-4 rounded-lg hover:bg-blue-500 transition-colors shadow-md disabled:opacity-50">修改</button>
                     </div>
                  )}
             </div>
             
-            <div className="border-t border-white/10 my-2"></div>
+            <div className="border-t border-slate-200 my-2"></div>
 
             {/* Batch Images Module */}
             <div>
                 <div className="flex justify-between items-center mb-4">
-                    <h3 className="text-xl font-bold text-white">系列图片</h3>
+                    <h3 className="text-xl font-bold text-slate-900">系列图片</h3>
                     <button onClick={handleGenerateAll} disabled={!masterImage.src || referenceImages.some(i => i.isProcessing)} className="bg-emerald-600 text-white text-sm font-bold py-2 px-4 rounded-full hover:bg-emerald-500 hover:shadow-lg hover:shadow-emerald-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-all transform active:scale-95">
                        生成所有图片
                     </button>
@@ -1047,7 +1043,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                       return (
                           <div 
                             key={id} 
-                            className="bg-slate-900/50 rounded-2xl overflow-hidden aspect-[3/4] flex items-center justify-center group relative border border-slate-700/50 shadow-sm cursor-pointer"
+                            className="bg-white rounded-2xl overflow-hidden aspect-[3/4] flex items-center justify-center group relative border border-slate-200 shadow-sm cursor-pointer"
                             onClick={() => image?.src && setEnlargedImage(image.src)}
                           >
                               
@@ -1075,8 +1071,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                               )}
                               
                               {showPlaceholder && !image?.isLoading && (
-                                <div className="flex flex-col items-center justify-center text-slate-600">
-                                    <span className="text-2xl font-bold opacity-20">#{idx + 1}</span>
+                                <div className="flex flex-col items-center justify-center text-slate-500">
                                     <span className="text-xs mt-1 opacity-50">待生成</span>
                                 </div>
                                )}
@@ -1085,7 +1080,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                   })}
               </div>
             </div>
-             {error && <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 mt-4 text-center text-sm">{error}</div>}
+             {error && <div className="p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 mt-4 text-center text-sm">{error}</div>}
         </div>
       </div>
     </div>

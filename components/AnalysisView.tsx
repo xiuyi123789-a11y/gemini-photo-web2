@@ -59,8 +59,8 @@ const FormattedMarkdownResultDisplay: React.FC<{ results: AnalysisResult[] }> = 
     return (
         <div className="space-y-6">
             {results.map((res, idx) => (
-                <div key={idx} className="bg-slate-900/80 p-6 rounded-2xl text-sm text-slate-300 border border-white/5 shadow-inner">
-                    <h4 className="text-lg font-bold text-fuchsia-400 mb-3 border-b border-white/10 pb-2 flex justify-between">
+                <div key={idx} className="bg-white/80 p-6 rounded-2xl text-sm text-slate-700 border border-slate-200 shadow-sm">
+                    <h4 className="text-lg font-bold text-slate-900 mb-3 border-b border-slate-200 pb-2 flex justify-between">
                         <span>📄 {res.fileName}</span>
                         <span className="text-slate-500 font-normal text-xs">{new Date(res.timestamp || '').toLocaleString()}</span>
                     </h4>
@@ -72,8 +72,8 @@ const FormattedMarkdownResultDisplay: React.FC<{ results: AnalysisResult[] }> = 
                             }}
                             className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all border ${
                                 (modeByIndex[idx] || 'full') === 'full'
-                                    ? 'bg-fuchsia-600 text-white border-fuchsia-500 shadow-lg shadow-fuchsia-500/20'
-                                    : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700 hover:text-white'
+                                    ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                                    : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:text-slate-900'
                             }`}
                         >
                             完整复刻
@@ -92,8 +92,8 @@ const FormattedMarkdownResultDisplay: React.FC<{ results: AnalysisResult[] }> = 
                             disabled={(sectionsByIndex[idx] || []).length === 0}
                             className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all border disabled:opacity-50 disabled:cursor-not-allowed ${
                                 (modeByIndex[idx] || 'full') === 'split'
-                                    ? 'bg-fuchsia-600 text-white border-fuchsia-500 shadow-lg shadow-fuchsia-500/20'
-                                    : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700 hover:text-white'
+                                    ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                                    : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:text-slate-900'
                             }`}
                         >
                             分区拆解
@@ -113,8 +113,8 @@ const FormattedMarkdownResultDisplay: React.FC<{ results: AnalysisResult[] }> = 
                                         }}
                                         className={`px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition-all border ${
                                             active
-                                                ? 'bg-slate-700 text-white border-white/10'
-                                                : 'bg-slate-900/60 text-slate-400 border-slate-700 hover:bg-slate-800 hover:text-white'
+                                                ? 'bg-blue-600 text-white border-blue-600'
+                                                : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:text-slate-900'
                                         }`}
                                         title={section.title}
                                     >
@@ -130,7 +130,7 @@ const FormattedMarkdownResultDisplay: React.FC<{ results: AnalysisResult[] }> = 
                             ? (sectionsByIndex[idx].find(s => s.title === (activeSectionByIndex[idx] || sectionsByIndex[idx][0].title))?.content || res.analysis)
                             : res.analysis}
                     </div>
-                    {res.error && <p className="text-red-400 mt-2 text-xs">⚠️ 此文件解析遇到错误</p>}
+                    {res.error && <p className="text-red-700 mt-2 text-xs">⚠️ 此文件解析遇到错误</p>}
                 </div>
             ))}
         </div>
@@ -213,16 +213,16 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({ onAnalysisComplete }
     return (
         <div>
             <div className="text-center mb-8">
-                <h2 className="text-3xl font-extrabold text-white mb-2 bg-clip-text text-transparent bg-gradient-to-r from-blue-300 to-fuchsia-300">智能解析 (GPT-4o Vision)</h2>
-                <p className="text-slate-400">上传图片，利用 OpenAI GPT-4o-mini 模型进行深度视觉分析。</p>
+                <h2 className="text-3xl font-extrabold text-slate-900 mb-2">智能解析</h2>
+                <p className="text-slate-600">上传图片，利用 OpenAI GPT-4o-mini 模型进行深度视觉分析。</p>
             </div>
 
             {imageFiles.length > 0 && (
         <div className="mb-6">
-          <h3 className="text-lg font-bold text-slate-200 mb-3 ml-1">已上传预览</h3>
+          <h3 className="text-lg font-bold text-slate-800 mb-3 ml-1">已上传预览</h3>
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
             {imageFiles.map((imageFile, index) => (
-              <img key={index} src={imageFile.preview} alt={`preview ${index}`} className="w-full h-full object-cover rounded-2xl border-2 border-white/10 aspect-square shadow-md" />
+              <img key={index} src={imageFile.preview} alt={`preview ${index}`} className="w-full h-full object-cover rounded-2xl border border-slate-200 aspect-square shadow-sm" />
             ))}
           </div>
         </div>
@@ -230,13 +230,13 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({ onAnalysisComplete }
 
       <FileUpload onFilesSelected={handleFileSelect} multiple={true} />
       
-      {error && <p className="text-red-400 mt-4 text-center bg-red-500/10 py-2 rounded-lg">{error}</p>}
+      {error && <p className="text-red-700 mt-4 text-center bg-red-50 py-2 rounded-lg border border-red-200">{error}</p>}
       
       <div className="mt-8 flex justify-center">
         <button
           onClick={handleAnalyze}
           disabled={isLoading || imageFiles.length === 0}
-          className="bg-gradient-to-r from-fuchsia-600 to-violet-600 hover:from-fuchsia-500 hover:to-violet-500 text-white font-bold py-3 px-10 rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-all transform hover:scale-105 shadow-lg shadow-fuchsia-500/30"
+          className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-10 rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-all transform hover:scale-[1.02] shadow-sm"
         >
           {isLoading
             ? `AI 正在思考...${progress ? `（${progress.completed}/${progress.total}）` : ''}`
@@ -246,14 +246,14 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({ onAnalysisComplete }
 
       {isLoading && <div className="mt-8"><LoadingSpinner text="AI 正在观察您的图片..." /></div>}
       {isLoading && progress && (
-        <div className="mt-3 text-center text-slate-400 text-sm">
+        <div className="mt-3 text-center text-slate-600 text-sm">
           正在解析：{progress.currentFileName || '...'}（{progress.completed}/{progress.total}）
         </div>
       )}
 
       {analysisResults && (
-        <div className="mt-10 p-6 md:p-8 bg-slate-800/50 rounded-3xl border border-white/10 shadow-2xl backdrop-blur-sm">
-          <h3 className="text-2xl font-bold text-white mb-6 flex items-center gap-2">
+        <div className="mt-10 p-6 md:p-8 bg-white/80 rounded-3xl border border-slate-200 shadow-sm backdrop-blur-sm">
+          <h3 className="text-2xl font-bold text-slate-900 mb-6 flex items-center gap-2">
              📊 分析结果
           </h3>
           <FormattedMarkdownResultDisplay results={analysisResults} />
@@ -261,14 +261,14 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({ onAnalysisComplete }
             <button
                 onClick={handleSaveToKB}
                 disabled={isSavingToKB}
-                className={`font-bold py-3 px-6 rounded-full transition-colors duration-300 flex items-center gap-2 shadow-md ${kbSaveSuccess ? 'bg-green-500 text-white' : 'bg-blue-600 hover:bg-blue-500 text-white disabled:bg-slate-600'}`}
+                className={`font-bold py-3 px-6 rounded-full transition-colors duration-300 flex items-center gap-2 shadow-sm ${kbSaveSuccess ? 'bg-green-600 text-white' : 'bg-blue-600 hover:bg-blue-500 text-white disabled:bg-slate-300 disabled:text-slate-600'}`}
             >
                 <BookOpenIcon className="w-5 h-5"/>
                 {isSavingToKB ? '保存中...' : (kbSaveSuccess ? '已存入知识库!' : '一键拆解到知识库')}
             </button>
             <button
               onClick={handleConfirm}
-              className="bg-emerald-600 text-white font-bold py-3 px-8 rounded-full hover:bg-emerald-500 transition-all shadow-lg hover:shadow-emerald-500/30 transform hover:scale-105"
+              className="bg-emerald-600 text-white font-bold py-3 px-8 rounded-full hover:bg-emerald-500 transition-all shadow-sm transform hover:scale-[1.02]"
             >
               下一步：去生成 &rarr;
             </button>

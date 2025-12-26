@@ -1,5 +1,16 @@
 [
   {
+    "version": "v1.1.8",
+    "date": "2025-12-24",
+    "changes": [
+      {
+        "summary": "fix: retry upscale API on 429",
+        "details": ""
+      }
+    ],
+    "type": "Fix"
+  },
+  {
     "version": "v1.1.7",
     "date": "2025-12-24",
     "changes": [
