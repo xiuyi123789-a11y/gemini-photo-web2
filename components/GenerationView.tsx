@@ -1,15 +1,10 @@
-
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { AnalysisResult, ImageFile, VariablePrompt, GeneratedImageState, KnowledgeBaseEntry, KnowledgeBaseCategory, ReferenceImageFile, KnowledgeBaseAnalysis } from '../types';
-import { MagicWandIcon, PlusIcon, TrashIcon, RefreshIcon, DownloadIcon, ZoomInIcon, EyeIcon, PlayIcon, BookOpenIcon, ChevronDownIcon, CheckIcon } from './IconComponents';
-import { generateMasterImage, modifyMasterImage, generateSingleFromMaster, analyzeAndMergeReferenceImagesForGeneration, analyzeAndCategorizeImageForKB } from '../services/replicateService';
-import { getKnowledgeBase, incrementEntryUsage, KB_UPDATE_EVENT, saveKBAnalysisToKB } from '../services/knowledgeBaseService';
-import { LoadingSpinner } from './LoadingSpinner';
-import { KnowledgeBaseModal } from './KnowledgeBaseModal';
+import { AnalysisResult, VariablePrompt, GeneratedImageState, ReferenceImageFile } from '../types';
+import { MagicWandIcon, PlusIcon, TrashIcon, DownloadIcon, ZoomInIcon, PlayIcon, CheckIcon, LoadingSpinner, UploadIcon } from './IconComponents';
+import { generateSingleFromMaster, analyzeImages, generateWorkbenchImage, urlToBase64, fileToBase64, parseImageUnderstandingPrompt, runVisionAnalysis, analyzeAndCategorizeImageForKB } from '../services/replicateService';
 import { ImageModal } from './ImageModal';
-import { logOperation } from '../services/errorNotebookService';
 
-// Simple UUID generator polyfill for non-secure contexts
+// Simple UUID generator polyfill
 function uuidv4() {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
     return crypto.randomUUID();
@@ -25,7 +20,7 @@ interface GenerationViewProps {
   initialAnalysisResult: AnalysisResult[] | null;
 }
 
-const MAX_REF_IMAGES = 8;
+const MAX_PRODUCT_DETAIL_IMAGES = 6;
 
 const VARIABLE_PROMPT_TERM_CATEGORIES: Array<{
   id: string;
@@ -146,112 +141,48 @@ const VARIABLE_PROMPT_TERM_CATEGORIES: Array<{
 ];
 
 export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisResult }) => {
+  // --- STATES ---
+  
+  // Sidebar: Reference Images (Consistency Sources)
   const [referenceImages, setReferenceImages] = useState<ReferenceImageFile[]>([]);
-  const [consistentPrompt, setConsistentPrompt] = useState('');
+  const [consistentPrompt, setConsistentPrompt] = useState<string>('');
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isGeneratingMaster, setIsGeneratingMaster] = useState(false);
+
+  // Master Image (Input) - Max 1
+  const [masterImage, setMasterImage] = useState<{ id: string; file: File | null; preview: string } | null>(null);
+  
+  // Product Detail Images (Input) - Max 6
+  const [productDetailImages, setProductDetailImages] = useState<Array<{ id: string; file: File; preview: string }>>([]);
+
+  // Variable Prompts (Non-consistent content)
   const [variablePrompts, setVariablePrompts] = useState<VariablePrompt[]>([
-    { id: uuidv4(), prompt: '' }
+    { id: uuidv4(), prompt: '', weight: 70 }
   ]);
 
-  const [kbCache, setKbCache] = useState<KnowledgeBaseEntry[]>([]);
-  
-  const [masterImage, setMasterImage] = useState<{ src: string | null; isLoading: boolean }>({ src: null, isLoading: false });
-  const [masterPromptStale, setMasterPromptStale] = useState(false);
-  const [modificationPrompt, setModificationPrompt] = useState('');
-  
-  const [error, setError] = useState<string | null>(null);
+  // Generated Results
   const [generatedImages, setGeneratedImages] = useState<GeneratedImageState>({});
-  const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
   
-  const [isKbModalOpen, setIsKbModalOpen] = useState(false);
-  const [editingField, setEditingField] = useState<'consistent' | string | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const prevRefImagesCount = useRef(0);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const consistentTextareaRef = useRef<HTMLTextAreaElement>(null);
+  // UI States
+  const [error, setError] = useState<string | null>(null);
+  const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
+  const [openVariableTermMenu, setOpenVariableTermMenu] = useState<{ promptId: string; categoryId: string } | null>(null);
   const variableTextareaRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
   const openMenuWrapperRef = useRef<HTMLDivElement | null>(null);
-  const [openVariableTermMenu, setOpenVariableTermMenu] = useState<{ promptId: string; categoryId: string } | null>(null);
 
-  useEffect(() => {
-    let alive = true;
+  // --- EFFECTS ---
 
-    const refresh = async () => {
-      const start = performance.now();
-      try {
-        const entries = await getKnowledgeBase();
-        if (!alive) return;
-        setKbCache(entries);
-        logOperation('kb_cache_refresh', { count: entries.length, elapsedMs: Math.round(performance.now() - start) });
-      } catch (e: any) {
-        logOperation('kb_cache_refresh_failed', { message: e?.message || 'unknown', elapsedMs: Math.round(performance.now() - start) });
-      }
-    };
-
-    refresh();
-    const onUpdate = () => refresh();
-    window.addEventListener(KB_UPDATE_EVENT, onUpdate);
-    return () => {
-      alive = false;
-      window.removeEventListener(KB_UPDATE_EVENT, onUpdate);
-    };
-  }, []);
-
-  useEffect(() => {
-     if (initialAnalysisResult && initialAnalysisResult.length > 0) {
-         populateFromAnalysis(initialAnalysisResult, true);
-     }
-   }, [initialAnalysisResult]);
-
-   const populateFromAnalysis = (results: AnalysisResult[], updateVariables: boolean = false) => {
-         // Combine all analysis results into one text
-         const combinedAnalysis = results.map(r => `[${r.fileName || 'Image'}]\n${r.analysis || ''}`).join('\n\n');
-         
-         setConsistentPrompt(combinedAnalysis.trim());
-         
-         if (updateVariables) {
-             // Since we don't have structured variables anymore, reset or keep one empty
-             setVariablePrompts([{ id: uuidv4(), prompt: '' }]);
-         }
-   };
-
-  // Removed automatic trigger of old analysis to prevent overwriting the new specific subject identification
-  /*
-  useEffect(() => {
-    const allProcessed = referenceImages.every(img => !img.isProcessing);
-    const hasImages = referenceImages.length > 0;
-    
-    if (hasImages && allProcessed) {
-         if (referenceImages.length !== prevRefImagesCount.current) {
-             triggerAutoAnalysis();
-             prevRefImagesCount.current = referenceImages.length;
-         }
-    } else if (referenceImages.length === 0) {
-         prevRefImagesCount.current = 0;
-    }
-  }, [referenceImages, apiKey]);
-  */
-  
-  // Update ref count without triggering analysis
-  useEffect(() => {
-       if (referenceImages.length !== prevRefImagesCount.current) {
-           prevRefImagesCount.current = referenceImages.length;
-       }
-  }, [referenceImages]);
-
+  // Handle Variable Term Menu
   useEffect(() => {
     if (!openVariableTermMenu) return;
-
     const onMouseDown = (e: MouseEvent) => {
-      const wrapper = openMenuWrapperRef.current;
-      if (!wrapper) return;
-      if (wrapper.contains(e.target as Node)) return;
-      setOpenVariableTermMenu(null);
+      if (openMenuWrapperRef.current && !openMenuWrapperRef.current.contains(e.target as Node)) {
+        setOpenVariableTermMenu(null);
+      }
     };
-
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpenVariableTermMenu(null);
     };
-
     window.addEventListener('mousedown', onMouseDown);
     window.addEventListener('keydown', onKeyDown);
     return () => {
@@ -260,67 +191,264 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
     };
   }, [openVariableTermMenu]);
 
-  const handleFileSelect = useCallback(async (selectedFiles: ImageFile[]) => {
-    const newUploads = selectedFiles.slice(0, MAX_REF_IMAGES - referenceImages.length);
-    if (newUploads.length === 0) return;
+  // --- HANDLERS: SIDEBAR ---
 
-    const newImageStates: ReferenceImageFile[] = newUploads.map(imgFile => ({
-        id: uuidv4(),
-        file: imgFile.file,
-        originalPreview: imgFile.preview,
-        processedPreview: imgFile.preview,
-        isProcessing: false,
+  const handleReferenceImageUpload = (files: File[]) => {
+    const newImages = files.map(file => ({
+      id: uuidv4(),
+      file,
+      originalPreview: URL.createObjectURL(file),
+      processedPreview: null,
+      isProcessing: false
     }));
-
-    setReferenceImages(prev => [...prev, ...newImageStates]);
-  }, [referenceImages.length]);
-
-  const handleStartAnalysis = async () => {
-    if (referenceImages.length === 0) {
-        setError("请先上传参考图片。");
-        return;
+    
+    // Auto-populate Master Image if empty (User Requirement: 主图位置默认添加图片)
+    if (!masterImage && newImages.length > 0) {
+      setMasterImage({
+        id: uuidv4(),
+        file: newImages[0].file,
+        preview: newImages[0].originalPreview
+      });
     }
 
-    setIsAnalyzing(true);
-    setError(null);
-
-    try {
-        const validFiles = referenceImages.map(img => img.file);
-        if (validFiles.length > 0) {
-            const mergedPrompt = await analyzeAndMergeReferenceImagesForGeneration(validFiles);
-            setConsistentPrompt(mergedPrompt.trim());
-            setVariablePrompts([{ id: uuidv4(), prompt: '' }]);
-            setEditingField('consistent');
-            requestAnimationFrame(() => {
-                consistentTextareaRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-                consistentTextareaRef.current?.focus();
-            });
-        }
-
-    } catch (e: any) {
-        console.error("Analysis workflow failed", e);
-        setError(e.message || "图片分析流程失败");
-    } finally {
-        setIsAnalyzing(false);
-    }
+    setReferenceImages(prev => [...prev, ...newImages]);
   };
 
-  const handleDeleteReferenceImage = (id: string) => {
+  const removeReferenceImage = (id: string) => {
     setReferenceImages(prev => prev.filter(img => img.id !== id));
   };
-  
-  const handleConsistentPromptChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setConsistentPrompt(e.target.value);
-    if(masterImage.src) setMasterPromptStale(true);
-  }
-  
-  const handleVariablePromptChange = (id: string, value: string) => {
-    setVariablePrompts(prev => prev.map(p => p.id === id ? { ...p, prompt: value } : p));
-    if(id === variablePrompts[0]?.id && masterImage.src) {
-        setMasterPromptStale(true);
+
+  const handleAnalyzeReferences = async () => {
+    if (referenceImages.length === 0) return;
+    setIsAnalyzing(true);
+    try {
+      // Analyze the first image for now, or multiple if service supports
+      const results = await analyzeImages(referenceImages.map(r => r.file));
+      // Combine analysis? Just take the first one's understanding for now
+      if (results.length > 0 && results[0].analysis) {
+        setConsistentPrompt(results[0].analysis);
+      }
+    } catch (e) {
+      console.error("Analysis failed", e);
+      setError("图片理解失败");
+    } finally {
+      setIsAnalyzing(false);
     }
   };
 
+  const handleGenerateMasterFromReferences = async () => {
+    if (referenceImages.length === 0 && !consistentPrompt) {
+      setError("请先上传参考图或输入一致性内容描述");
+      return;
+    }
+    setIsGeneratingMaster(true);
+    setError(null);
+    try {
+      const imageUrls = referenceImages.map(r => r.originalPreview); // generateWorkbenchImage handles urlToBase64
+      
+      const resultUrl = await generateWorkbenchImage(
+        consistentPrompt || "High quality commercial photography", 
+        imageUrls, 
+        "3:4"
+      );
+
+      // Convert result URL to a "File-like" object for consistency (or just store URL)
+      // Since our masterImage state expects a File object usually, but for generated images we might not have one.
+      // Let's adjust masterImage state to allow File to be null if it's generated/url-based.
+      setMasterImage({
+        id: uuidv4(),
+        file: null, // Generated image has no File object initially
+        preview: resultUrl
+      });
+    } catch (e: any) {
+      console.error("Master generation failed", e);
+      setError("主图生成失败: " + e.message);
+    } finally {
+      setIsGeneratingMaster(false);
+    }
+  };
+
+  // --- HANDLERS: MAIN ---
+
+  // Master Image Upload (Manual)
+  const handleMasterImageUpload = useCallback((files: File[]) => {
+    if (files.length === 0) return;
+    const file = files[0];
+    setMasterImage({
+      id: uuidv4(),
+      file,
+      preview: URL.createObjectURL(file)
+    });
+  }, []);
+
+  const handleDeleteMasterImage = () => {
+    setMasterImage(null);
+  };
+
+  // Product Detail Images Upload
+  const handleProductDetailImageUpload = useCallback((files: File[]) => {
+    const remaining = MAX_PRODUCT_DETAIL_IMAGES - productDetailImages.length;
+    if (remaining <= 0) return;
+    
+    const newImages = files.slice(0, remaining).map(file => ({
+      id: uuidv4(),
+      file,
+      preview: URL.createObjectURL(file)
+    }));
+    
+    setProductDetailImages(prev => [...prev, ...newImages]);
+  }, [productDetailImages.length]);
+
+  const handleDeleteProductDetailImage = (id: string) => {
+    setProductDetailImages(prev => prev.filter(img => img.id !== id));
+  };
+
+  // Variable Prompt Handlers
+  const handleVariablePromptChange = (id: string, value: string) => {
+    setVariablePrompts(prev => prev.map(p => p.id === id ? { ...p, prompt: value } : p));
+  };
+
+  const handleWeightChange = (id: string, value: number) => {
+    setVariablePrompts(prev => prev.map(p => p.id === id ? { ...p, weight: value } : p));
+  };
+
+  const handleCharacterConsistencyChange = (id: string, value: number) => {
+    setVariablePrompts(prev => prev.map(p => p.id === id ? { ...p, characterConsistency: value } : p));
+  };
+
+  const handleSceneConsistencyChange = (id: string, value: number) => {
+    setVariablePrompts(prev => prev.map(p => p.id === id ? { ...p, sceneConsistency: value } : p));
+  };
+
+  const addVariablePrompt = () => {
+    setVariablePrompts(prev => [...prev, { 
+      id: uuidv4(), 
+      prompt: '', 
+      weight: 70,
+      characterConsistency: 80,
+      sceneConsistency: 20
+    }]);
+  };
+
+  const removeVariablePrompt = (id: string) => {
+    setVariablePrompts(prev => prev.filter(p => p.id !== id));
+    setGeneratedImages(prev => {
+        const newState = {...prev};
+        delete newState[id];
+        return newState;
+    });
+  };
+
+  // Variable Reference Images (Per prompt)
+  const handleVariableReferenceImageUpload = (promptId: string, files: File[]) => {
+    const newImages = files.map(file => ({
+      id: uuidv4(),
+      file,
+      preview: URL.createObjectURL(file)
+    }));
+    setVariablePrompts(prev => prev.map(p => 
+      p.id === promptId ? { ...p, referenceImages: [...(p.referenceImages || []), ...newImages] } : p
+    ));
+  };
+
+  const handleDeleteVariableReferenceImage = (promptId: string, imageId: string) => {
+    setVariablePrompts(prev => prev.map(p => 
+      p.id === promptId ? {
+        ...p,
+        referenceImages: (p.referenceImages || []).filter(img => img.id !== imageId)
+      } : p
+    ));
+  };
+
+  const handleDownloadImage = async (url: string, filename: string) => {
+    try {
+      const response = await fetch(url);
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(blobUrl);
+    } catch (error) {
+      console.error('Download failed:', error);
+      // Fallback to direct link if fetch fails (e.g. CORS)
+      window.open(url, '_blank');
+    }
+  };
+
+  // Generation Logic
+  const handleGenerate = async (promptId: string, isRegeneration = false) => {
+    const vp = variablePrompts.find(p => p.id === promptId);
+    if (!vp) return;
+
+    // Condition Check
+    if (!masterImage) {
+      setError("请上传主图 (Master Image)。");
+      return;
+    }
+    if (productDetailImages.length === 0) {
+      setError("请至少上传一张产品细节图 (Product Detail Image)。");
+      return;
+    }
+    
+    setError(null);
+    setGeneratedImages(prev => ({ ...prev, [promptId]: { ...prev[promptId], isLoading: true, error: null } }));
+
+    try {
+      // Prepare Master Image Analysis
+      let masterAnalysis = null;
+      if (consistentPrompt && consistentPrompt.trim()) {
+         masterAnalysis = parseImageUnderstandingPrompt(consistentPrompt);
+      } else if (masterImage.file) {
+         try {
+             // Auto-analyze master image if no consistency prompt
+             const analysis = await analyzeAndCategorizeImageForKB(masterImage.file);
+             setConsistentPrompt(analysis.holistic_description);
+             masterAnalysis = analysis;
+         } catch (e) {
+             console.warn("Auto-analysis of master image failed", e);
+         }
+      }
+
+      const resultUrl = await generateSingleFromMaster(
+        masterImage.preview, 
+        vp.prompt,
+        productDetailImages.map(img => img.file),
+        (vp.referenceImages || []).map(img => img.file),
+        vp.weight ?? 70,
+        isRegeneration,
+        masterAnalysis,
+        vp.characterConsistency ?? 80,
+        vp.sceneConsistency ?? 20
+      );
+
+      setGeneratedImages(prev => ({
+        ...prev,
+        [promptId]: {
+          isLoading: false,
+          src: resultUrl, 
+          error: null,
+          timestamp: Date.now()
+        }
+      } as any)); 
+    } catch (e: any) {
+      console.error(e);
+      setGeneratedImages(prev => ({
+        ...prev,
+        [promptId]: {
+          isLoading: false,
+          src: null,
+          error: e.message || "生成失败",
+          timestamp: Date.now()
+        }
+      } as any));
+    }
+  };
+
+  // Term Insertion Helpers
   const toggleVariableTermMenu = (promptId: string, categoryId: string) => {
     setOpenVariableTermMenu(prev => {
       if (prev && prev.promptId === promptId && prev.categoryId === categoryId) return null;
@@ -337,13 +465,15 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
 
   const removeVariablePromptTerm = (promptText: string, term: string) => {
     const escaped = escapeRegExp(term);
+    // Match the term surrounded by separators or start/end of string
     const re = new RegExp(`(^|[\\s,，;；\\n]+)${escaped}(?=([\\s,，;；\\n]+|$))`, 'g');
-    let next = promptText.replace(re, (match, prefix) => (prefix ? '，' : ''));
-    next = next
-      .replace(/[,\s，;；\n]+/g, '，')
-      .replace(/^，+/, '')
-      .replace(/，+$/, '');
-    return next.trim();
+    // Replace with a single separator if it was preceded by one, otherwise empty
+    let next = promptText.replace(re, ' '); 
+    // Normalize separators: replace sequence of separators/spaces with ", "
+    next = next.replace(/[ \t]*[,，;；\n]+[ \t]*/g, ', ').trim();
+    // Remove leading/trailing separators
+    next = next.replace(/^[,，\s]+/, '').replace(/[,，\s]+$/, '');
+    return next;
   };
 
   const insertVariablePromptTerm = (promptId: string, term: string) => {
@@ -356,11 +486,14 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
 
     const beforeTrimmed = before.replace(/\s+$/, '');
     const afterTrimmed = after.replace(/^\s+/, '');
+    // Check if we need a delimiter before (if not empty and not ending in separator)
     const needsDelimiterBefore = beforeTrimmed.length > 0 && !/[，,;；\n]$/.test(beforeTrimmed);
+    // Check if we need a delimiter after (if not empty and not starting with separator)
     const needsDelimiterAfter = afterTrimmed.length > 0 && !/^[，,;；\n]/.test(afterTrimmed);
 
-    const left = `${beforeTrimmed}${needsDelimiterBefore ? '，' : ''}`;
-    const right = `${needsDelimiterAfter ? '，' : ''}${afterTrimmed}`;
+    // Use English comma ", "
+    const left = `${beforeTrimmed}${needsDelimiterBefore ? ', ' : ''}`;
+    const right = `${needsDelimiterAfter ? ', ' : ''}${afterTrimmed}`;
     const nextPrompt = `${left}${term}${right}`;
     const caretPos = left.length + term.length;
 
@@ -368,721 +501,474 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
 
     setTimeout(() => {
       const el = variableTextareaRefs.current[promptId];
-      if (!el) return;
-      el.focus();
-      el.setSelectionRange(caretPos, caretPos);
+      if (el) {
+        el.focus();
+        el.setSelectionRange(caretPos, caretPos);
+      }
     }, 0);
   };
 
-  const toggleVariablePromptTerm = (promptId: string, term: string) => {
+  const toggleVariablePromptTerm = (promptId: string, termCn: string, termEn: string) => {
     const currentPrompt = variablePrompts.find(p => p.id === promptId)?.prompt || '';
-    const selected = isVariableTermSelected(currentPrompt, term);
+    // Check using English term
+    const selected = isVariableTermSelected(currentPrompt, termEn);
     if (selected) {
-      const next = removeVariablePromptTerm(currentPrompt, term);
+      const next = removeVariablePromptTerm(currentPrompt, termEn);
       setVariablePrompts(prev => prev.map(p => (p.id === promptId ? { ...p, prompt: next } : p)));
-      return;
-    }
-    insertVariablePromptTerm(promptId, term);
-  };
-
-  const addVariablePrompt = () => {
-    setVariablePrompts(prev => [...prev, { id: uuidv4(), prompt: '' }]);
-  };
-
-  const removeVariablePrompt = (id: string) => {
-    setVariablePrompts(prev => prev.filter(p => p.id !== id));
-    setGeneratedImages(prev => {
-        const newState = {...prev};
-        delete newState[id];
-        return newState;
-    });
-  };
-
-  const getProcessedImages = () => {
-      return referenceImages.map(img => img.originalPreview);
-  };
-
-  const handleVariableImageUpload = async (id: string, files: File[]) => {
-      const newImages = files.map(file => ({
-        id: uuidv4(),
-        file,
-        preview: URL.createObjectURL(file)
-      }));
-
-      setVariablePrompts(prev =>
-        prev.map(p =>
-          p.id === id ? { ...p, referenceImages: [...(p.referenceImages || []), ...newImages] } : p
-        )
-      );
-  };
-
-  const handleAnalyzeVariableImages = async (
-    id: string,
-    imagesToAnalyze?: NonNullable<VariablePrompt['referenceImages']>
-  ) => {
-      const vp = variablePrompts.find(p => p.id === id);
-      const images = imagesToAnalyze || vp?.referenceImages || [];
-      if (images.length === 0) return;
-
-      setVariablePrompts(prev => prev.map(p => p.id === id ? { ...p, isAnalyzing: true } : p));
-
-      const settled = await Promise.allSettled(images.map(img => analyzeAndCategorizeImageForKB(img.file)));
-
-      setVariablePrompts(prev =>
-        prev.map(p => {
-          if (p.id !== id) return p;
-          const nextAnalyses: Record<string, KnowledgeBaseAnalysis> = { ...(p.imageAnalyses || {}) };
-          settled.forEach((res, index) => {
-            if (res.status !== 'fulfilled') return;
-            nextAnalyses[images[index].id] = res.value;
-          });
-          return { ...p, imageAnalyses: nextAnalyses, isAnalyzing: false };
-        })
-      );
-  };
-
-  const handleSaveVariableToKB = async (id: string) => {
-      const prompt = variablePrompts.find(p => p.id === id);
-      const images = prompt?.referenceImages || [];
-      const analyses = prompt?.imageAnalyses || {};
-      const tasks = images
-        .map(img => ({ img, analysis: analyses[img.id] }))
-        .filter((x): x is { img: NonNullable<VariablePrompt['referenceImages']>[number]; analysis: KnowledgeBaseAnalysis } => Boolean(x.analysis));
-
-      if (tasks.length === 0) return;
-
-      const results = await Promise.allSettled(tasks.map(t => saveKBAnalysisToKB(t.analysis, t.img.file)));
-      const okCount = results.filter(r => r.status === 'fulfilled').length;
-      const failedCount = results.length - okCount;
-
-      if (failedCount === 0) {
-        alert(`已保存到知识库！(${okCount} 张)`);
-      } else {
-        alert(`已保存 ${okCount} 张，失败 ${failedCount} 张`);
-      }
-  };
-
-  const handleDeleteVariableImage = (promptId: string, imageId?: string) => {
-      setVariablePrompts(prev =>
-        prev.map(p => {
-          if (p.id !== promptId) return p;
-          if (!imageId) return { ...p, referenceImages: [], imageAnalyses: {} };
-
-          const nextImages = (p.referenceImages || []).filter(img => img.id !== imageId);
-          const nextAnalyses = { ...(p.imageAnalyses || {}) };
-          delete nextAnalyses[imageId];
-          return { ...p, referenceImages: nextImages, imageAnalyses: nextAnalyses };
-        })
-      );
-  };
-
-  const mergeVariablePromptFragments = (vp: VariablePrompt): Record<string, string> => {
-    const analyses = Object.values(vp.imageAnalyses || {});
-    const merged: Record<string, string[]> = {};
-
-    for (const analysis of analyses) {
-      for (const [key, value] of Object.entries(analysis.fragments || {})) {
-        if (typeof value !== 'string') continue;
-        const text = value.trim();
-        if (!text) continue;
-        merged[key] = merged[key] ? [...merged[key], text] : [text];
-      }
-    }
-
-    const mergedStrings: Record<string, string> = {};
-    for (const [key, values] of Object.entries(merged)) {
-      const unique = Array.from(new Set(values.map(v => v.trim()).filter(Boolean)));
-      if (unique.length > 0) mergedStrings[key] = unique.join('\n');
-    }
-    return mergedStrings;
-  };
-
-  const handleGenerateMaster = async (isRegeneration = false) => {
-    const processedImages = getProcessedImages();
-    if (!processedImages || processedImages.length === 0 || (!variablePrompts[0]?.prompt && !consistentPrompt)) {
-      setError("请上传参考图，并确保有一致性描述或主图提示词。");
-      return;
-    }
-    setError(null);
-    setMasterImage({ src: null, isLoading: true });
-    
-    try {
-        const result = await generateMasterImage(processedImages, consistentPrompt, variablePrompts[0].prompt);
-        setMasterImage({ src: result, isLoading: false });
-        setMasterPromptStale(false);
-    } catch (e: any) {
-        setError(e.message || "主图生成失败。");
-        setMasterImage({ src: null, isLoading: false });
-    }
-  };
-
-  const handleModifyMaster = async () => {
-    const processedImages = getProcessedImages();
-    if (!processedImages || processedImages.length === 0 || !masterImage.src || !modificationPrompt) {
-        setError("无法修改，缺少参考图、主图或修改指令。");
-        return;
-    }
-    setError(null);
-    setMasterImage(prev => ({ ...prev, isLoading: true }));
-    try {
-        const result = await modifyMasterImage(processedImages, masterImage.src, consistentPrompt, variablePrompts[0].prompt, modificationPrompt);
-        setMasterImage({ src: result, isLoading: false });
-        setModificationPrompt('');
-    } catch (e: any) {
-        setError(e.message || "主图修改失败。");
-        setMasterImage(prev => ({ ...prev, isLoading: false }));
-    }
-  };
-  
-  const handleGenerateAll = async () => {
-    const processedImages = getProcessedImages();
-    if (!processedImages || processedImages.length === 0 || !masterImage.src) {
-        setError("请先生成并确认主图，才能生成系列图片。");
-        return;
-    }
-    setError(null);
-    
-    const imagePromises = variablePrompts.map(vp => 
-        generateSingleFromMaster(processedImages, masterImage.src!, consistentPrompt, vp.prompt, false, vp.referenceImages?.[0]?.file)
-        .then(imageSrc => ({ id: vp.id, src: imageSrc, error: null }))
-        .catch(error => ({ id: vp.id, src: null, error }))
-    );
-
-    const initialStates = variablePrompts.reduce((acc, vp) => {
-        acc[vp.id] = { src: null, isLoading: true };
-        return acc;
-    }, {} as GeneratedImageState);
-    setGeneratedImages(initialStates);
-
-    for (const promise of imagePromises) {
-        const result = await promise;
-        setGeneratedImages(prev => ({
-            ...prev,
-            [result.id]: { src: result.src, isLoading: false }
-        }));
-        if(result.error) {
-            setError(`部分图片生成失败。`);
-            console.error(`Failed to generate image for prompt ${result.id}:`, result.error);
-        }
-    }
-  };
-
-  const handleRegenerateSingle = async (promptId: string) => {
-    const processedImages = getProcessedImages();
-    if (!processedImages || processedImages.length === 0 || !masterImage.src) {
-      setError("请先生成并确认主图。");
-      return;
-    }
-    setError(null);
-    setGeneratedImages(prev => ({...prev, [promptId]: { src: prev[promptId]?.src || null, isLoading: true }}));
-    
-    const promptToRegenerate = variablePrompts.find(p => p.id === promptId);
-    if (!promptToRegenerate) return;
-
-    try {
-        const imageSrc = await generateSingleFromMaster(processedImages, masterImage.src, consistentPrompt, promptToRegenerate.prompt, true, promptToRegenerate.referenceImages?.[0]?.file);
-        setGeneratedImages(prev => ({...prev, [promptId]: { src: imageSrc, isLoading: false }}));
-    } catch(e: any) {
-        setError(e.message || `图片 ${promptId} 重新生成失败。`);
-        setGeneratedImages(prev => ({...prev, [promptId]: { src: prev[promptId]?.src || null, isLoading: false }}));
-    }
-  };
-  
-  const downloadImage = (src: string, filename: string) => {
-    const link = document.createElement('a');
-    link.href = src;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-  
-  const openKbModal = (idOrType: 'consistent' | string) => {
-    setEditingField(idOrType);
-    setIsKbModalOpen(true);
-  };
-
-  const handleSelectKbEntry = async (entry: KnowledgeBaseEntry) => {
-    try {
-        await incrementEntryUsage(entry.id);
-    } catch (error) {
-        console.error("Failed to increment usage count", error);
-        // Continue selection even if tracking fails
-    }
-    
-    if (entry.fullPrompt && entry.category === KnowledgeBaseCategory.FULL_PROMPT) {
-        // For FULL_PROMPT, replace the consistent and the FIRST variable prompt.
-        setConsistentPrompt(entry.fullPrompt.consistentPrompt);
-        setVariablePrompts(prev => prev.map((p, index) => 
-            index === 0 ? { ...p, prompt: entry.fullPrompt.variablePrompt } : p
-        ));
     } else {
-        // For fragments, APPEND the text.
-        const textToAppend = ` ${entry.promptFragment}`; // Add a leading space for separation.
-        if (editingField === 'consistent') {
-            setConsistentPrompt(prev => prev.trim() + textToAppend);
-        } else if (typeof editingField === 'string') {
-            setVariablePrompts(prev => prev.map(p => 
-                p.id === editingField ? { ...p, prompt: p.prompt.trim() + textToAppend } : p
-            ));
-        }
-    }
-    setIsKbModalOpen(false);
-    setEditingField(null);
-  };
-  
-  const onFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
-        const fileArray: File[] = Array.from(e.target.files);
-        const imageFiles = fileArray.map(file => ({ file, preview: URL.createObjectURL(file) }));
-        handleFileSelect(imageFiles);
+      insertVariablePromptTerm(promptId, termEn);
     }
   };
-
-  const kbContextPrompt = editingField === 'consistent' 
-      ? consistentPrompt 
-      : (typeof editingField === 'string' ? variablePrompts.find(p => p.id === editingField)?.prompt : undefined);
 
   return (
-    <div>
-        {enlargedImage && <ImageModal src={enlargedImage} onClose={() => setEnlargedImage(null)} />}
-        {isKbModalOpen && (
-            <KnowledgeBaseModal 
-                onClose={() => setIsKbModalOpen(false)} 
-                onSelectEntry={handleSelectKbEntry} 
-                currentContextPrompt={kbContextPrompt}
-            />
-        )}
-        <div className="grid lg:grid-cols-2 gap-8">
-        {/* Left Column: Inputs */}
-        <div className="flex flex-col gap-8">
-              <div>
-                <h3 className="text-xl font-bold text-slate-900 mb-3 flex items-center gap-2">
-                    参考图 (支持多张)
-                </h3>
-                <p className="text-slate-600 mb-4 text-sm">上传一张或多张清晰的图片作为主角。</p>
-                <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
-                    {referenceImages.map((img) => (
-                         <div 
-                            key={img.id} 
-                            className="relative group aspect-square bg-white/80 rounded-2xl overflow-hidden flex items-center justify-center border border-slate-200 shadow-sm cursor-pointer"
-                            onClick={() => setEnlargedImage(img.originalPreview)}
-                         >
-                            {img.isProcessing && <LoadingSpinner text=""/>}
-                            {!img.isProcessing && img.processedPreview && (
-                                <img src={img.processedPreview} alt="Reference" className="w-full h-full object-cover" />
-                            )}
-                            <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
-                                <div className="p-2 bg-white/20 rounded-full text-white hover:bg-white/40 backdrop-blur-sm transition-colors"><EyeIcon className="w-4 h-4"/></div>
-                                <button 
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleDeleteReferenceImage(img.id);
-                                    }} 
-                                    className="p-2 bg-red-500/20 rounded-full text-red-400 hover:bg-red-500/80 hover:text-white backdrop-blur-sm transition-colors" title="删除图片"
-                                >
-                                    <TrashIcon className="w-4 h-4" />
-                                </button>
-                            </div>
-                        </div>
-                    ))}
-                    {referenceImages.length < MAX_REF_IMAGES && (
-                        <div 
-                            onClick={() => fileInputRef.current?.click()}
-                            className="aspect-square border-2 border-dashed border-slate-200 rounded-2xl flex flex-col items-center justify-center text-center text-slate-500 hover:border-blue-400 hover:text-blue-700 hover:bg-white/70 cursor-pointer transition-all duration-300"
-                        >
-                            <PlusIcon className="w-6 h-6 mb-1"/>
-                            <span className="text-xs font-bold">添加图片</span>
-                        </div>
-                    )}
-                    <input
-                        ref={fileInputRef}
-                        type="file"
-                        multiple
-                        accept="image/*"
-                        onChange={onFileInputChange}
-                        className="hidden"
-                    />
-                </div>
-
-                {referenceImages.length > 0 && (
-                    <button
-                        onClick={handleStartAnalysis}
-                        disabled={isAnalyzing}
-                        className="mt-4 w-full py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl shadow-sm transition-all transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                    >
-                        {isAnalyzing ? (
-                            <>
-                                <LoadingSpinner text="" />
-                                <span>正在处理与分析...</span>
-                            </>
-                        ) : (
-                            <>
-                                <MagicWandIcon className="w-5 h-5" />
-                                <span>开始图片理解</span>
-                            </>
-                        )}
-                    </button>
-                )}
-              </div>
-              
-              <div>
-                 <div className="flex justify-between items-center mb-3">
-                    <h3 className="text-xl font-bold text-slate-900 flex items-center gap-2">
-                        一致性内容
-                    </h3>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => openKbModal('consistent')}
-                        className="px-3 py-1.5 text-slate-700 bg-white/80 hover:bg-white rounded-full transition-colors flex items-center gap-1.5 text-sm font-semibold border border-slate-200 shadow-sm"
-                        title="从知识库选择"
-                      >
-                        <BookOpenIcon className="w-4 h-4" />
-                        知识库
-                      </button>
-                    </div>
-                </div>
-                <textarea
-                  ref={consistentTextareaRef}
-                  value={consistentPrompt}
-                  onChange={handleConsistentPromptChange}
-                  rows={5}
-                  className="w-full p-4 bg-white/80 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all text-slate-800 placeholder-slate-400 resize-y shadow-sm"
-                  placeholder="例如：一名19岁的女大学生，穿着白色超大T恤和浅蓝色宽松牛仔裤..."
-                />
-              </div>
-
-              <div>
-                <h3 className="text-xl font-bold text-slate-900 mb-3 flex items-center gap-2">
-                    非一致性内容 (单张定义)
-                </h3>
-                <div className="space-y-5">
-                  {variablePrompts.map((vp, index) => {
-                    const hasImages = Boolean(vp.referenceImages && vp.referenceImages.length > 0);
-                    const mergedFragments = mergeVariablePromptFragments(vp);
-                    const hasFragments = Object.keys(mergedFragments).length > 0;
-
-                    return (
-                    <div key={vp.id} className="bg-white/80 border border-slate-200 p-4 rounded-2xl shadow-sm backdrop-blur-sm hover:border-slate-300 transition-colors">
-                      <div className="flex items-center justify-between mb-2">
-                         <span className="text-sm font-bold text-slate-700 uppercase tracking-wider">图片 #{index + 1}</span>
-                         <div className="flex space-x-1">
-                            <button onClick={() => openKbModal(vp.id)} className="p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-full transition-colors" title="从知识库选择">
-                                <BookOpenIcon className="w-4 h-4" />
-                            </button>
-                            <button onClick={() => removeVariablePrompt(vp.id)} disabled={variablePrompts.length <= 1} className="p-2 text-slate-500 hover:text-red-600 hover:bg-slate-100 rounded-full disabled:opacity-30 transition-colors" title="删除此提示">
-                                <TrashIcon className="w-4 h-4" />
-                            </button>
-                         </div>
-                      </div>
-                      <textarea
-                        ref={(el) => {
-                          variableTextareaRefs.current[vp.id] = el;
-                        }}
-                        value={vp.prompt}
-                        onChange={(e) => handleVariablePromptChange(vp.id, e.target.value)}
-                        rows={3}
-                        className="w-full p-3 bg-white/80 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition text-slate-800 placeholder-slate-400 mb-3"
-                        placeholder={index === 0 ? '主图的提示词：全身照，站在镜子前...' : '例如：鞋子特写，无人物...'}
-                      />
-                      <div className="mb-3 flex flex-wrap gap-2">
-                        {VARIABLE_PROMPT_TERM_CATEGORIES.map((cat) => {
-                          const isOpen = openVariableTermMenu?.promptId === vp.id && openVariableTermMenu?.categoryId === cat.id;
-                          return (
-                            <div
-                              key={cat.id}
-                              className="relative"
-                              ref={(el) => {
-                                if (isOpen) openMenuWrapperRef.current = el;
-                              }}
-                            >
-                              <button
-                                type="button"
-                                onClick={() => toggleVariableTermMenu(vp.id, cat.id)}
-                                className="flex items-center gap-2 px-3 py-2 bg-white/80 border border-slate-200 hover:border-blue-400 text-slate-800 rounded-xl text-xs font-semibold transition-colors shadow-sm"
-                              >
-                                <span>{cat.label}</span>
-                                <ChevronDownIcon className={`w-4 h-4 text-slate-500 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
-                              </button>
-
-                              {isOpen && (
-                                <div className="absolute left-0 mt-2 z-[9999] w-[360px] max-w-[calc(100vw-3rem)] bg-white border border-slate-200 rounded-2xl shadow-2xl backdrop-blur-md overflow-hidden">
-                                  <div className="max-h-72 overflow-y-auto p-2">
-                                    {cat.items.map((item) => {
-                                      const selected = isVariableTermSelected(vp.prompt || '', item.en);
-                                      return (
-                                        <button
-                                          key={`${cat.id}-${item.en}`}
-                                          type="button"
-                                          onClick={() => toggleVariablePromptTerm(vp.id, item.en)}
-                                          className={`w-full text-left px-3 py-2 rounded-xl transition-colors flex items-center justify-between gap-3 ${selected ? 'bg-blue-50 hover:bg-blue-100 border border-blue-200' : 'hover:bg-slate-50 border border-transparent'}`}
-                                        >
-                                          <div className="flex items-center gap-2 min-w-0">
-                                            <div className={`w-5 h-5 rounded-md border flex items-center justify-center flex-shrink-0 ${selected ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white border-slate-200 text-transparent'}`}>
-                                              <CheckIcon className="w-3.5 h-3.5" />
-                                            </div>
-                                            <span className={`text-xs truncate ${selected ? 'text-slate-900 font-semibold' : 'text-slate-800'}`}>{item.cn}</span>
-                                          </div>
-                                          <span className="text-[11px] text-slate-500 font-mono truncate">{item.en}</span>
-                                        </button>
-                                      );
-                                    })}
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                      
-                      {/* Image Upload Area */}
-                      <div className="mb-3">
-                        <div className="relative group">
-                          <input
-                            type="file"
-                            accept="image/*"
-                            multiple
-                            className="hidden"
-                            id={`file-${vp.id}`}
-                            onChange={(e) => {
-                              const files = e.target.files ? (Array.from(e.target.files) as File[]) : [];
-                              if (files.length > 0) handleVariableImageUpload(vp.id, files);
-                              e.currentTarget.value = '';
-                            }}
-                          />
-
-                          {!hasImages ? (
-                            <label
-                              htmlFor={`file-${vp.id}`}
-                              className="flex items-center justify-center w-full p-3 border-2 border-dashed border-slate-200 rounded-xl text-slate-600 hover:border-blue-400 hover:text-blue-700 cursor-pointer transition-colors text-sm font-bold gap-2 bg-white/60"
-                            >
-                              <PlusIcon className="w-4 h-4" />
-                              <span>上传参考图（可多张）</span>
-                            </label>
-                          ) : (
-                            <div className="bg-white/80 rounded-xl p-3 border border-slate-200 shadow-sm">
-                              <div className="flex items-start justify-between gap-3">
-                                <span className="text-xs text-slate-600 truncate">
-                                  参考图已上传：{vp.referenceImages?.length || 0} 张
-                                </span>
-                                <div className="flex gap-1 flex-shrink-0">
-                                  <button
-                                    onClick={() => handleSaveVariableToKB(vp.id)}
-                                    disabled={!hasFragments}
-                                    className="text-xs bg-blue-600 text-white px-2 py-1 rounded hover:bg-blue-500 transition disabled:opacity-50 disabled:cursor-not-allowed"
-                                    title="保存到知识库"
-                                  >
-                                    保存KB
-                                  </button>
-                                  <button
-                                    onClick={() => handleDeleteVariableImage(vp.id)}
-                                    className="text-xs bg-red-600 text-white px-2 py-1 rounded hover:bg-red-500 transition"
-                                    title="删除图片"
-                                  >
-                                    删除
-                                  </button>
-                                </div>
-                              </div>
-
-                              <div className="grid grid-cols-4 sm:grid-cols-6 gap-2 mt-3">
-                                {(vp.referenceImages || []).map((img) => (
-                                  <div
-                                    key={img.id}
-                                    className="relative aspect-square bg-slate-50 rounded-lg overflow-hidden group border border-slate-200"
-                                  >
-                                    <img src={img.preview} alt="Ref" className="w-full h-full object-cover" />
-                                    {vp.isAnalyzing && (
-                                      <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
-                                        <LoadingSpinner text="" />
-                                      </div>
-                                    )}
-                                    <button
-                                      onClick={() => handleDeleteVariableImage(vp.id, img.id)}
-                                      className="absolute top-1 right-1 p-1 bg-white/80 text-red-600 hover:bg-red-600 hover:text-white rounded-full backdrop-blur-sm transition-colors border border-slate-200"
-                                      title="删除此图"
-                                      type="button"
-                                    >
-                                      <TrashIcon className="w-3 h-3" />
-                                    </button>
-                                  </div>
-                                ))}
-
-                                <label
-                                  htmlFor={`file-${vp.id}`}
-                                  className="aspect-square border-2 border-dashed border-slate-200 rounded-lg flex flex-col items-center justify-center text-slate-600 hover:border-blue-400 hover:text-blue-700 cursor-pointer transition-colors text-xs font-bold gap-1 bg-white/60"
-                                >
-                                  <PlusIcon className="w-4 h-4" />
-                                  添加
-                                </label>
-                              </div>
-
-                              {hasFragments && (
-                                <div className="flex flex-wrap gap-1 mt-3 max-h-28 overflow-y-auto">
-                                  {Object.entries(mergedFragments).map(([key, value]) => (
-                                    <button
-                                      key={key}
-                                      onClick={() => handleVariablePromptChange(vp.id, vp.prompt + (vp.prompt ? ' ' : '') + value)}
-                                      className="text-[10px] bg-white border border-slate-200 hover:border-blue-300 text-slate-700 hover:text-slate-900 px-2 py-0.5 rounded-full transition truncate max-w-full text-left"
-                                      title={value}
-                                      type="button"
-                                    >
-                                      {key}: {value.substring(0, 10)}...
-                                    </button>
-                                  ))}
-                                </div>
-                              )}
-
-                              {!hasFragments && !vp.isAnalyzing && (
-                                <button
-                                  onClick={() => handleAnalyzeVariableImages(vp.id)}
-                                  className="text-xs text-blue-700 underline mt-2 text-left"
-                                  type="button"
-                                >
-                                  重新解析
-                                </button>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                      
-                      <div className="mt-3 flex justify-end">
-                           <button 
-                             onClick={() => handleRegenerateSingle(vp.id)}
-                             className="bg-white hover:bg-slate-50 text-slate-800 text-xs font-bold py-2 px-4 rounded-full flex items-center gap-2 transition-all shadow-sm border border-slate-200 group"
-                             title="立即生成此图片"
-                           >
-                               <PlayIcon className="w-3 h-3 group-hover:scale-110 transition-transform" />
-                               生成此图
-                           </button>
-                      </div>
-                    </div>
-                    );
-                  })}
-                </div>
-                <button onClick={addVariablePrompt} className="mt-6 w-full py-3 border-2 border-dashed border-slate-200 rounded-2xl flex items-center justify-center space-x-2 text-slate-600 hover:text-blue-700 hover:border-blue-300 hover:bg-white/70 font-bold transition-all">
-                  <PlusIcon className="w-5 h-5" />
-                  <span>添加另一个画面</span>
+    <div className="flex h-full bg-gray-50 overflow-hidden">
+      
+      {/* --- SIDEBAR: REFERENCE & CONSISTENCY --- */}
+      <div className="w-80 flex-shrink-0 bg-white border-r border-gray-200 overflow-y-auto p-4 flex flex-col gap-6">
+        <div>
+          <h3 className="text-sm font-bold text-gray-800 mb-2 flex items-center justify-between">
+            <span>参考图 (Reference Images)</span>
+            <span className="text-xs text-gray-500 font-normal">{referenceImages.length} images</span>
+          </h3>
+          <div className="grid grid-cols-2 gap-2 mb-2">
+            {referenceImages.map(img => (
+              <div key={img.id} className="relative aspect-square bg-gray-100 rounded-lg overflow-hidden group border border-gray-200">
+                <img src={img.originalPreview} alt="Ref" className="w-full h-full object-cover" />
+                <button 
+                  onClick={() => removeReferenceImage(img.id)}
+                  className="absolute top-1 right-1 p-1 bg-black/50 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+                >
+                  <TrashIcon className="w-3 h-3" />
                 </button>
-            </div>
-        </div>
-        
-        {/* Right Column: Results */}
-        <div className="bg-white/70 backdrop-blur-md rounded-3xl p-6 border border-slate-200 min-h-[400px] flex flex-col gap-8 shadow-sm">
-            {/* Master Image Module */}
-            <div>
-                 <div className="flex items-center justify-between mb-4">
-                     <h3 className="text-xl font-bold text-slate-900">主图 (视觉基准)</h3>
-                 </div>
-                 
-                  <div 
-                    className="aspect-[3/4] bg-slate-50 rounded-2xl flex items-center justify-center relative group text-slate-500 border border-slate-200 overflow-hidden shadow-sm cursor-pointer w-full max-w-full lg:max-w-[50%] mx-auto"
-                    onClick={() => masterImage.src && setEnlargedImage(masterImage.src)}
-                  >
-                    {masterImage.isLoading && <LoadingSpinner text="主图生成中..."/>}
-                    {!masterImage.isLoading && masterImage.src && (
-                         <>
-                            <img src={masterImage.src} alt="Master visual" className="w-full h-full object-cover"/>
-                            <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-all backdrop-blur-sm flex items-center justify-center gap-4">
-                               <div className="p-3 bg-white/10 hover:bg-fuchsia-500 text-white rounded-full backdrop-blur-md transition-all transform hover:scale-110" title="放大查看"><ZoomInIcon className="w-6 h-6"/></div>
-                               <button 
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        downloadImage(masterImage.src!, 'master_image.png');
-                                    }}
-                                    className="p-3 bg-white/10 hover:bg-blue-500 text-white rounded-full backdrop-blur-md transition-all transform hover:scale-110" title="下载此图片"><DownloadIcon className="w-6 h-6"/></button>
-                               <button 
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleGenerateMaster(true);
-                                    }}
-                                    className="p-3 bg-white/10 hover:bg-green-500 text-white rounded-full backdrop-blur-md transition-all transform hover:scale-110" title="重新生成"><RefreshIcon className="w-6 h-6"/></button>
-                           </div>
-                         </>
-                    )}
-                    {!masterImage.isLoading && !masterImage.src && (
-                        <div className="text-center p-8">
-                            <div className="w-16 h-16 bg-white rounded-full mx-auto mb-3 flex items-center justify-center border border-slate-200">
-                                <MagicWandIcon className="w-8 h-8 text-slate-500" />
-                            </div>
-                            <p>您的主图将显示在此处。</p>
-                        </div>
-                    )}
-                 </div>
-                 
-                 <div className="mt-4 flex gap-2">
-                    <button onClick={() => handleGenerateMaster(false)} disabled={masterImage.isLoading || referenceImages.some(i => i.isProcessing) || referenceImages.length === 0 || (!variablePrompts[0]?.prompt && !consistentPrompt)} className={`flex-grow font-bold py-3 px-6 rounded-xl transition-all shadow-sm transform active:scale-95 ${masterPromptStale ? 'bg-amber-500 hover:bg-amber-600 text-white' : 'bg-blue-600 hover:bg-blue-500 text-white'} disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none`}>
-                        {masterImage.isLoading ? '处理中...' : (masterImage.src ? (masterPromptStale ? '更新主图' : '重新生成主图') : '生成主图')}
-                    </button>
-                 </div>
-
-                 {masterImage.src && (
-                     <div className="mt-3 bg-white/80 p-2 rounded-xl border border-slate-200 flex items-center gap-2 shadow-sm">
-                        <input type="text" value={modificationPrompt} onChange={e => setModificationPrompt(e.target.value)} placeholder="输入修改指令，例如：把地毯换成木地板" className="flex-grow p-2 bg-transparent border-none text-sm text-slate-800 focus:ring-0 placeholder-slate-400"/>
-                        <button onClick={handleModifyMaster} disabled={masterImage.isLoading} className="bg-blue-600 text-white text-xs font-bold py-2 px-4 rounded-lg hover:bg-blue-500 transition-colors shadow-md disabled:opacity-50">修改</button>
-                    </div>
-                 )}
-            </div>
-            
-            <div className="border-t border-slate-200 my-2"></div>
-
-            {/* Batch Images Module */}
-            <div>
-                <div className="flex justify-between items-center mb-4">
-                    <h3 className="text-xl font-bold text-slate-900">系列图片</h3>
-                    <button onClick={handleGenerateAll} disabled={!masterImage.src || referenceImages.some(i => i.isProcessing)} className="bg-emerald-600 text-white text-sm font-bold py-2 px-4 rounded-full hover:bg-emerald-500 hover:shadow-lg hover:shadow-emerald-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-all transform active:scale-95">
-                       生成所有图片
-                    </button>
-                </div>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-                  {variablePrompts.map(({ id }, idx) => {
-                      const image = generatedImages[id];
-                      // Even if not generated yet, show a placeholder to indicate position
-                      const showPlaceholder = !image || (!image.isLoading && !image.src);
-
-                      return (
-                          <div 
-                            key={id} 
-                            className="bg-white rounded-2xl overflow-hidden aspect-[3/4] flex items-center justify-center group relative border border-slate-200 shadow-sm cursor-pointer"
-                            onClick={() => image?.src && setEnlargedImage(image.src)}
-                          >
-                              
-                              {image?.isLoading && <LoadingSpinner text="" />}
-                              
-                              {image && !image.isLoading && image.src && (
-                                  <>
-                                    <img src={image.src} alt={`Generated for prompt ${id}`} className="w-full h-full object-cover"/>
-                                    <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-all backdrop-blur-sm flex items-center justify-center gap-2 md:gap-3">
-                                        <div className="p-2 bg-white/10 hover:bg-fuchsia-500 text-white rounded-full backdrop-blur-md transition-all transform hover:scale-110" title="放大"><ZoomInIcon className="w-4 h-4 md:w-5 md:h-5"/></div>
-                                        <button 
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                downloadImage(image.src!, `series_image_${id.substring(0,6)}.png`);
-                                            }}
-                                            className="p-2 bg-white/10 hover:bg-blue-500 text-white rounded-full backdrop-blur-md transition-all transform hover:scale-110" title="下载"><DownloadIcon className="w-4 h-4 md:w-5 md:h-5"/></button>
-                                        <button 
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                handleRegenerateSingle(id);
-                                            }}
-                                            className="p-2 bg-white/10 hover:bg-green-500 text-white rounded-full backdrop-blur-md transition-all transform hover:scale-110" title="重生成"><RefreshIcon className="w-4 h-4 md:w-5 md:h-5"/></button>
-                                    </div>
-                                  </>
-                              )}
-                              
-                              {showPlaceholder && !image?.isLoading && (
-                                <div className="flex flex-col items-center justify-center text-slate-500">
-                                    <span className="text-xs mt-1 opacity-50">待生成</span>
-                                </div>
-                               )}
-                          </div>
-                      )
-                  })}
               </div>
-            </div>
-             {error && <div className="p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 mt-4 text-center text-sm">{error}</div>}
+            ))}
+            <label className="aspect-square bg-gray-50 rounded-lg border-2 border-dashed border-gray-200 flex flex-col items-center justify-center cursor-pointer hover:bg-gray-100 transition-colors text-gray-400">
+              <input type="file" accept="image/*" multiple className="hidden" onChange={(e) => e.target.files && handleReferenceImageUpload(Array.from(e.target.files))} />
+              <PlusIcon className="w-6 h-6" />
+            </label>
+          </div>
+          <button 
+            onClick={handleAnalyzeReferences}
+            disabled={isAnalyzing || referenceImages.length === 0}
+            className="w-full py-2 bg-indigo-50 text-indigo-600 rounded-lg text-sm font-medium hover:bg-indigo-100 transition-colors disabled:opacity-50"
+          >
+            {isAnalyzing ? "正在理解..." : "图片理解 (Understanding)"}
+          </button>
+        </div>
+
+        <div className="flex-1 flex flex-col">
+          <h3 className="text-sm font-bold text-gray-800 mb-2">一致性内容 (Consistent Content)</h3>
+          <textarea 
+            value={consistentPrompt}
+            onChange={(e) => setConsistentPrompt(e.target.value)}
+            placeholder="此处显示图片理解结果，或手动输入一致性描述..."
+            className="flex-1 w-full p-3 bg-gray-50 border border-gray-200 rounded-lg text-sm resize-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+          />
+        </div>
+
+        <div className="pt-4 border-t border-gray-100">
+          <button 
+            onClick={handleGenerateMasterFromReferences}
+            disabled={isGeneratingMaster || (referenceImages.length === 0 && !consistentPrompt)}
+            className="w-full py-3 bg-gradient-to-r from-gray-900 to-gray-800 text-white rounded-xl shadow-sm hover:from-black hover:to-gray-900 transition-all flex items-center justify-center gap-2"
+          >
+            {isGeneratingMaster ? <LoadingSpinner className="w-4 h-4 text-white" /> : <MagicWandIcon className="w-4 h-4" />}
+            <span>生成主图 (Generate Master)</span>
+          </button>
         </div>
       </div>
+
+      {/* --- MAIN CONTENT --- */}
+      <div className="flex-1 overflow-y-auto p-6 space-y-8">
+        
+        {/* Master Image & Product Details Section */}
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
+          
+          {/* Master Image */}
+          <div className="xl:col-span-5 bg-white rounded-xl shadow-sm border border-gray-100 p-5 flex flex-col">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-gray-800 flex items-center gap-2">
+                <span className="w-1 h-5 bg-black rounded-full"></span>
+                主图 (Master Image)
+              </h3>
+              <span className="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded-full">Max 1</span>
+            </div>
+
+            <div className="flex-1 min-h-[400px] bg-gray-50 rounded-xl border-2 border-dashed border-gray-200 relative group transition-all hover:border-blue-400 overflow-hidden">
+              {masterImage ? (
+                <div className="relative w-full h-full">
+                  <img 
+                    src={masterImage.preview} 
+                    alt="Master" 
+                    className="w-full h-full object-contain p-2"
+                  />
+                  <div className="absolute top-2 right-2 flex gap-2">
+                    <button 
+                      onClick={() => setEnlargedImage(masterImage.preview)}
+                      className="p-2 bg-white/90 backdrop-blur shadow-sm rounded-full hover:bg-blue-50 text-blue-600 transition-colors"
+                      title="放大查看"
+                    >
+                      <ZoomInIcon className="w-4 h-4" />
+                    </button>
+                    <button 
+                      onClick={handleDeleteMasterImage}
+                      className="p-2 bg-white/90 backdrop-blur shadow-sm rounded-full hover:bg-red-50 text-red-600 transition-colors"
+                      title="删除图片"
+                    >
+                      <TrashIcon className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <label className="absolute inset-0 flex flex-col items-center justify-center cursor-pointer text-gray-400 hover:text-blue-500 hover:bg-blue-50/30 transition-colors">
+                  <input 
+                    type="file" 
+                    accept="image/*" 
+                    className="hidden" 
+                    onChange={(e) => e.target.files && handleMasterImageUpload(Array.from(e.target.files))}
+                  />
+                  <div className="w-16 h-16 bg-white rounded-full shadow-sm flex items-center justify-center mb-4">
+                    <PlusIcon className="w-8 h-8" />
+                  </div>
+                  <span className="text-sm font-medium">点击上传主图</span>
+                  <span className="text-xs mt-1 opacity-70">支持 JPG, PNG</span>
+                </label>
+              )}
+            </div>
+          </div>
+
+          {/* Product Details */}
+          <div className="xl:col-span-7 bg-white rounded-xl shadow-sm border border-gray-100 p-5 flex flex-col">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-gray-800 flex items-center gap-2">
+                <span className="w-1 h-5 bg-indigo-600 rounded-full"></span>
+                产品细节图 (Product Details)
+              </h3>
+              <span className="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded-full">
+                {productDetailImages.length} / {MAX_PRODUCT_DETAIL_IMAGES}
+              </span>
+            </div>
+
+            <div className="flex-1 grid grid-cols-2 sm:grid-cols-3 gap-4 content-start">
+              {productDetailImages.map((img) => (
+                <div key={img.id} className="aspect-square bg-gray-50 rounded-lg border border-gray-200 relative group overflow-hidden">
+                  <img 
+                    src={img.preview} 
+                    alt="Detail" 
+                    className="w-full h-full object-cover"
+                  />
+                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors" />
+                  <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                     <button 
+                      onClick={() => setEnlargedImage(img.preview)}
+                      className="p-1.5 bg-white/90 backdrop-blur shadow-sm rounded-full hover:bg-blue-50 text-blue-600"
+                    >
+                      <ZoomInIcon className="w-3 h-3" />
+                    </button>
+                    <button 
+                      onClick={() => handleDeleteProductDetailImage(img.id)}
+                      className="p-1.5 bg-white/90 backdrop-blur shadow-sm rounded-full hover:bg-red-50 text-red-600"
+                    >
+                      <TrashIcon className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+              
+              {productDetailImages.length < MAX_PRODUCT_DETAIL_IMAGES && (
+                <label className="aspect-square bg-gray-50 rounded-lg border-2 border-dashed border-gray-200 flex flex-col items-center justify-center cursor-pointer text-gray-400 hover:text-indigo-500 hover:border-indigo-300 hover:bg-indigo-50/30 transition-all">
+                  <input 
+                    type="file" 
+                    accept="image/*" 
+                    multiple 
+                    className="hidden" 
+                    onChange={(e) => e.target.files && handleProductDetailImageUpload(Array.from(e.target.files))}
+                  />
+                  <PlusIcon className="w-6 h-6 mb-2" />
+                  <span className="text-xs">添加细节图</span>
+                </label>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* --- NON-CONSISTENT CONTENT GENERATION --- */}
+        <div className="space-y-6 pb-12">
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
+              <MagicWandIcon className="w-6 h-6 text-purple-600" />
+              非一致性内容生成 (Non-Consistent Generation)
+            </h2>
+            <button 
+              onClick={addVariablePrompt}
+              className="flex items-center gap-2 px-4 py-2 bg-black text-white rounded-lg hover:bg-gray-800 transition-colors shadow-sm"
+            >
+              <PlusIcon className="w-4 h-4" />
+              <span>新增生成项</span>
+            </button>
+          </div>
+
+          {variablePrompts.map((vp, index) => (
+            <div key={vp.id} className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+              {/* Header / Toolbar */}
+              <div className="bg-gray-50/50 px-6 py-4 border-b border-gray-100 flex flex-wrap items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <span className="flex items-center justify-center w-6 h-6 rounded-full bg-purple-100 text-purple-700 text-xs font-bold">
+                    {index + 1}
+                  </span>
+                  <span className="font-medium text-gray-700">生成项 #{index + 1}</span>
+                </div>
+                
+                <div className="flex items-center gap-4 flex-wrap justify-end">
+                   {/* Weight Control */}
+                  <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-lg border border-gray-200 shadow-sm">
+                    <span className="text-xs font-medium text-gray-500">重绘权重</span>
+                    <input 
+                      type="range" 
+                      min="0" 
+                      max="100" 
+                      value={vp.weight ?? 70} 
+                      onChange={(e) => handleWeightChange(vp.id, parseInt(e.target.value))}
+                      className="w-20 h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-purple-600"
+                    />
+                    <span className="text-xs font-bold text-purple-600 min-w-[2rem] text-right">
+                      {vp.weight ?? 70}%
+                    </span>
+                  </div>
+
+                  {/* Character Consistency */}
+                  <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-lg border border-gray-200 shadow-sm">
+                    <span className="text-xs font-medium text-gray-500">人物一致性</span>
+                    <input 
+                      type="range" 
+                      min="0" 
+                      max="100" 
+                      value={vp.characterConsistency ?? 80} 
+                      onChange={(e) => handleCharacterConsistencyChange(vp.id, parseInt(e.target.value))}
+                      className="w-20 h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-pink-600"
+                    />
+                    <span className="text-xs font-bold text-pink-600 min-w-[2rem] text-right">
+                      {vp.characterConsistency ?? 80}%
+                    </span>
+                  </div>
+
+                  {/* Scene Consistency */}
+                  <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-lg border border-gray-200 shadow-sm">
+                    <span className="text-xs font-medium text-gray-500">场景一致性</span>
+                    <input 
+                      type="range" 
+                      min="0" 
+                      max="100" 
+                      value={vp.sceneConsistency ?? 20} 
+                      onChange={(e) => handleSceneConsistencyChange(vp.id, parseInt(e.target.value))}
+                      className="w-20 h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                    />
+                    <span className="text-xs font-bold text-blue-600 min-w-[2rem] text-right">
+                      {vp.sceneConsistency ?? 20}%
+                    </span>
+                  </div>
+
+                  <button 
+                    onClick={() => removeVariablePrompt(vp.id)}
+                    className="text-gray-400 hover:text-red-500 transition-colors p-1"
+                    title="删除此项"
+                  >
+                    <TrashIcon className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-6 grid grid-cols-1 lg:grid-cols-12 gap-8">
+                {/* Left Column: Prompt & Reference */}
+                <div className="lg:col-span-7 space-y-6">
+                  
+                  {/* Prompt Input */}
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                       <label className="text-sm font-medium text-gray-700">画面修改提示词 (Prompt)</label>
+                       <div className="flex gap-2 relative" ref={openMenuWrapperRef}>
+                         {VARIABLE_PROMPT_TERM_CATEGORIES.map(cat => (
+                           <div key={cat.id} className="relative">
+                              <button
+                                  onClick={() => toggleVariableTermMenu(vp.id, cat.id)}
+                                  className={`px-2 py-1 text-xs rounded border transition-colors ${
+                                      openVariableTermMenu?.promptId === vp.id && openVariableTermMenu?.categoryId === cat.id
+                                      ? 'bg-purple-50 border-purple-200 text-purple-700'
+                                      : 'bg-white border-gray-200 text-gray-600 hover:border-gray-300'
+                                  }`}
+                              >
+                                  {cat.label}
+                              </button>
+                              {openVariableTermMenu?.promptId === vp.id && openVariableTermMenu?.categoryId === cat.id && (
+                                  <div className="absolute top-full left-0 mt-1 w-64 max-h-60 overflow-y-auto bg-white rounded-lg shadow-xl border border-gray-100 z-50 p-1 grid grid-cols-1 gap-0.5">
+                                      {cat.items.map(item => {
+                                          const isSelected = isVariableTermSelected(vp.prompt, item.en);
+                                          return (
+                                              <button
+                                                  key={item.cn}
+                                                  onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    toggleVariablePromptTerm(vp.id, item.cn, item.en);
+                                                  }}
+                                                  className={`text-left px-3 py-2 text-xs rounded flex items-center justify-between group ${
+                                                      isSelected ? 'bg-purple-50 text-purple-700' : 'hover:bg-gray-50 text-gray-700'
+                                                  }`}
+                                              >
+                                                  <span>{item.cn}</span>
+                                                  {isSelected && <CheckIcon className="w-3 h-3" />}
+                                              </button>
+                                          );
+                                      })}
+                                  </div>
+                              )}
+                           </div>
+                         ))}
+                       </div>
+                    </div>
+                    <textarea
+                      ref={el => variableTextareaRefs.current[vp.id] = el}
+                      value={vp.prompt}
+                      onChange={(e) => handleVariablePromptChange(vp.id, e.target.value)}
+                      placeholder="描述你想如何修改主图 (e.g., 换个背景, 改变姿势, 调整光影)..."
+                      className="w-full h-32 p-3 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all resize-none text-sm leading-relaxed"
+                    />
+                  </div>
+
+                  {/* Reference Images for this prompt */}
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-gray-700">参考图 (作为一致性内容)</label>
+                    <div className="flex flex-wrap gap-3">
+                      {(vp.referenceImages || []).map(img => (
+                        <div key={img.id} className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 group">
+                          <img src={img.preview} alt="Ref" className="w-full h-full object-cover" />
+                          <button 
+                            onClick={() => handleDeleteVariableReferenceImage(vp.id, img.id)}
+                            className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-white"
+                          >
+                            <TrashIcon className="w-4 h-4" />
+                          </button>
+                        </div>
+                      ))}
+                      <label className="w-16 h-16 rounded-lg border-2 border-dashed border-gray-200 flex items-center justify-center cursor-pointer hover:border-purple-400 hover:bg-purple-50/30 text-gray-400 transition-colors">
+                        <input 
+                          type="file" 
+                          accept="image/*" 
+                          multiple 
+                          className="hidden"
+                          onChange={(e) => e.target.files && handleVariableReferenceImageUpload(vp.id, Array.from(e.target.files))} 
+                        />
+                        <PlusIcon className="w-5 h-5" />
+                      </label>
+                    </div>
+                  </div>
+
+                  {/* Generate Action */}
+                  <div className="pt-2">
+                     <button
+                      onClick={() => handleGenerate(vp.id)}
+                      disabled={generatedImages[vp.id]?.isLoading}
+                      className={`w-full py-3 rounded-lg flex items-center justify-center gap-2 font-medium text-white shadow-sm transition-all ${
+                          generatedImages[vp.id]?.isLoading 
+                          ? 'bg-gray-400 cursor-not-allowed'
+                          : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 hover:shadow-md transform hover:-translate-y-0.5'
+                      }`}
+                     >
+                       {generatedImages[vp.id]?.isLoading ? (
+                         <>
+                           <LoadingSpinner className="w-5 h-5" />
+                           <span>生成中...</span>
+                         </>
+                       ) : (
+                         <>
+                           <PlayIcon className="w-5 h-5" />
+                           <span>开始生成</span>
+                         </>
+                       )}
+                     </button>
+                     {error && <p className="mt-2 text-sm text-red-500">{error}</p>}
+                  </div>
+
+                </div>
+
+                {/* Right Column: Result */}
+                <div className="lg:col-span-5 border-l border-gray-100 pl-8 flex flex-col justify-center min-h-[400px]">
+                  {generatedImages[vp.id] ? (
+                      generatedImages[vp.id].src ? (
+                          <div className="relative w-full aspect-[3/4] bg-gray-100 rounded-lg overflow-hidden shadow-sm group">
+                              <img 
+                                  src={generatedImages[vp.id].src!} 
+                                  alt="Result" 
+                                  className="w-full h-full object-cover"
+                              />
+                              <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-4">
+                                  <div className="flex gap-2 justify-end">
+                                      <button 
+                                          onClick={() => setEnlargedImage(generatedImages[vp.id].src!)}
+                                          className="p-2 bg-white/20 backdrop-blur rounded-full text-white hover:bg-white/30 transition-colors"
+                                          title="放大查看 (Zoom)"
+                                      >
+                                          <ZoomInIcon className="w-5 h-5" />
+                                      </button>
+                                      <button
+                                          onClick={() => handleDownloadImage(generatedImages[vp.id].src!, `generated-${vp.id}.png`)}
+                                          className="p-2 bg-white/20 backdrop-blur rounded-full text-white hover:bg-white/30 transition-colors"
+                                          title="下载图片 (Download)"
+                                      >
+                                          <DownloadIcon className="w-5 h-5" />
+                                      </button>
+                                  </div>
+                              </div>
+                          </div>
+                      ) : (generatedImages[vp.id] as any).error ? (
+                          <div className="w-full aspect-[3/4] bg-red-50 rounded-lg border border-red-100 flex flex-col items-center justify-center p-6 text-center">
+                              <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center text-red-500 mb-3">
+                                  !
+                              </div>
+                              <p className="text-red-800 font-medium">生成失败</p>
+                              <p className="text-sm text-red-600 mt-1">{(generatedImages[vp.id] as any).error}</p>
+                              <button 
+                                  onClick={() => handleGenerate(vp.id, true)}
+                                  className="mt-4 px-4 py-2 bg-white border border-red-200 text-red-600 rounded-lg text-sm hover:bg-red-50 transition-colors"
+                              >
+                                  重试
+                              </button>
+                          </div>
+                      ) : (
+                          <div className="w-full aspect-[3/4] bg-gray-50 rounded-lg flex items-center justify-center">
+                               <LoadingSpinner className="w-8 h-8 text-gray-300" />
+                          </div>
+                      )
+                  ) : (
+                      <div className="w-full aspect-[3/4] bg-gray-50 rounded-lg border-2 border-dashed border-gray-200 flex flex-col items-center justify-center text-gray-400">
+                          <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mb-4">
+                              <MagicWandIcon className="w-8 h-8 text-gray-300" />
+                          </div>
+                          <p className="text-sm font-medium">等待生成</p>
+                          <p className="text-xs mt-1">结果将显示在这里</p>
+                      </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+
+          <button 
+            onClick={addVariablePrompt}
+            className="w-full py-4 border-2 border-dashed border-gray-300 rounded-xl flex items-center justify-center text-gray-500 hover:border-purple-500 hover:text-purple-600 hover:bg-purple-50/30 transition-all group"
+          >
+            <PlusIcon className="w-6 h-6 mr-2 group-hover:scale-110 transition-transform" />
+            <span className="font-medium">新增生成项</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Enlarged Image Modal */}
+      {enlargedImage && (
+        <ImageModal
+          src={enlargedImage}
+          onClose={() => setEnlargedImage(null)}
+        />
+      )}
     </div>
   );
 };

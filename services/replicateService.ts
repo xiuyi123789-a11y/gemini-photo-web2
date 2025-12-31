@@ -2,7 +2,7 @@ import { AnalysisResult, KnowledgeBaseAnalysis, KnowledgeBaseCategory } from '..
 import { getKnowledgeBase } from './knowledgeBaseService';
 import { addToErrorNotebook } from './errorNotebookService';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
+const API_BASE_URL = '/api';
 
 const normalizeApiBase = (base: string) => {
     const raw = (base || '').trim();
@@ -355,7 +355,7 @@ export const taskChatWithGpt5 = async (messages: TaskChatMessage[], options?: Ta
     return text;
 };
 
-const runVisionAnalysis = async (imageFile: File, prompt?: string, retryOptions?: RetryOptions) => {
+export const runVisionAnalysis = async (imageFile: File, prompt?: string, retryOptions?: RetryOptions) => {
     const headers: HeadersInit = {};
     const userId = getUserId();
     const apiKey = getReplicateApiKey();
@@ -390,6 +390,43 @@ const runVisionAnalysis = async (imageFile: File, prompt?: string, retryOptions?
         throw new Error(data?.error || '无法获取解析结果');
     }
     return analysis;
+};
+
+export const extractSdPromptsFromImage = async (
+    imageFile: File,
+    retryOptions?: RetryOptions
+): Promise<{ positive: string; negative: string }> => {
+    const headers: HeadersInit = {};
+    const userId = getUserId();
+    const apiKey = getReplicateApiKey();
+    if (userId) headers['x-user-id'] = userId;
+    if (apiKey) headers['x-replicate-token'] = apiKey;
+
+    const fullUrl = joinApiUrl(API_BASE_URL, '/sd-prompt-from-image');
+
+    const response = await requestWithRetry(
+        async () => {
+            const formData = new FormData();
+            formData.append('image', imageFile);
+            return await fetchWithTimeout(
+                fullUrl,
+                {
+                    method: 'POST',
+                    headers,
+                    body: formData
+                },
+                retryOptions?.timeoutMs ?? 180000,
+                retryOptions?.signal
+            );
+        },
+        retryOptions
+    );
+
+    const data = await response.json().catch(() => ({} as any));
+    if (!data?.positive_prompt || !data?.negative_prompt) {
+        throw new Error(data?.error || '无法生成 SD 提示词');
+    }
+    return { positive: String(data.positive_prompt), negative: String(data.negative_prompt) };
 };
 
 export const analyzeImages = async (
@@ -473,7 +510,7 @@ export const analyzeAndCategorizeImageForKB = async (imageFile: File): Promise<K
     }
 };
 
-const parseImageUnderstandingPrompt = (analysis: string): KnowledgeBaseAnalysis => {
+export const parseImageUnderstandingPrompt = (analysis: string): KnowledgeBaseAnalysis => {
     const text = (analysis || '').trim();
     const lines = text.split(/\r?\n/);
     const sections: Array<{ title: string; contentLines: string[] }> = [];
@@ -514,7 +551,8 @@ const parseImageUnderstandingPrompt = (analysis: string): KnowledgeBaseAnalysis 
 
     for (const section of sections.map(s => ({ title: s.title, content: s.contentLines.join('\n').trim() }))) {
         const t = section.title;
-        if (/(姿势|动作|Pose)/i.test(t)) setIf(KnowledgeBaseCategory.POSE, section.content);
+        if (/(主体|Subject)/i.test(t)) setIf(KnowledgeBaseCategory.SUBJECT, section.content);
+        else if (/(姿势|动作|Pose)/i.test(t)) setIf(KnowledgeBaseCategory.POSE, section.content);
         else if (/(场景|环境|Scene|Environment)/i.test(t)) setIf(KnowledgeBaseCategory.SCENE, section.content);
         else if (/(构图|镜头|Composition|Camera)/i.test(t)) setIf(KnowledgeBaseCategory.COMPOSITION, section.content);
         else if (/(光照|氛围|Lighting|Atmosphere)/i.test(t)) setIf(KnowledgeBaseCategory.LIGHTING, section.content);
@@ -786,74 +824,134 @@ ${firstVariablePrompt}
     return result.imageUrl;
 };
 
-export const generateSingleFromMaster = async (
-    referenceImages: string[],
-    masterImageSrc: string,
-    consistentPrompt: string,
-    variablePrompt: string,
-    isRegeneration: boolean,
-    fusionImage?: File | string // New parameter for fusion
-): Promise<string> => {
-    // Logic: Use Master Image as base + Full Prompt (Consistent + Variable)
-    // This ensures unmentioned details default to the Master Image's visual information.
-    const fullPrompt = `
-# ROLE: AI Scene Director & Consistency Enforcer 
-(角色设定：AI场景导演与一致性执行官。核心职能是基于“资产库”执行特定的“拍摄指令”。) 
+const getFilteredConsistencyPrompt = (
+    userPrompt: string,
+    analysis: KnowledgeBaseAnalysis | null,
+    charWeightRaw: number,
+    sceneWeightRaw: number
+): string => {
+    if (!analysis) return '';
 
-# TASK: 
-Generate a specific shot based on the [Variable Content] instruction, while strictly inheriting visual assets from [Consistent Content]. 
+    const p = userPrompt.toLowerCase();
+    const fragments = analysis.fragments || {};
+    const prompts: string[] = [];
 
-# THE "INHERITANCE & OVERWRITE" PROTOCOL (CRITICAL): 
+    // Map 0-100 to 0.0-1.5 weight
+    const charWeight = (charWeightRaw / 100) * 1.5;
+    const sceneWeight = (sceneWeightRaw / 100) * 1.5;
 
-## RULE 1: ASSET INHERITANCE (The "WHO & WHERE" - Hard Lock) 
-**Source:** [Consistent Content] 
-**Directive:** You MUST use the exact subjects and environment defined here. 
-- **Identity:** The model's face, body type, hair, and the product's design/material are IMMUTABLE. 
-- **Environment:** The location (e.g., "Ocean rocks") remains constant unless explicitly changed. 
-- *Constraint:* Do NOT invent new clothes or change the model's ethnicity/features. 
-
-## RULE 2: STATE OVERWRITE (The "HOW" - High Priority) 
-**Source:** [Variable Content] 
-**Directive:** This defines the Camera Angle, Framing, Pose, and Focus. 
-- **Override Authority:** If [Variable Content] specifies a composition (e.g., "Close-up of shoes") that conflicts with the general description in [Consistent Content] (e.g., "Full body shot"), **THE VARIABLE CONTENT WINS.** 
-- **Focus Shift:** You are allowed to crop out the head/body if the Variable Content asks for a "Shoe Detail Shot". 
-
-# LOGIC EXECUTION PATH: 
-1.  **Load Assets:** Get the Model + Shoes + Background from [Consistent Content]. 
-2.  **Apply Camera:** Position the camera according to [Variable Content]. 
-3.  **Render:** Generate the image. 
-
-# INPUT DATA: 
-
-## Consistent Content (The Assets): 
-${consistentPrompt} 
-*(Instruction: Treat this as the "Actor and Set Design". Use these visual elements.)* 
-
-## Variable Content (The Director's Shot): 
-${variablePrompt} 
-*(Instruction: Treat this as the "Camera Command". This determines the angle, framing, and action. If this asks for a specific detail, IGNORE the full-body context of the Consistent Content.)* 
-
-${isRegeneration ? `\n- **Random Seed:** ${Math.random()}` : ''}
-`;
-
-    const base64Master = await urlToBase64(masterImageSrc);
+    // Shot Type Detection
+    const isLowerBodyOnly = /(膝|腿|脚|鞋|lower|leg|feet|shoe|knee)/i.test(p) && !/(全身|full body|whole body)/i.test(p);
+    const isHeadOnly = /(特写|脸|头|face|head|close-up|portrait)/i.test(p) && !/(全身|full body)/i.test(p);
     
-    let fusionImageBase64: string | undefined;
-    if (fusionImage) {
-        if (typeof fusionImage === 'string') {
-             fusionImageBase64 = await urlToBase64(fusionImage);
-        } else {
-             fusionImageBase64 = await fileToBase64(fusionImage);
+    // 1. Scene Consistency
+    if (sceneWeight > 0.1) {
+        if (fragments[KnowledgeBaseCategory.SCENE]) prompts.push(`(${fragments[KnowledgeBaseCategory.SCENE]}:${sceneWeight.toFixed(2)})`);
+        if (fragments[KnowledgeBaseCategory.LIGHTING]) prompts.push(`(${fragments[KnowledgeBaseCategory.LIGHTING]}:${sceneWeight.toFixed(2)})`);
+        if (fragments[KnowledgeBaseCategory.STYLE]) prompts.push(`(${fragments[KnowledgeBaseCategory.STYLE]}:${sceneWeight.toFixed(2)})`);
+    }
+
+    // 2. Character Consistency
+    if (charWeight > 0.1) {
+        // Subject (Face/Body)
+        if (fragments[KnowledgeBaseCategory.SUBJECT]) {
+            if (!isLowerBodyOnly) {
+                 prompts.push(`(${fragments[KnowledgeBaseCategory.SUBJECT]}:${charWeight.toFixed(2)})`);
+            }
+        }
+
+        // Clothing
+        if (fragments[KnowledgeBaseCategory.CLOTHING]) {
+            const clothingText = fragments[KnowledgeBaseCategory.CLOTHING];
+            if (isLowerBodyOnly) {
+                const lines = clothingText.split('\n');
+                const lowerLines = lines.filter(l => /(下装|裤|裙|鞋|Bottom|Pant|Skirt|Shoe)/i.test(l) && !/(上衣|Top|Shirt|Jacket)/i.test(l));
+                if (lowerLines.length > 0) {
+                    prompts.push(`(${lowerLines.join(', ')}:${charWeight.toFixed(2)})`);
+                } else if (/(下装|裤|裙|鞋|Bottom|Pant|Skirt|Shoe)/i.test(clothingText)) {
+                     prompts.push(`(${clothingText}:${charWeight.toFixed(2)})`);
+                }
+            } else if (isHeadOnly) {
+                const lines = clothingText.split('\n');
+                const upperLines = lines.filter(l => /(上衣|Top|Shirt|Jacket|配饰|Accessory|Hat|Earring)/i.test(l) && !/(下装|裤|裙|鞋|Bottom|Pant|Skirt|Shoe)/i.test(l));
+                if (upperLines.length > 0) {
+                     prompts.push(`(${upperLines.join(', ')}:${charWeight.toFixed(2)})`);
+                } else if (/(上衣|Top|Shirt|Jacket)/i.test(clothingText)) {
+                     prompts.push(`(${clothingText}:${charWeight.toFixed(2)})`);
+                }
+            } else {
+                prompts.push(`(${clothingText}:${charWeight.toFixed(2)})`);
+            }
+        }
+        
+        // Pose
+        if (fragments[KnowledgeBaseCategory.POSE]) {
+             if (!isLowerBodyOnly && !isHeadOnly) {
+                 prompts.push(`(${fragments[KnowledgeBaseCategory.POSE]}:${charWeight.toFixed(2)})`);
+             }
         }
     }
 
-    // Using /retouch-image for Img2Img generation to maintain consistency with Master Image
+    return prompts.join(', ');
+};
+
+export const generateSingleFromMaster = async (
+    masterImageSrc: string,
+    variablePrompt: string,
+    productDetailImages: (File | string)[],
+    variablePromptReferenceImages: (File | string)[],
+    weight: number,
+    isRegeneration: boolean,
+    masterImageAnalysis: KnowledgeBaseAnalysis | null = null,
+    characterConsistency: number = 80,
+    sceneConsistency: number = 20
+): Promise<string> => {
+    // Logic: Use Master Image as base + Variable Prompt
+    // Product Detail Images and Variable Prompt Reference Images act as Consistent Content (Image Inputs)
+
+    // 1. Prepare Prompt
+    const consistencyPrompt = getFilteredConsistencyPrompt(variablePrompt, masterImageAnalysis, characterConsistency, sceneConsistency);
+
+    const fullPrompt = `
+${variablePrompt}
+${consistencyPrompt ? `\n\nReference Context:\n${consistencyPrompt}` : ''}
+${isRegeneration ? `\n- **Random Seed:** ${Math.random()}` : ''}
+`.trim();
+
+    // 2. Prepare Base Image (Master)
+    const base64Master = await urlToBase64(masterImageSrc);
+    
+    // 3. Prepare Image Inputs (Adapters)
+    const imageInputs: string[] = [];
+
+    // Helper to process mixed File/string array
+    const processImages = async (images: (File | string)[]) => {
+        for (const img of images) {
+            if (typeof img === 'string') {
+                imageInputs.push(await urlToBase64(img));
+            } else {
+                imageInputs.push(await fileToBase64(img));
+            }
+        }
+    };
+
+    await processImages(productDetailImages);
+    await processImages(variablePromptReferenceImages);
+
+    // 4. Calculate Strength
+    // User input is 0-100, convert to 0.0-1.0
+    // Ensure it's within 0-1 range. Default to 0.7 if invalid.
+    let strength = weight / 100;
+    if (isNaN(strength) || strength < 0) strength = 0;
+    if (strength > 1) strength = 1;
+
+    // Using /retouch-image for Img2Img generation
     try {
         const result = await callApi('/retouch-image', {
             image: base64Master,
             prompt: fullPrompt,
-            strength: 0.65, // Reduced from 0.85 to improve consistency with Master Image
-            image_input: fusionImageBase64 ? [fusionImageBase64] : undefined
+            strength: strength,
+            image_input: imageInputs.length > 0 ? imageInputs : undefined
         });
 
         return result.imageUrl;
@@ -1125,23 +1223,33 @@ export const upscaleImage = async (
     const base64Image = await fileToBase64(imageFile);
 
     try {
-        const result = await callApi(
-            '/upscale-image',
-            {
-                model,
-                image: base64Image,
-                params
-            },
-            false,
-            {
-                retries: 2,
-                minDelayMs: 1000,
-                maxDelayMs: 5000,
-                timeoutMs: 180000
-            }
-        );
+        // Start async job
+        const start = await callApi('/upscale-image/start', { model, image: base64Image, params });
+        const jobId = start.jobId as string;
+        if (!jobId) throw new Error('Upscale jobId missing');
 
-        return result.imageUrl;
+        // Poll result
+        const maxWaitMs = 60_000;
+        const intervalMs = 2_000;
+        const startTime = Date.now();
+
+        while (Date.now() - startTime < maxWaitMs) {
+            await sleep(intervalMs);
+            const statusRes = await fetchWithTimeout(
+                joinApiUrl(API_BASE_URL, `/upscale-image/result/${jobId}`),
+                { method: 'GET' },
+                15_000
+            );
+            const data = await statusRes.json().catch(() => ({} as any));
+            if (data.status === 'succeeded' && data.imageUrl) {
+                return String(data.imageUrl);
+            }
+            if (data.status === 'failed') {
+                throw new Error(data.error || 'Upscale failed');
+            }
+        }
+
+        throw new Error('Upscale timeout, please try again');
     } catch (error) {
         console.error(`${model} upscale failed:`, error);
         await addToErrorNotebook({

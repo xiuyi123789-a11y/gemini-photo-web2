@@ -47,7 +47,7 @@ app.use(express.urlencoded({ extended: true }));
 // 2. Multer Configuration (Critical for file uploads)
 const upload = multer({
   storage: multer.memoryStorage(), // Store in memory for speed
-  limits: { fileSize: 20 * 1024 * 1024 } // Limit to 20MB
+  limits: { fileSize: 50 * 1024 * 1024 } // Limit to 50MB
 });
 
 // Debug middleware to log headers
@@ -69,6 +69,9 @@ const ERROR_NOTEBOOK_PATH = path.join(DATA_DIR, 'error_notebook.json');
 
 // Ensure data directory exists
 fs.ensureDirSync(DATA_DIR);
+
+// In-memory job store for async upscaling
+const UPSCALE_JOBS = new Map(); // jobId -> { status, imageUrl?, error?, createdAt }
 
 // --- Helpers ---
 
@@ -208,6 +211,15 @@ const runReplicatePrediction = async (client, modelPath, input) => {
         throw new Error(`Prediction failed: ${prediction.error || 'Unknown error'}`);
     }
 
+    try {
+        console.log('[Replicate] Prediction result summary:', JSON.stringify({
+            id: prediction.id,
+            status: prediction.status,
+            outputType: typeof prediction.output,
+            outputIsArray: Array.isArray(prediction.output),
+            outputPreview: Array.isArray(prediction.output) ? prediction.output.slice(0,1) : prediction.output
+        }, null, 2));
+    } catch {}
     return prediction.output;
 };
 
@@ -364,10 +376,17 @@ app.post('/api/analyze-image', upload.single('image'), async (req, res) => {
         max_completion_tokens: 3000 // 增加 Token 限制以允许详细输出
     };
 
-    // Use replicate.run() for simpler execution
-    const output = await executeWithRetry(() => replicateClient.run("openai/gpt-4o-mini", { input }));
-
-    const analysisText = Array.isArray(output) ? output.join('') : output.toString();
+    // Prefer streaming to avoid timeouts and capture incremental output
+    let analysisText = '';
+    try {
+      for await (const event of await executeWithRetry(() => replicateClient.stream("openai/gpt-4o-mini", { input }))) {
+        analysisText += String(event || '');
+      }
+    } catch (e) {
+      // Fallback to run when stream is not supported
+      const output = await executeWithRetry(() => replicateClient.run("openai/gpt-4o-mini", { input }));
+      analysisText = Array.isArray(output) ? output.join('') : String(output);
+    }
     console.log('[Server] 分析完成');
 
     res.json({
@@ -381,6 +400,92 @@ app.post('/api/analyze-image', upload.single('image'), async (req, res) => {
       success: false,
       error: error.message || '智能解析服务出错'
     });
+  }
+});
+
+// 2.1. POST /api/sd-prompt-from-image (Generate SD Positive/Negative Prompts)
+app.post('/api/sd-prompt-from-image', upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: '未接收到图片文件' });
+    }
+    const replicateClient = getReplicateClient(req);
+    const dataUri = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+
+    const ROLE_AND_OBJECTIVE = `
+You are an advanced Stable Diffusion Prompt Engineer (CLIP Interrogator). Your goal is to analyze input images and generate highly detailed, weighted prompt tags optimized for SDXL/Automatic1111. You must "think like a machine" and strictly follow the weighting and logic rules below.
+
+1. Positive Prompt Guidelines (Detailed & Weighted):
+- Format: Use comma-separated tags only. No natural language sentences.
+- Mandatory Weighting: You MUST use the syntax (keyword:weight) for key elements.
+- Base weight: 1.0 (no brackets needed).
+- Emphasis: Use 1.1 to 1.3 for main subjects.
+- Strong Emphasis: Use 1.4 to 1.5 for defining artistic styles or crucial details.
+- Standard Starter: Always start with: (masterpiece, best quality, highres:1.2), 8k, ultra detailed.
+- Mandatory Human Attributes (CRITICAL): If a human is present, you MUST identify and describe: Race/Ethnicity, Age, Skin Tone, Body Features; Visual Details for texture, lighting, clothes, background.
+
+2. Negative Prompt Logic (Anti-Completion & Quality):
+- Global Negatives (Always Include): test, watermark, (text:1.2), (worst quality, low quality, normal quality:1.4), lowres, (jpeg artifacts:1.2), (signature:1.2), username, blurry, artist name.
+- Partial Body / Cropping (CRITICAL): If only part of body is visible, add negatives for missing parts with high weight (1.5).
+- Framing & Composition: Always add (out of frame:1.5), (cropped:1.5) unless explicitly artistic cropped view.
+- NSFW policy: DO NOT add nsfw or nude to the negative prompt.
+
+3. Output Format:
+Strictly output a JSON object:
+{
+  "positive_prompt": "string of tags with weights",
+  "negative_prompt": "string of tags with weights"
+}
+`.trim();
+
+    const input = {
+      top_p: 1,
+      prompt: ROLE_AND_OBJECTIVE,
+      messages: [],
+      image_input: [dataUri],
+      temperature: 0.2,
+      system_prompt: 'Return STRICT JSON ONLY. No extra text.',
+      presence_penalty: 0,
+      frequency_penalty: 0,
+      max_completion_tokens: 1200
+    };
+
+    let raw = '';
+    try {
+      for await (const event of await executeWithRetry(() => replicateClient.stream('openai/gpt-4o-mini', { input }))) {
+        raw += String(event || '');
+      }
+    } catch (e) {
+      const output = await executeWithRetry(() => replicateClient.run('openai/gpt-4o-mini', { input }));
+      raw = Array.isArray(output) ? output.join('') : String(output);
+    }
+
+    const tryParseJson = (text) => {
+      try {
+        return JSON.parse(text);
+      } catch {
+        const start = text.indexOf('{');
+        const end = text.lastIndexOf('}');
+        if (start >= 0 && end > start) {
+          try {
+            return JSON.parse(text.slice(start, end + 1));
+          } catch {
+            return null;
+          }
+        }
+        return null;
+      }
+    };
+
+    const parsed = tryParseJson(raw);
+    if (!parsed || typeof parsed !== 'object' || !parsed.positive_prompt || !parsed.negative_prompt) {
+      return res.status(500).json({ error: '解析失败：模型未返回规范 JSON', details: raw.slice(0, 300) });
+    }
+
+    res.json({ success: true, positive_prompt: parsed.positive_prompt, negative_prompt: parsed.negative_prompt });
+  } catch (error) {
+    console.error('[Server Error] sd-prompt-from-image', error);
+    res.status(500).json({ success: false, error: error.message || '提示词生成服务出错' });
   }
 });
 
@@ -406,8 +511,15 @@ app.post('/api/merge-generation-understanding', validateUserId, async (req, res)
       max_completion_tokens: 2500
     };
 
-    const output = await executeWithRetry(() => replicateClient.run("openai/gpt-4o-mini", { input }));
-    const text = Array.isArray(output) ? output.join('') : output.toString();
+    let text = '';
+    try {
+      for await (const event of await executeWithRetry(() => replicateClient.stream("openai/gpt-4o-mini", { input }))) {
+        text += String(event || '');
+      }
+    } catch (e) {
+      const output = await executeWithRetry(() => replicateClient.run("openai/gpt-4o-mini", { input }));
+      text = Array.isArray(output) ? output.join('') : String(output);
+    }
     res.json({ success: true, analysis: text });
   } catch (error) {
     console.error('[Server Error] merge-generation-understanding', error);
@@ -429,20 +541,16 @@ app.post('/api/task-chat', validateUserId, async (req, res) => {
       .filter((m) => m.content.trim().length > 0)
       .slice(-20);
 
-    const reasoningEffort = typeof req.body?.reasoning_effort === 'string' ? req.body.reasoning_effort : 'minimal';
-    const verbosity = typeof req.body?.verbosity === 'string' ? req.body.verbosity : 'medium';
     const maxCompletionTokens = Number.isFinite(Number(req.body?.max_completion_tokens)) ? Number(req.body.max_completion_tokens) : 1200;
 
     const SYSTEM = `你是电商图片任务型对话智能体。你的职责是：识别意图、补全关键槽位、在信息齐全时产出可用于图像生成器的最终提示词。\n\n你必须且只能输出一个 JSON 对象，不要 markdown，不要解释，不要多余文本。\n\n输出格式二选一：\n1) 需要追问时：{\"type\":\"clarify\",\"missing_slots\":[\"aspect_ratio\",\"style\"],\"question\":\"...\"}\n2) 可以生成时：{\"type\":\"generate\",\"aspect_ratio\":\"3:4\",\"prompt\":\"...\"}\n\n规则：\n- aspect_ratio 只能是 1:1 / 3:4 / 9:16 之一。\n- style 必须是清晰可执行的风格词（如：科技感、极简、轻奢、清新、复古胶片）。\n- 若用户没有明确给出 aspect_ratio 或 style，就必须输出 clarify 并在 question 里一次性把缺的都问完。\n- 当用户给出补充信息后，应输出 generate，并把商品信息与用户补充合并成最终 prompt。\n- 生成 prompt 时，优先保留用户输入的事实与约束，不要虚构品牌、参数或场景。`;
 
     const input = {
       messages: [{ role: 'system', content: SYSTEM }, ...messages],
-      reasoning_effort: reasoningEffort,
-      verbosity,
       max_completion_tokens: Math.max(256, Math.min(4000, maxCompletionTokens))
     };
 
-    const output = await executeWithRetry(() => replicateClient.run('openai/gpt-5', { input }));
+    const output = await executeWithRetry(() => replicateClient.run('openai/gpt-4o-mini', { input }));
     const text = Array.isArray(output) ? output.join('') : output.toString();
     res.json({ success: true, text });
   } catch (error) {
@@ -457,17 +565,20 @@ app.post('/api/generate-image', validateUserId, async (req, res) => {
         const replicateClient = getReplicateClient(req);
         const { prompt, aspect_ratio, image_input } = req.body;
 
-        // Using 'google/nano-banana' as requested
+        // Use Flux Schnell for high-quality, fast generation
+        // Supports aspect_ratio: "1:1", "16:9", "21:9", "3:2", "2:3", "4:5", "5:4", "3:4", "4:3", "9:16", "9:21"
+        const model = "black-forest-labs/flux-schnell";
+        
         const input = {
             prompt: prompt,
             aspect_ratio: aspect_ratio || "3:4",
             output_format: "jpg",
-            ...(image_input && Array.isArray(image_input) && image_input.length > 0 ? { image_input } : {})
+            // Flux Schnell does not support image_input (img2img) in this mode
         };
 
-        console.log('Generating with google/nano-banana, input:', JSON.stringify(input, null, 2));
+        console.log(`Generating with ${model}, input:`, JSON.stringify(input, null, 2));
 
-        const output = await runReplicatePrediction(replicateClient, "google/nano-banana", input);
+        const output = await runReplicatePrediction(replicateClient, model, input);
         
         let outputUrl;
         if (Array.isArray(output)) {
@@ -514,21 +625,23 @@ app.post('/api/retouch-image', validateUserId, async (req, res) => {
                 aspect_ratio: "match_input_image"
             };
         } else {
-            // Creative Mode
-            console.log('Using Creative Mode (google/nano-banana)');
-            model = "google/nano-banana";
+            // Creative Mode (Image-to-Image)
+            // Use SDXL for reliable Image-to-Image with prompt strength
+            console.log('Using Creative Mode (stability-ai/sdxl)');
+            model = "stability-ai/sdxl";
             
-            const inputs = [image];
-            if (image_input && Array.isArray(image_input)) {
-                inputs.push(...image_input);
-            }
-
+            // SDXL takes 'image' (single), 'prompt', 'prompt_strength'
             input = {
                 prompt: prompt,
-                image_input: inputs,
-                aspect_ratio: "match_input_image",
-                output_format: "jpg",
-                prompt_strength: strength || 0.75 // Restore strength parameter for 1.1.0 logic
+                image: image, 
+                // aspect_ratio is inferred from input image in SDXL img2img
+                // output_format defaults to input format or png, but we can try to request jpg if supported, 
+                // strictly SDXL on Replicate might not have output_format param for all versions, but let's try.
+                // Actually, standard SDXL on Replicate doesn't always support output_format. 
+                // Let's omit output_format to be safe, or check docs. 
+                // Most Replicate models support it now. I'll leave it out to be safe or use it?
+                // I'll omit it for SDXL to minimize errors, it usually returns png or jpg.
+                prompt_strength: strength || 0.75 
             };
         }
 
@@ -585,19 +698,20 @@ app.post('/api/upscale-image', validateUserId, async (req, res) => {
         if (model === 'real-esrgan') {
             console.log('[Upscale] Using Real-ESRGAN, scale:', safeParams.scale);
 
-            output = await executeWithRetry(
-                () => replicateClient.run(
-                    "nightmareai/real-esrgan:latest",
-                    {
-                        input: {
-                            image: imageDataUri,
-                            scale: Number.isFinite(Number(safeParams.scale)) ? Number(safeParams.scale) : 2,
-                            face_enhance: Boolean(safeParams.face_enhance)
-                        }
+            // Resolve latest version id and run
+            const modelInfo = await executeWithRetry(() => replicateClient.models.get('nightmareai', 'real-esrgan'));
+            const versionId = modelInfo?.latest_version?.id;
+            if (!versionId) throw new Error('Failed to resolve version for real-esrgan');
+            output = await executeWithRetry(() => replicateClient.run(
+                `nightmareai/real-esrgan:${versionId}`,
+                {
+                    input: {
+                        image: imageDataUri,
+                        scale: Number.isFinite(Number(safeParams.scale)) ? Number(safeParams.scale) : 2,
+                        face_enhance: Boolean(safeParams.face_enhance)
                     }
-                ),
-                6
-            );
+                }
+            ));
         } else if (model === 'clarity-upscaler') {
             console.log('[Upscale] Using Clarity Upscaler, scale_factor:', safeParams.scale_factor);
 
@@ -616,62 +730,54 @@ app.post('/api/upscale-image', validateUserId, async (req, res) => {
                 : 768;
             const downscaling = downscalingResolution > 0;
 
-            output = await executeWithRetry(
-                () => replicateClient.run(
-                    "philz1337x/clarity-upscaler:dfad41707589d68ecdccd1dfa600d55a208f9310748e44bfe35b4a6291453d5e",
-                    {
-                        input: {
-                            image: imageDataUri,
-                            prompt: typeof safeParams.prompt === 'string' ? safeParams.prompt : 'masterpiece, best quality, highres',
-                            negative_prompt: typeof safeParams.negative_prompt === 'string'
-                                ? safeParams.negative_prompt
-                                : '(worst quality, low quality, normal quality:2) JuggernautNegative-neg',
-                            scale_factor: Number.isFinite(Number(safeParams.scale_factor)) ? Number(safeParams.scale_factor) : 2,
-                            dynamic: Number.isFinite(Number(safeParams.dynamic)) ? Number(safeParams.dynamic) : 6,
-                            creativity: Number.isFinite(Number(safeParams.creativity)) ? Number(safeParams.creativity) : 0.35,
-                            resemblance: Number.isFinite(Number(safeParams.resemblance)) ? Number(safeParams.resemblance) : 0.6,
-                            tiling_width: tilingWidth,
-                            tiling_height: tilingHeight,
-                            sd_model: typeof safeParams.sd_model === 'string'
-                                ? safeParams.sd_model
-                                : 'juggernaut_reborn.safetensors [338b85bc4f]',
-                            scheduler: typeof safeParams.scheduler === 'string'
-                                ? safeParams.scheduler
-                                : 'DPM++ 3M SDE Karras',
-                            num_inference_steps: Number.isFinite(Number(safeParams.num_inference_steps))
-                                ? Math.max(1, Math.round(Number(safeParams.num_inference_steps)))
-                                : 18,
-                            seed: Number.isFinite(Number(safeParams.seed)) ? Math.round(Number(safeParams.seed)) : 1337,
-                            downscaling,
-                            downscaling_resolution: downscalingResolution,
-                            handfix,
-                            pattern: Boolean(safeParams.pattern),
-                            output_format: outputFormat,
-                            sharpen: 0
-                        }
+            const modelInfo = await executeWithRetry(() => replicateClient.models.get('philz1337x', 'clarity-upscaler'));
+            const versionId = modelInfo?.latest_version?.id;
+            if (!versionId) throw new Error('Failed to resolve version for clarity-upscaler');
+            output = await executeWithRetry(() => replicateClient.run(
+                `philz1337x/clarity-upscaler:${versionId}`,
+                {
+                    input: {
+                        image: imageDataUri,
+                        prompt: typeof safeParams.prompt === 'string' ? safeParams.prompt : 'masterpiece, best quality, highres',
+                        negative_prompt: typeof safeParams.negative_prompt === 'string'
+                            ? safeParams.negative_prompt
+                            : '(worst quality, low quality, normal quality:2) JuggernautNegative-neg',
+                        scale_factor: Number.isFinite(Number(safeParams.scale_factor)) ? Number(safeParams.scale_factor) : 2,
+                        dynamic: Number.isFinite(Number(safeParams.dynamic)) ? Number(safeParams.dynamic) : 6,
+                        creativity: Number.isFinite(Number(safeParams.creativity)) ? Number(safeParams.creativity) : 0.35,
+                        resemblance: Number.isFinite(Number(safeParams.resemblance)) ? Number(safeParams.resemblance) : 0.6,
+                        tiling_width: tilingWidth,
+                        tiling_height: tilingHeight,
+                        sd_model: typeof safeParams.sd_model === 'string'
+                            ? safeParams.sd_model
+                            : 'juggernaut_reborn.safetensors [338b85bc4f]',
+                        scheduler: typeof safeParams.scheduler === 'string'
+                            ? safeParams.scheduler
+                            : 'DPM++ 3M SDE Karras',
+                        num_inference_steps: Number.isFinite(Number(safeParams.num_inference_steps))
+                            ? Math.max(1, Math.round(Number(safeParams.num_inference_steps)))
+                            : 18,
+                        seed: Number.isFinite(Number(safeParams.seed)) ? Math.round(Number(safeParams.seed)) : 1337,
+                        downscaling,
+                        downscaling_resolution: downscalingResolution,
+                        handfix,
+                        pattern: Boolean(safeParams.pattern),
+                        output_format: outputFormat,
+                        sharpen: 0
                     }
-                ),
-                6
-            );
+                }
+            ));
         } else {
             return res.status(400).json({ error: '模型类型不支持，请使用 real-esrgan 或 clarity-upscaler' });
         }
 
         const candidate = Array.isArray(output) ? output[0] : output;
-        const imageUrl =
-            typeof candidate === 'string'
-                ? candidate
-                : typeof candidate?.url === 'function'
-                    ? candidate.url()
-                    : typeof candidate?.url === 'string'
-                        ? candidate.url
-                        : null;
-        if (!imageUrl || typeof imageUrl !== 'string') {
+        if (!candidate) {
             throw new Error(`Invalid output from Replicate: ${JSON.stringify(output)}`);
         }
-
-        console.log('[Upscale] Success, output URL:', imageUrl);
-        res.json({ imageUrl });
+        const savedUrl = await saveReplicateOutput(candidate, req.userId);
+        console.log('[Upscale] Success, output URL:', savedUrl);
+        res.json({ imageUrl: savedUrl });
     } catch (error) {
         const message = (error && typeof error === 'object' && 'message' in error)
             ? String(error.message)
@@ -706,6 +812,89 @@ app.post('/api/upscale-image', validateUserId, async (req, res) => {
             details: error?.toString?.() || String(error)
         });
     }
+});
+
+// Async: start upscale job and return jobId immediately
+app.post('/api/upscale-image/start', validateUserId, async (req, res) => {
+  try {
+    const { model, image, params } = req.body || {};
+    if (!model || !image) return res.status(400).json({ error: '缺少必要参数：model / image' });
+    const jobId = uuidv4();
+    UPSCALE_JOBS.set(jobId, { status: 'queued', createdAt: Date.now() });
+    res.status(202).json({ jobId });
+
+    (async () => {
+      try {
+        const replicateClient = getReplicateClient(req);
+        const parsed = typeof image === 'string' ? image.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/) : null;
+        const mimeType = parsed?.[1] || 'image/png';
+        const base64Data = parsed?.[2] || (typeof image === 'string' ? image : '');
+        const imageDataUri = `data:${mimeType};base64,${base64Data}`;
+        const safeParams = (params && typeof params === 'object') ? params : {};
+
+        let output;
+        if (model === 'real-esrgan') {
+          const modelInfo = await executeWithRetry(() => replicateClient.models.get('nightmareai', 'real-esrgan'));
+          const versionId = modelInfo?.latest_version?.id;
+          output = await executeWithRetry(() => replicateClient.run(
+            `nightmareai/real-esrgan:${versionId}`,
+            { input: { image: imageDataUri, scale: Number.isFinite(Number(safeParams.scale)) ? Number(safeParams.scale) : 2, face_enhance: Boolean(safeParams.face_enhance) } }
+          ));
+        } else if (model === 'clarity-upscaler') {
+          const tilingWidth = Number.isFinite(Number(safeParams.tiling_width)) ? Number(safeParams.tiling_width) : 112;
+          const tilingHeight = Number.isFinite(Number(safeParams.tiling_height)) ? Number(safeParams.tiling_height) : 144;
+          const downscalingResolution = Number.isFinite(Number(safeParams.downscaling_resolution)) ? Number(safeParams.downscaling_resolution) : 768;
+          const downscaling = downscalingResolution > 0;
+          const handfix = safeParams.handfix === 'hands_only' || safeParams.handfix === 'image_and_hands' ? safeParams.handfix : 'disabled';
+          const outputFormat = safeParams.output_format === 'webp' || safeParams.output_format === 'jpg' ? safeParams.output_format : 'png';
+          const modelInfo = await executeWithRetry(() => replicateClient.models.get('philz1337x', 'clarity-upscaler'));
+          const versionId = modelInfo?.latest_version?.id;
+          output = await executeWithRetry(() => replicateClient.run(
+            `philz1337x/clarity-upscaler:${versionId}`,
+            { input: {
+              image: imageDataUri,
+              prompt: typeof safeParams.prompt === 'string' ? safeParams.prompt : 'masterpiece, best quality, highres',
+              negative_prompt: typeof safeParams.negative_prompt === 'string' ? safeParams.negative_prompt : '(worst quality, low quality, normal quality:2) JuggernautNegative-neg',
+              scale_factor: Number.isFinite(Number(safeParams.scale_factor)) ? Number(safeParams.scale_factor) : 2,
+              dynamic: Number.isFinite(Number(safeParams.dynamic)) ? Number(safeParams.dynamic) : 6,
+              creativity: Number.isFinite(Number(safeParams.creativity)) ? Number(safeParams.creativity) : 0.35,
+              resemblance: Number.isFinite(Number(safeParams.resemblance)) ? Number(safeParams.resemblance) : 0.6,
+              tiling_width: tilingWidth,
+              tiling_height: tilingHeight,
+              sd_model: typeof safeParams.sd_model === 'string' ? safeParams.sd_model : 'juggernaut_reborn.safetensors [338b85bc4f]',
+              scheduler: typeof safeParams.scheduler === 'string' ? safeParams.scheduler : 'DPM++ 3M SDE Karras',
+              num_inference_steps: Number.isFinite(Number(safeParams.num_inference_steps)) ? Math.max(1, Math.round(Number(safeParams.num_inference_steps))) : 18,
+              seed: Number.isFinite(Number(safeParams.seed)) ? Math.round(Number(safeParams.seed)) : 1337,
+              downscaling,
+              downscaling_resolution: downscalingResolution,
+              handfix,
+              pattern: Boolean(safeParams.pattern),
+              output_format: outputFormat,
+              sharpen: 0
+            } }
+          ));
+        } else {
+          UPSCALE_JOBS.set(jobId, { status: 'failed', error: '模型类型不支持', createdAt: Date.now() });
+          return;
+        }
+
+        const candidate = Array.isArray(output) ? output[0] : output;
+        const savedUrl = await saveReplicateOutput(candidate, req.userId);
+        UPSCALE_JOBS.set(jobId, { status: 'succeeded', imageUrl: savedUrl, createdAt: Date.now() });
+      } catch (err) {
+        UPSCALE_JOBS.set(jobId, { status: 'failed', error: String(err?.message || err), createdAt: Date.now() });
+      }
+    })();
+  } catch (error) {
+    res.status(500).json({ error: error.message || '启动任务失败' });
+  }
+});
+
+// Async: get result
+app.get('/api/upscale-image/result/:jobId', validateUserId, (req, res) => {
+  const job = UPSCALE_JOBS.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: '任务不存在' });
+  res.json(job);
 });
 
 // 5. GET /api/knowledge

@@ -113,7 +113,8 @@ export const ImageModal: React.FC<ImageModalProps> = ({ src, onClose }) => {
                         e.stopPropagation();
                         onClose();
                     }} 
-                    className="pointer-events-auto bg-white/10 hover:bg-red-500/80 text-white rounded-full p-3 transition-all backdrop-blur-md"
+                    className="pointer-events-auto bg-black/50 hover:bg-red-500 text-white rounded-full p-3 transition-all backdrop-blur-md border border-white/20 shadow-lg"
+                    title="Close (Esc)"
                 >
                     <XIcon className="w-6 h-6" />
                 </button>

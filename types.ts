@@ -68,6 +68,9 @@ export interface VariablePrompt {
   }>;
   imageAnalyses?: Record<string, KnowledgeBaseAnalysis>;
   isAnalyzing?: boolean;
+  weight?: number; // 0-100, default 70
+  characterConsistency?: number; // 0-100, default 80
+  sceneConsistency?: number; // 0-100, default 20
 }
 
 export interface GeneratedImage {
@@ -81,6 +84,7 @@ export type GeneratedImageState = Record<string, GeneratedImage>;
 
 export enum KnowledgeBaseCategory {
   FULL_PROMPT = '完整复刻',
+  SUBJECT = '主体特征',
   POSE = '姿势&动作',
   SCENE = '场景&环境',
   COMPOSITION = '构图&镜头',

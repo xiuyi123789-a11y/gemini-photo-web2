@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { SmartRetouchRow, KnowledgeBaseEntry } from '../types';
-import { analyzeImageSmartRetouch, generateSmartRetouchImage, mergeRetouchPromptsWithImage, upscaleImage, DEFAULT_CLARITY_PARAMS, DEFAULT_REAL_ESRGAN_PARAMS, type UpscaleModel } from '../services/replicateService';
+import { analyzeImageSmartRetouch, generateSmartRetouchImage, mergeRetouchPromptsWithImage, upscaleImage, DEFAULT_CLARITY_PARAMS, DEFAULT_REAL_ESRGAN_PARAMS, type UpscaleModel, extractSdPromptsFromImage } from '../services/replicateService';
 import { addRetouchLearningEntry } from '../services/knowledgeBaseService';
 import { MagicWandIcon, PlayIcon, DownloadIcon, ZoomInIcon, TrashIcon, PlusIcon, FireIcon, RefreshIcon } from './IconComponents';
 import { LoadingSpinner } from './LoadingSpinner';
@@ -43,7 +43,7 @@ const CLARITY_SCHEDULERS = [
 const CLARITY_SD_MODELS = [
     'juggernaut_reborn.safetensors [338b85bc4f]',
     'epicrealism_naturalSinRC1VAE.safetensors [84d76a0328]',
-    'flat2DAnime_v45Sharp.safetensors'
+    'flat2DAnimegre_v45Sharp.safetensors'
 ] as const;
 
 const CLARITY_TILING_OPTIONS = [16, 32, 64, 112, 128, 144, 256] as const;
@@ -67,6 +67,7 @@ export const SmartRetouchView: React.FC = () => {
     const [isUpscaling, setIsUpscaling] = useState(false);
     const [upscaleError, setUpscaleError] = useState<string | null>(null);
     const [upscaleSaveStatus, setUpscaleSaveStatus] = useState(false);
+    const [isDetectingPrompts, setIsDetectingPrompts] = useState(false);
     
     // Knowledge Base Modal State
     const [isKbModalOpen, setIsKbModalOpen] = useState(false);
@@ -322,6 +323,7 @@ export const SmartRetouchView: React.FC = () => {
             setIsUpscaling(false);
         }
     };
+
 
     const handleDownloadSimple = (src: string, filenameBase: string) => {
         const link = document.createElement('a');
@@ -876,7 +878,31 @@ export const SmartRetouchView: React.FC = () => {
                                                 </div>
 
                                                 <div className="space-y-2">
-                                                    <label className="text-xs font-semibold text-slate-700">正向提示词</label>
+                                                    <div className="flex items-center justify-between">
+                                                        <label className="text-xs font-semibold text-slate-700">正向提示词</label>
+                                                        <button
+                                                            type="button"
+                                                            disabled={!upscaleSource || isDetectingPrompts}
+                                                            onClick={async () => {
+                                                                if (!upscaleSource) return;
+                                                                setIsDetectingPrompts(true);
+                                                                setUpscaleError(null);
+                                                                try {
+                                                                    const result = await extractSdPromptsFromImage(upscaleSource.file);
+                                                                    setClarityParams(prev => ({ ...prev, prompt: result.positive }));
+                                                                    setClarityParams(prev => ({ ...prev, negative_prompt: result.negative }));
+                                                                } catch (e: any) {
+                                                                    setUpscaleError(e?.message || '图像检测失败');
+                                                                } finally {
+                                                                    setIsDetectingPrompts(false);
+                                                                }
+                                                            }}
+                                                            className="px-2 py-1 rounded-lg text-xs font-bold border border-slate-200 bg-white/80 hover:bg-slate-50 text-slate-700 disabled:opacity-50"
+                                                            title="图像检测"
+                                                        >
+                                                            {isDetectingPrompts ? '检测中...' : '图像检测'}
+                                                        </button>
+                                                    </div>
                                                     <textarea
                                                         value={clarityParams.prompt}
                                                         onChange={(e) => setClarityParams(prev => ({ ...prev, prompt: e.target.value }))}
@@ -894,6 +920,13 @@ export const SmartRetouchView: React.FC = () => {
                                                 </div>
                                             </div>
                                         )}
+
+                                        <div className="mt-2">
+                                            <div className="text-xs font-semibold text-slate-700 mb-1">调用指令预览</div>
+                                            <pre className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-[11px] text-slate-700 overflow-x-auto">
+{JSON.stringify({ model: upscaleModel, params: (upscaleModel === 'real-esrgan' ? realEsrganParams : clarityParams) }, null, 2)}
+                                            </pre>
+                                        </div>
                                     </div>
 
                                     <div className="space-y-4">
