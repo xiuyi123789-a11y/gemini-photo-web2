@@ -565,15 +565,13 @@ app.post('/api/generate-image', validateUserId, async (req, res) => {
         const replicateClient = getReplicateClient(req);
         const { prompt, aspect_ratio, image_input } = req.body;
 
-        // Use Flux Schnell for high-quality, fast generation
-        // Supports aspect_ratio: "1:1", "16:9", "21:9", "3:2", "2:3", "4:5", "5:4", "3:4", "4:3", "9:16", "9:21"
-        const model = "black-forest-labs/flux-schnell";
-        
+        // Using 'google/nano-banana' as requested
+        const model = "google/nano-banana";
         const input = {
             prompt: prompt,
             aspect_ratio: aspect_ratio || "3:4",
             output_format: "jpg",
-            // Flux Schnell does not support image_input (img2img) in this mode
+            ...(image_input && Array.isArray(image_input) && image_input.length > 0 ? { image_input } : {})
         };
 
         console.log(`Generating with ${model}, input:`, JSON.stringify(input, null, 2));
@@ -625,23 +623,21 @@ app.post('/api/retouch-image', validateUserId, async (req, res) => {
                 aspect_ratio: "match_input_image"
             };
         } else {
-            // Creative Mode (Image-to-Image)
-            // Use SDXL for reliable Image-to-Image with prompt strength
-            console.log('Using Creative Mode (stability-ai/sdxl)');
-            model = "stability-ai/sdxl";
-            
-            // SDXL takes 'image' (single), 'prompt', 'prompt_strength'
+            // Creative Mode
+            console.log('Using Creative Mode (google/nano-banana)');
+            model = "google/nano-banana";
+
+            const inputs = [image];
+            if (image_input && Array.isArray(image_input)) {
+                inputs.push(...image_input);
+            }
+
             input = {
                 prompt: prompt,
-                image: image, 
-                // aspect_ratio is inferred from input image in SDXL img2img
-                // output_format defaults to input format or png, but we can try to request jpg if supported, 
-                // strictly SDXL on Replicate might not have output_format param for all versions, but let's try.
-                // Actually, standard SDXL on Replicate doesn't always support output_format. 
-                // Let's omit output_format to be safe, or check docs. 
-                // Most Replicate models support it now. I'll leave it out to be safe or use it?
-                // I'll omit it for SDXL to minimize errors, it usually returns png or jpg.
-                prompt_strength: strength || 0.75 
+                image_input: inputs,
+                aspect_ratio: "match_input_image",
+                output_format: "jpg",
+                prompt_strength: strength || 0.75 // Restore strength parameter for 1.1.0 logic
             };
         }
 
