@@ -84,3 +84,17 @@ docker compose --env-file .env.tencent start app
 更新前先备份，记录当前源码提交/源码包和镜像 ID；新源码 `up -d --build`，数据留在卷中。失败时使用之前保存的源码/镜像重建 app；未来涉及数据库结构变化时也需配套数据库恢复。本次是全新数据库，不导入旧站数据。
 
 现阶段只运行一个 app 副本。知识库为每账号整份写入，任务状态在内存中；多人同账号同时编辑有后写覆盖风险。后续团队协作可再做逐条数据库操作、共享知识库、持久任务队列和 COS 存储。
+
+## 网页终端密码输入排查
+
+若账号创建提示密码长度不合，可改用 `bash deploy/create-user.sh 用户名`。该辅助脚本隐藏输入、报告字符数并允许重试，通过 stdin 交给容器；无需将密码写入命令、环境文件或聊天。默认 Node 交互命令也已增加字符数诊断。
+
+更新服务器版本后重建 app，再运行辅助脚本：
+
+```sh
+git pull --ff-only
+sudo docker compose --env-file .env.tencent up -d --build app
+bash deploy/create-user.sh xiuyi
+```
+
+输入长度检测和 stdin 读取增加 4 项测试，总计 14 项测试通过。网页终端中的实际输入仍需由使用者在服务器验证；这些测试不证明此前失败的具体原因。
