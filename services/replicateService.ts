@@ -1,3 +1,5 @@
+import { getUserId } from './userIdentity';
+import { userStorage } from './browserStorage';
 import { AnalysisResult, KnowledgeBaseAnalysis, KnowledgeBaseCategory } from '../types';
 import { getKnowledgeBase } from './knowledgeBaseService';
 import { addToErrorNotebook } from './errorNotebookService';
@@ -163,12 +165,10 @@ const IMAGE_UNDERSTANDING_PROMPT = `
 - 输出不包含 JSON、列表编号，只需按照上述标题顺序分段输出自然语言文字。
 `.trim();
 
-const getUserId = () => {
-    return localStorage.getItem('userId') || 'default-user';
-};
+
 
 const getReplicateApiKey = () => {
-    return localStorage.getItem('replicate_api_token') || '';
+    return userStorage.getItem('replicate_api_token') || '';
 };
 
 const sleep = (ms: number) => new Promise<void>(resolve => window.setTimeout(resolve, ms));
@@ -244,7 +244,7 @@ const requestWithRetry = async (makeRequest: (attempt: number) => Promise<Respon
     throw lastError instanceof Error ? lastError : new Error('Request failed');
 };
 
-const fileToBase64 = (file: File): Promise<string> => {
+export const fileToBase64 = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.readAsDataURL(file);
@@ -253,7 +253,7 @@ const fileToBase64 = (file: File): Promise<string> => {
     });
 };
 
-const urlToBase64 = async (url: string): Promise<string> => {
+export const urlToBase64 = async (url: string): Promise<string> => {
     if (url.startsWith('data:')) return url;
     try {
         const response = await fetch(url);
@@ -1237,7 +1237,7 @@ export const upscaleImage = async (
             await sleep(intervalMs);
             const statusRes = await fetchWithTimeout(
                 joinApiUrl(API_BASE_URL, `/upscale-image/result/${jobId}`),
-                { method: 'GET' },
+                { method: 'GET', headers: { 'x-user-id': getUserId() } },
                 15_000
             );
             const data = await statusRes.json().catch(() => ({} as any));

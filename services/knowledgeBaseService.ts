@@ -1,8 +1,8 @@
+import { getUserId } from './userIdentity';
 
 import { KnowledgeBaseEntry, AnalysisResult, ImageFile, KnowledgeBaseCategory } from '../types';
 
 const KB_STORAGE_KEY = 'quantum_leap_ai_studio_kb';
-const USER_ID_KEY = 'quantum_leap_user_id';
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api'; // Use proxy path or env var
 
 // Polyfill for uuid if crypto.randomUUID is not available (e.g. non-secure context)
@@ -17,15 +17,6 @@ function uuidv4() {
   });
 }
 
-// Get or create userId
-const getUserId = (): string => {
-  let userId = localStorage.getItem(USER_ID_KEY);
-  if (!userId) {
-    userId = uuidv4();
-    localStorage.setItem(USER_ID_KEY, userId);
-  }
-  return userId;
-};
 
 const THUMBNAIL_MAX_SIZE = 256; // Max width/height for thumbnails in pixels
 export const KB_UPDATE_EVENT = 'kb_data_updated'; // Event name

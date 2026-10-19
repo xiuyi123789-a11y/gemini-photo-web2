@@ -1,3 +1,5 @@
+import { setStorageUser } from './services/browserStorage';
+import { userStorage } from './services/browserStorage';
 
 import './index.css';
 
@@ -10,23 +12,29 @@ import { SmartRetouchView } from './components/SmartRetouchView';
 import { BookOpenIcon, HomeIcon, MagicWandIcon, PlayIcon, RefreshIcon } from './components/IconComponents';
 import { HomeView } from './components/HomeView';
 import { AnalysisResult } from './types';
+import { LoginView } from './components/LoginView';
 
 
 type View = 'home' | 'analyze' | 'generate' | 'retouch' | 'knowledge';
 
 const App: React.FC = () => {
+  const [identity, setIdentity] = useState<{ mode: string; user: { id: string; username: string } | null } | null>(null);
+  const [authError, setAuthError] = useState(false);
+  useEffect(() => {
+    fetch('/api/auth/me').then(r => { if (!r.ok) throw new Error(); return r.json(); }).then(identity => { setStorageUser(identity.user?.id || null); setIdentity(identity); }).catch(() => setAuthError(true));
+  }, []);
   const [currentView, setCurrentViewState] = useState<View>(() => {
-      return (localStorage.getItem('currentView') as View) || 'analyze';
+      return (userStorage.getItem('currentView') as View) || 'analyze';
   });
   const [homeStage, setHomeStage] = useState<'init' | 'workbench'>(() => {
-    const raw = localStorage.getItem('ql_home_stage');
+    const raw = userStorage.getItem('ql_home_stage');
     return raw === 'workbench' ? 'workbench' : 'init';
   });
   const isWorkbench = currentView === 'home' && homeStage === 'workbench';
   
   const setCurrentView = (view: View) => {
       setCurrentViewState(view);
-      localStorage.setItem('currentView', view);
+      userStorage.setItem('currentView', view);
   };
 
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult[] | null>(null);
@@ -142,8 +150,18 @@ const App: React.FC = () => {
     };
   }, []);
 
+  if (authError) return <main className="p-8">无法连接服务。<button onClick={() => window.location.reload()}>重试</button></main>;
+  if (!identity) return <main className="p-8">正在连接工作室…</main>;
+  if (identity.mode === 'accounts' && !identity.user) return <LoginView onLogin={() => window.location.reload()} />;
+
   return (
     <div className="ql-shell" data-ql-layout={isWorkbench ? 'home' : 'app'}>
+      {identity.user && <div className="fixed bottom-2 right-3 z-50 rounded-lg bg-white px-3 py-2 text-xs text-slate-700 shadow">
+        {identity.user.username} · <button onClick={async () => {
+          const response = await fetch('/api/auth/logout', { method: 'POST' });
+          if (response.ok) { sessionStorage.clear(); window.location.reload(); }
+        }}>退出登录</button>
+      </div>}
       {!isWorkbench && (
         <aside className="ql-sidebar">
           <div className="ql-sidebar-inner">

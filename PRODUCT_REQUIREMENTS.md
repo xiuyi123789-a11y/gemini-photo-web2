@@ -1,5 +1,7 @@
 # 量子跃迁 AI 修图工作室 (QuantumLeap AI Studio) 产品需求文档 (PRD)
 
+> 2026-10-19 迁移说明：下文保留历史产品需求。当前模型通过 Replicate 调用；生产环境使用账号认证和 PostgreSQL，部署改为腾讯云 Docker Compose。以 README 和 docs/TENCENT_DEPLOYMENT.md 为当前运行说明，原 Gemini API Key / JSON 存储描述不再适用于生产环境。
+
 ## 1. 产品概述 (Product Overview)
 
 **产品名称**: 量子跃迁 AI 修图工作室 (QuantumLeap AI Studio)  

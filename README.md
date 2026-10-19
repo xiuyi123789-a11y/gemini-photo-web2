@@ -1,49 +1,50 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# 量子跃迁 AI 修图工作室
 
-# Run and deploy your AI Studio app
+React + Express 的 AI 图片分析、生成、修图与灵感知识库应用。当前通过 Replicate 调用模型，不直接使用 Gemini API。
 
-This contains everything you need to run your app locally.
+## 腾讯云部署
 
-View your app in AI Studio: https://ai.studio/apps/drive/1N6EJq4ehPoT-aUv4xwDE0FEykW7TIMRD
+详见 [腾讯云部署指南](docs/TENCENT_DEPLOYMENT.md) 和 [本地与 GitHub 比对记录](docs/MIGRATION_AUDIT.md)。
 
-## Run Locally
+浏览器 → Caddy HTTPS → Express → Replicate；PostgreSQL 保存用户、会话、知识库及错误笔记，独立持久卷保存图片。
 
-**Prerequisites:**  Node.js
+- Node.js 24、Docker Compose、PostgreSQL 17。
+- 生产环境必须启用数据库和账号；管理员通过服务器命令开通账号，不开放注册。
+- 密码使用 scrypt 加盐哈希；7 天登录会话通过 HttpOnly、Secure、SameSite=Strict Cookie 传递，数据库仅保存会话摘要。
+- 服务端从会话确定身份，客户端 x-user-id 在账号模式下不作为身份依据。
+- 模型 Token 仅存在当前标签页的 sessionStorage，也可由管理员配置服务端共享 Token。
+- 知识库、图片、错误笔记按账号隔离；聊天草稿仍在当前浏览器，按账号区分，不跨设备同步。
 
+## 本地开发
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+需要 Node.js 24：
 
+```sh
+npm ci
+npm run dev
+```
 
-更新日志 (Update Log) - 2025-11-27
-本次更新主要包含两个核心模块的升级：灵感知识库存储迁移与智能修图交互重构。
+未配置数据库时，仅非生产环境使用原文件存储模式。需要本地验证账号时，在 .env 配置 DATABASE_URL，或 PGHOST、PGPORT、PGUSER、PGPASSWORD、PGDATABASE。开发 Cookie 不要求 HTTPS。Vite 5173 代理 /api 到 Express 3001。
 
-1. 灵感知识库 (Knowledge Base)
-存储方案升级
-从 LocalStorage 迁移至后端文件系统：不再依赖浏览器缓存，数据更安全、持久。
-用户数据隔离：
-实现了基于 UUID 的用户身份识别。
-后端自动为每个用户创建独立的数据目录 data/{userId}/。
-knowledge.json 存储元数据，图片文件独立存储于 images/ 子目录，大幅优化读写性能。
-API 接口改造：
-新增后端 Express 服务 (端口 3001)。
-更新 /api/knowledge 接口，支持基于 x-user-id 请求头的用户数据读写。
-2. 智能修图 (Smart Retouch)
-交互逻辑重构（解除线性限制）
-输入框解锁：
-图片上传后，输入框立即解除锁定，无需等待 AI 解析。
-用户可随时输入、修改修图指令，拥有最高编辑优先级。
-新增占位符提示："在此输入修图指令，或等待 AI 解析..."。
-流程并行化：
-图片上传后，后台静默运行 AI 解析，不通过 Loading 遮罩阻挡用户操作。
-若用户在解析完成前已手动输入内容，AI 建议将不会覆盖用户输入。
-按钮解绑：
-“执行优化”按钮状态逻辑更新：只要满足 (图片已上传 AND 输入框有内容)，按钮即刻变为高亮可用状态，无需等待 AI 解析结束。
-3. 技术栈更新
-后端服务：引入 Express.js, fs-extra, cors, uuid。
-开发环境：配置 Vite Proxy 转发 API 请求，使用 concurrently 并发运行前后端服务。
+可选 REPLICATE_API_TOKEN 供后端使用，不要使用 VITE_ 前缀或提交真实凭据。用户 Token 优先；用户提供无效 Token 时，不自动切换到共享额度。
+
+```sh
+npm test
+npm run typecheck
+npm run build
+```
+
+生产还需要 PUBLIC_ORIGIN=https://你的域名，Compose 自动设置。DATA_DIR 可覆盖图片存储位置。构建不再自动修改日志；更新版本信息时单独执行 npm run changelog。
+
+本次迁移基线为 6371972112ed8ff6352e9c1591eb382bb2b1c1b2，本地与远端 37 个跟踪文件一致。按用户要求全新部署，不导入旧图片或知识库。旧 Zeabur 部署配置已移除。
+
+## 本地文件统一存放
+
+本项目唯一工作目录是 `E:\桌面\量子跃迁ai修图工作室`。所有修改先落盘、完成验证，再同步 GitHub。源码在项目根目录，说明在 `docs/`，部署配置在 `deploy/`。
+
+- `.local/releases/`：部署源码包；运行 `npm run export:source` 重新生成。
+- `.local/migration-archive/`：之前 C 盘工作副本和工具的历史归档，不再用于开发；其中旧脚本的 C 盘路径已过时，不要执行。
+- `.local/npm-cache/`：项目专用 npm 下载缓存，由根目录 `.npmrc` 指定。
+- `node_modules/`、`dist/`、`data/`：依赖、构建产物和本地用户数据。
+
+`.local` 不提交 Git、不进入 Docker 构建，源码包也排除真实凭据和用户数据。删除这个项目目录即可清理以上本地项目文件；腾讯云实例、数据库卷和异地备份是独立云资源，需要单独处理。

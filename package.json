@@ -3,19 +3,19 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "zeabur": {
-    "startCommand": "npm start",
-    "buildCommand": "npm run build"
-  },
   "scripts": {
     "dev": "concurrently \"npm:dev:server\" \"npm:dev:vite\"",
     "dev:vite": "vite",
     "dev:server": "node server/index.js",
     "start": "node server/index.js",
     "changelog": "node scripts/update-changelog.js",
-    "build": "npm run changelog && vite build",
+    "build": "vite build",
     "preview": "vite preview",
-    "release": "node scripts/update-changelog.js && git add src/data/changelog.json && git commit -m \"chore: update changelog\" && git push origin main"
+    "release": "node scripts/update-changelog.js && git add src/data/changelog.json && git commit -m \"chore: update changelog\" && git push origin main",
+    "create-user": "node server/create-user.js",
+    "test": "node --test tests/*.test.js",
+    "typecheck": "tsc --noEmit",
+    "export:source": "node scripts/export-source.mjs"
   },
   "dependencies": {
     "@google/genai": "^1.28.0",
@@ -27,6 +27,7 @@
     "fs-extra": "^11.3.2",
     "lucide-react": "^0.554.0",
     "multer": "^2.0.2",
+    "pg": "^8.23.1",
     "postcss": "^8.5.6",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
@@ -39,7 +40,11 @@
     "@tailwindcss/vite": "^4.1.17",
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "pg-mem": "^3.0.14",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
+  },
+  "engines": {
+    "node": ">=24 <25"
   }
 }

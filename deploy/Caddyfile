@@ -1,0 +1,17 @@
+{$DOMAIN} {
+    encode zstd gzip
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy same-origin
+        -Server
+    }
+    request_body {
+        max_size 55MB
+    }
+    reverse_proxy app:3001 {
+        transport http {
+            response_header_timeout 310s
+        }
+        flush_interval -1
+    }
+}

@@ -1,5 +1,16 @@
 [
   {
+    "version": "v1.2.0",
+    "date": "2026-10-19",
+    "type": "Feature",
+    "changes": [
+      {
+        "summary": "腾讯云部署与多人账号隔离",
+        "details": "Docker Compose、HTTPS、PostgreSQL、账号登录、私有知识库和图片、备份及部署指南。"
+      }
+    ]
+  },
+  {
     "version": "v1.1.8",
     "date": "2025-12-24",
     "changes": [

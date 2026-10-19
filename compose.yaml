@@ -1,0 +1,66 @@
+name: quantumleap
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      DATA_DIR: /app/data
+      PGHOST: db
+      PGDATABASE: quantumleap
+      PGUSER: quantumleap
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.tencent}
+      PUBLIC_ORIGIN: https://${DOMAIN:?Set DOMAIN in .env.tencent}
+      CORS_ORIGINS: https://${DOMAIN}
+      REPLICATE_API_TOKEN: ${REPLICATE_API_TOKEN:-}
+    volumes:
+      - studio_images:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+  db:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: quantumleap
+      POSTGRES_USER: quantumleap
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.tencent}
+    volumes:
+      - studio_database:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U quantumleap -d quantumleap']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging: *logging
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env.tencent}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    logging: *logging
+volumes:
+  studio_images:
+  studio_database:
+  caddy_data:
+  caddy_config:

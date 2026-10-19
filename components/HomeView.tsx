@@ -1,3 +1,4 @@
+import { userStorage } from '../services/browserStorage';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CheckIcon, ChevronDownIcon, CursorIcon, DownloadIcon, EyeIcon, EyeSlashIcon, FitViewIcon, HandIcon, HomeIcon, LayersIcon, PlusIcon, RedoIcon, TextIcon, TrashIcon, UndoIcon, UploadIcon, XIcon, ZoomInIcon, ZoomOutIcon } from './IconComponents';
 import { DEFAULT_REAL_ESRGAN_PARAMS, generateWorkbenchImage, removeWatermark, retouchImageFromBase64, retouchImageFromUrl, taskChatWithGpt5, upscaleImage } from '../services/replicateService';
@@ -61,7 +62,7 @@ const clamp = (value: number, min: number, max: number) => Math.max(min, Math.mi
 
 const readJsonFromLocalStorage = <T,>(key: string, fallback: T): T => {
   try {
-    const raw = localStorage.getItem(key);
+    const raw = userStorage.getItem(key);
     if (!raw) return fallback;
     return JSON.parse(raw) as T;
   } catch {
@@ -71,7 +72,7 @@ const readJsonFromLocalStorage = <T,>(key: string, fallback: T): T => {
 
 const writeJsonToLocalStorage = (key: string, value: unknown) => {
   try {
-    localStorage.setItem(key, JSON.stringify(value));
+    userStorage.setItem(key, JSON.stringify(value));
   } catch {
   }
 };
@@ -260,7 +261,7 @@ const formatProductInfoBlock = (form: ProductForm) => {
 
 export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') => void }> = ({ onStageChange }) => {
   const [stage, setStage] = useState<'init' | 'workbench'>(() => {
-    const raw = localStorage.getItem('ql_home_stage');
+    const raw = userStorage.getItem('ql_home_stage');
     return raw === 'workbench' ? 'workbench' : 'init';
   });
   const [draft, setDraft] = useState('');
@@ -270,7 +271,7 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
   const [productForm, setProductForm] = useState<ProductForm>(() => {
     const stored = readJsonFromLocalStorage<ProductForm | null>('ql_home_product_form', null);
     if (stored) return normalizeProductForm(stored);
-    const legacy = localStorage.getItem('ql_home_product_info') || '';
+    const legacy = userStorage.getItem('ql_home_product_info') || '';
     return normalizeProductForm({ details: legacy, products: [{ id: uuid(), name: '', spec: '', price: '', selected: true }] });
   });
   const [isProductInfoOpen, setIsProductInfoOpen] = useState(false);
@@ -306,7 +307,7 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
   }, []);
 
   const [sessions, setSessions] = useState<ChatSession[]>(() => {
-    const activeId = localStorage.getItem('ql_home_active_session') || null;
+    const activeId = userStorage.getItem('ql_home_active_session') || null;
     const raw = readJsonFromLocalStorage<any[]>('ql_home_sessions', []);
     const legacyCanvas = normalizeCanvasSnapshot(readJsonFromLocalStorage<any>('ql_home_canvas', null));
     const legacyProductForm = normalizeProductForm(readJsonFromLocalStorage<any>('ql_home_product_form', null));
@@ -324,11 +325,11 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
       };
     });
   });
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(() => localStorage.getItem('ql_home_active_session') || null);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(() => userStorage.getItem('ql_home_active_session') || null);
   const [openSessionIds, setOpenSessionIds] = useState<string[]>(() => {
     const raw = readJsonFromLocalStorage<any>('ql_home_open_sessions', null);
     const list = Array.isArray(raw) ? raw.map((v) => String(v)).filter(Boolean) : [];
-    const activeId = localStorage.getItem('ql_home_active_session') || null;
+    const activeId = userStorage.getItem('ql_home_active_session') || null;
     if (activeId && !list.includes(activeId)) return [activeId, ...list];
     return list;
   });
@@ -407,8 +408,8 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
   }, [sessions]);
 
   useEffect(() => {
-    if (activeSessionId) localStorage.setItem('ql_home_active_session', activeSessionId);
-    else localStorage.removeItem('ql_home_active_session');
+    if (activeSessionId) userStorage.setItem('ql_home_active_session', activeSessionId);
+    else userStorage.removeItem('ql_home_active_session');
   }, [activeSessionId]);
 
   useEffect(() => {
@@ -426,7 +427,7 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
   }, [activeSessionId, openSessionIds]);
 
   useEffect(() => {
-    localStorage.setItem('ql_home_stage', stage);
+    userStorage.setItem('ql_home_stage', stage);
   }, [stage]);
 
   useEffect(() => {
@@ -890,22 +891,22 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
     updateMessage
   ]);
 
-  const [panelCollapsed, setPanelCollapsed] = useState(() => localStorage.getItem('ql_home_panel_collapsed') === '1');
-  const [panelWidth, setPanelWidth] = useState(() => Number(localStorage.getItem('ql_home_panel_width')) || 360);
-  const [panelHeight, setPanelHeight] = useState(() => Number(localStorage.getItem('ql_home_panel_height')) || 560);
-  const [chatComposerHeight, setChatComposerHeight] = useState(() => Number(localStorage.getItem('ql_home_chat_composer_height')) || 170);
+  const [panelCollapsed, setPanelCollapsed] = useState(() => userStorage.getItem('ql_home_panel_collapsed') === '1');
+  const [panelWidth, setPanelWidth] = useState(() => Number(userStorage.getItem('ql_home_panel_width')) || 360);
+  const [panelHeight, setPanelHeight] = useState(() => Number(userStorage.getItem('ql_home_panel_height')) || 560);
+  const [chatComposerHeight, setChatComposerHeight] = useState(() => Number(userStorage.getItem('ql_home_chat_composer_height')) || 170);
 
   useEffect(() => {
-    localStorage.setItem('ql_home_panel_collapsed', panelCollapsed ? '1' : '0');
+    userStorage.setItem('ql_home_panel_collapsed', panelCollapsed ? '1' : '0');
   }, [panelCollapsed]);
   useEffect(() => {
-    localStorage.setItem('ql_home_panel_width', String(panelWidth));
+    userStorage.setItem('ql_home_panel_width', String(panelWidth));
   }, [panelWidth]);
   useEffect(() => {
-    localStorage.setItem('ql_home_panel_height', String(panelHeight));
+    userStorage.setItem('ql_home_panel_height', String(panelHeight));
   }, [panelHeight]);
   useEffect(() => {
-    localStorage.setItem('ql_home_chat_composer_height', String(chatComposerHeight));
+    userStorage.setItem('ql_home_chat_composer_height', String(chatComposerHeight));
   }, [chatComposerHeight]);
 
   const widthDragRef = useRef<{ startX: number; startWidth: number } | null>(null);

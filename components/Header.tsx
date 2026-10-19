@@ -1,3 +1,4 @@
+import { userStorage } from '../services/browserStorage';
 
 import React, { useState } from 'react';
 import { EyeIcon, EyeSlashIcon } from './IconComponents';
@@ -9,12 +10,12 @@ export const Header: React.FC<{ hideTitle?: boolean }> = ({ hideTitle }) => {
   const currentVersion = changelogData[0]?.version || 'v1.0.0';
   
   // API Key State
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('replicate_api_token') || '');
+  const [apiKey, setApiKey] = useState(() => userStorage.getItem('replicate_api_token') || '');
   const [isVisible, setIsVisible] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
 
   const handleSaveApiKey = () => {
-    localStorage.setItem('replicate_api_token', apiKey);
+    userStorage.setItem('replicate_api_token', apiKey);
     setIsEditing(false);
     // Optional: Show a toast or feedback? For now, the button disappearing is feedback.
   };

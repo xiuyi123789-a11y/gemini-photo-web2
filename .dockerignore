@@ -1,0 +1,15 @@
+.git
+.trae
+node_modules
+dist
+data
+backups
+.env
+.env.*
+!.env.tencent.example
+*.log
+*.code.javascript
+tests
+docs
+
+.local

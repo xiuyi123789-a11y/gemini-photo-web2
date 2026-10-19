@@ -34,3 +34,12 @@ dist-ssr
 
 # Temporary files
 *.code.javascript
+
+# Tencent runtime credentials and backup archives
+.env.tencent
+.env.tencent.*
+!.env.tencent.example
+/backups/
+
+# All local exports, migration archives and project cache
+/.local/
