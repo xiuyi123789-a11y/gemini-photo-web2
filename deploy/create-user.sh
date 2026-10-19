@@ -16,9 +16,17 @@ if [[ ! -f .env.tencent ]]; then
 fi
 docker_command=(docker)
 if ! docker info >/dev/null 2>&1; then
-    # Authenticate sudo before the password is read, never from its pipe.
-    sudo -v
-    docker_command=(sudo docker)
+    # Check the actual Docker command, respecting existing sudo policy.
+    # Never prompt for sudo inside the application's password input or pipe.
+    if sudo -n docker info >/dev/null 2>&1; then
+        docker_command=(sudo -n docker)
+    else
+        echo 'Cannot access Docker with current permissions.' >&2
+        echo 'Run sudo docker info in this terminal to inspect the error.' >&2
+        echo 'If sudo asks for a password, it needs the Ubuntu SERVER password, not the studio password.' >&2
+        echo 'After successful server authentication, run this helper again. Do not share either password.' >&2
+        exit 1
+    fi
 fi
 trap 'unset password confirmation' EXIT
 while true; do
