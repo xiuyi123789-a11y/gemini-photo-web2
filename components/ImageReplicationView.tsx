@@ -1,295 +1,239 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ArrowLeftRight, ArrowRight, Check, Download, Expand, ImagePlus, Layers, LoaderCircle, Plus, RefreshCw, ScanEye, Settings2, ShieldCheck, Sparkles, Trash2, X, PlugZap } from 'lucide-react';
+import { ArrowLeftRight, Check, Download, Expand, ImagePlus, Layers, LoaderCircle, Plus, RefreshCw, ScanEye, Settings2, ShieldCheck, Sparkles, Trash2, X, PlugZap } from 'lucide-react';
 import { ImageModal } from './ImageModal';
 import { userStorage } from '../services/browserStorage';
-import { startReplication, getReplicationJob, cancelReplicationJob, checkReplicationConnection, type PreserveKey, type ReferenceAngle, type ReplicationInput, type ReplicationJob, type ReplicationKind } from '../services/replicationService';
+import { MAX_REFERENCES, isFinalJob } from '../shared/replication-contract.js';
+import { startAnalysis,startGeneration,getReplicationJob,findReplicationRequest,listActiveJobs,cancelReplicationJob,checkReplicationConnection,getReplicationCapabilities,
+  reviseAnalysis,reviewReplication,reconcileReplication,readOperation,saveOperation,forgetOperation,assertOperation,ownerId,
+  type Operation,type ReplicationJob,type ReferenceAngle,type PreserveKey,type Point,type EditMask,type JobResult } from '../services/replicationService';
 import './ImageReplicationView.css';
 
-type Asset = { id: string; file: File; preview: string; width: number; height: number; angle: ReferenceAngle };
-type Result = { url: string; source: string | null; resolution: string; time: number };
-const angleLabels: Record<ReferenceAngle,string> = { front:'正面', side:'侧面', back:'背面', detail:'细节', other:'其他' };
-const preserveLabels: Record<PreserveKey,string> = { background:'背景与道具', composition:'构图与位置', lighting:'光线与阴影', perspective:'角度与透视' };
-const storageKey = 'replication_active_job';
-const terminal = (job: ReplicationJob) => ['succeeded','failed','canceled'].includes(job.status);
-const message = (error: unknown) => error instanceof Error ? error.message : '操作未完成，请重试';
-const wait = () => new Promise(resolve => window.setTimeout(resolve, 1600));
-
-export const ImageReplicationView: React.FC = () => {
-  const [source,setSource] = useState<Asset|null>(null);
-  const [references,setReferences] = useState<Asset[]>([]);
-  const [target,setTarget] = useState('');
-  const [analysis,setAnalysis] = useState('');
-  const [preserve,setPreserve] = useState<PreserveKey[]>(Object.keys(preserveLabels) as PreserveKey[]);
-  const [resolution,setResolution] = useState('2K'), [count,setCount] = useState(1);
-  const [notes,setNotes] = useState('');
-  const [job,setJob] = useState<ReplicationJob|null>(null);
-  const [working,setWorking] = useState(false), [reading,setReading] = useState(false);
-  const [disconnected,setDisconnected] = useState(false), [connecting,setConnecting] = useState(false);
-  const [error,setError] = useState(''), [notice,setNotice] = useState('');
-  const [results,setResults] = useState<Result[]>([]), [selected,setSelected] = useState<Result|null>(null);
-  const [mode,setMode] = useState<'original'|'result'|'compare'>('original'), [split,setSplit] = useState(50);
-  const [enlarged,setEnlarged] = useState<string|null>(null);
-  const [dragging,setDragging] = useState<'source'|'refs'|null>(null);
-  const [region,setRegion] = useState<ReplicationInput['region']>(null), [selecting,setSelecting] = useState(false);
-  const regionAnchor=useRef<{x:number;y:number}|null>(null);
-  const sourceInput = useRef<HTMLInputElement>(null), refsInput = useRef<HTMLInputElement>(null);
-  const objectUrls = useRef(new Set<string>()), mounted = useRef(true), tracking = useRef(0);
-  const activeId = useRef<string|null>(null), operationSource = useRef<string|null>(null);
-  const locked = working || reading;
-
-  const invalidate = (clearHistory=false) => {
-    setSelected(null);setMode('original');setError('');setNotice('');
-    if(clearHistory)setResults([]);
-  };
-  const free = (asset: Asset|null) => {
-    if(asset){URL.revokeObjectURL(asset.preview);objectUrls.current.delete(asset.preview);}
-  };
-  const applyJob = (next: ReplicationJob) => {
+type Material={id:string;file:File|null;preview:string;width:number;height:number;angle:ReferenceAngle};
+type Candidate={job:ReplicationJob;result:JobResult};
+const angles:Record<ReferenceAngle,string>={front:'正面',side:'侧面',back:'背面',detail:'细节',other:'其他'};
+const locks:Record<PreserveKey,string>={background:'背景与道具',composition:'构图与位置',lighting:'光线与阴影',perspective:'角度与透视'};
+const stages:Record<string,string>={queued:'等待提交',submitting:'正在提交',running:'模型运行中',postprocessing:'正在检查结果',submission_unknown:'提交待核对',cancel_requested:'正在请求取消',cancel_unknown:'取消未确认',completed_needs_review:'待人工复核',quality_failed:'未通过结果检查',succeeded:'已完成',failed:'执行失败',canceled:'远端已取消'};
+const issue=(e:unknown)=>e instanceof Error?e.message:'操作未完成，请重试查询。';
+const qualityMessage:Record<string,string>={HUMAN_PRODUCT_IDENTITY_REVIEW_REQUIRED:'需要人工核对新产品结构、配色与标识。',SELECTED_INSTANCE_UNCHANGED:'至少一个选中对象几乎没有变化，不能确认替换成功。',OUTPUT_ASPECT_MISMATCH:'模型结果与原图比例不一致，未强行拉伸合成。',POSSIBLE_LAYOUT_DRIFT:'模型候选的场景布局可能偏移，请重点检查位置与遮挡。',OUTPUT_INVALID:'未获得可用的图像输出。'};
+export const ImageReplicationView:React.FC=()=>{
+  const [source,setSource]=useState<Material|null>(null),[references,setReferences]=useState<Material[]>([]),[target,setTarget]=useState('');
+  const [analysisJob,setAnalysisJob]=useState<ReplicationJob|null>(null),[generationJob,setGenerationJob]=useState<ReplicationJob|null>(null);
+  const [analysisText,setAnalysisText]=useState(''),[analysisConfirmed,setAnalysisConfirmed]=useState(false),[fingerprint,setFingerprint]=useState('');
+  const [selectedIds,setSelectedIds]=useState<string[]>([]),[masks,setMasks]=useState<EditMask[]>([]),[protectMasks,setProtectMasks]=useState<Point[][]>([]);
+  const [drawing,setDrawing]=useState<'edit'|'protect'|null>(null),[drawInstance,setDrawInstance]=useState(''),[points,setPoints]=useState<Point[]>([]);
+  const [preserve,setPreserve]=useState<PreserveKey[]>(Object.keys(locks) as PreserveKey[]),[notes,setNotes]=useState(''),[count,setCount]=useState(1),[resolution,setResolution]=useState('2K');
+  const [caps,setCaps]=useState({enabled:true,maxReferences:MAX_REFERENCES,counts:[1],resolutions:['1K','2K']});
+  const [pendingKind,setPendingKind]=useState<'analysis'|'generation'|null>(null),[reading,setReading]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
+  const [mode,setMode]=useState<'original'|'raw'|'result'|'compare'>('original'),[candidate,setCandidate]=useState<Candidate|null>(null),[split,setSplit]=useState(50),[enlarged,setEnlarged]=useState<string|null>(null);
+  const [costConfirmed,setCostConfirmed]=useState(false),[reviewChecks,setReviewChecks]=useState<Record<string,boolean>>({}),[reconcileId,setReconcileId]=useState('');
+  const sourceInput=useRef<HTMLInputElement>(null),refsInput=useRef<HTMLInputElement>(null),mounted=useRef(true),urls=useRef(new Set<string>()),operationBusy=useRef(false);
+  const currentFingerprint=useRef(''),loops=useRef({analysis:0,generation:0});
+  const latestRevisions=useRef(new Map<string,number>());
+  const restoredInputs=useRef(new Set<string>());
+  const activeJob=[analysisJob,generationJob].find(j=>j&&!isFinalJob(j));
+  const locked=reading||!!pendingKind||!!activeJob;
+  const instances=analysisJob?.analysis?.data?.scene?.old_product_instances||[];
+  const validAnalysis=analysisJob?.status==='succeeded'&&analysisJob.inputFingerprint===fingerprint&&!!analysisJob.analysis?.data;
+  const materialFrom=(a:any):Material=>({id:a.name,file:null,preview:a.url,width:a.width,height:a.height,angle:a.angle||'other'});
+  function apply(next:ReplicationJob,restore=false){
     if(!mounted.current)return;
-    setJob(next);
-    if(!terminal(next)){activeId.current=next.id;userStorage.setItem(storageKey,next.id);}
-    if(next.kind==='analysis' && next.status==='succeeded' && next.analysis)setAnalysis(next.analysis);
-    if(next.images.length) {
-      const items = next.images.map(url=>({url,source:operationSource.current,resolution:next.resolution || '2K',time:next.createdAt}));
-      setResults(previous=>[...items,...previous.filter(item=>!next.images.includes(item.url))].slice(0,8));
-      const latest=items[items.length-1];setSelected(latest);
-      setMode(latest.source?'compare':'result');setSplit(50);
+    if(next.revision<(latestRevisions.current.get(next.id)??-1))return;
+    latestRevisions.current.set(next.id,next.revision);
+    if(next.kind==='analysis'){
+      setAnalysisJob(next);
+      if(next.status==='succeeded'&&next.analysis?.data){setAnalysisText(next.analysis.text);setAnalysisConfirmed(false);}
+    }else{
+      setGenerationJob(next);
+      if(next.results.length){setCandidate({job:next,result:next.results[next.results.length-1]});setMode(next.results.at(-1)?.composite?'compare':'raw');}
     }
-    if(terminal(next)){
-      userStorage.removeItem(storageKey);activeId.current=null;
-      if(next.error)setError(next.error);
-      if(next.status==='canceled')setNotice('任务已取消，已完成的图片仍可下载。');
-      if(next.status==='succeeded')setNotice(next.kind==='analysis'?'产品分析完成，可编辑后开始复刻。':'复刻完成，请对比检查产品结构、标识与场景细节。');
+    if(restore&&!currentFingerprint.current){
+      currentFingerprint.current=next.inputFingerprint;setFingerprint(next.inputFingerprint);
+      setSource(materialFrom(next.source));setReferences(next.references.map(materialFrom));setTarget(next.target);
     }
-  };
-  async function track(id: string): Promise<ReplicationJob|null> {
-    const run=++tracking.current;let failures=0;
-    while(mounted.current && run===tracking.current){
-      try {
-        const next=await getReplicationJob(id);
-        if(!mounted.current || run!==tracking.current)return null;
-        failures=0;setDisconnected(false);applyJob(next);
-        if(terminal(next))return next;
-      } catch(err) {
-        if(++failures>=3){
-          if(mounted.current){setDisconnected(true);setError('连接中断，后台任务可能仍在运行。请点击“重新连接”，不要重复提交。');}
-          return null;
-        }
-      }
-      await wait();
+    if(restore&&next.kind==='generation'&&next.input&&currentFingerprint.current===next.inputFingerprint&&!restoredInputs.current.has(next.id)){
+      setSelectedIds(next.input.selectedInstances);setMasks(next.input.masks);setProtectMasks(next.input.protectMasks);restoredInputs.current.add(next.id);
     }
-    return null;
+    if(next.kind==='analysis'&&next.status==='succeeded'&&(!currentFingerprint.current||currentFingerprint.current===next.inputFingerprint)){
+      currentFingerprint.current=next.inputFingerprint;setFingerprint(next.inputFingerprint);
+      // Masks always use the server's orientation-corrected source, not the browser thumbnail dimensions.
+      setSource(previous=>({...materialFrom(next.source),file:previous?.file||null}));
+      setReferences(previous=>next.references.map((a,i)=>({...materialFrom(a),file:previous[i]?.file||null})));
+    }
+    if(next.error)setError(next.error+' ['+next.errorCode+']');else setError('');
+    if(isFinalJob(next))setNotice(next.kind==='analysis'?'产品分析已结束。请核对文字、选择对象并绘制范围；不会自动生图。':
+      next.status==='completed_needs_review'?'候选已生成，需核对新产品身份与场景后再确认合格。':stages[next.status]||next.status);
+  }
+  async function track(operation:Operation){
+    const serial=++loops.current[operation.kind];
+    while(mounted.current&&serial===loops.current[operation.kind]){
+      try{
+        const job=operation.jobId?await getReplicationJob(operation.jobId):await findReplicationRequest(operation.requestId);
+        assertOperation(operation,job);operation={...operation,jobId:job.id};saveOperation(operation);apply(job,true);
+        setPendingKind(null);
+        if(isFinalJob(job)||job.recoveryErrorCode||['submission_unknown','cancel_unknown'].includes(job.status))return;
+      }catch(e){if(mounted.current){setError(issue(e));setNotice('后台可能仍在运行。请重新连接查询，勿重复提交。');}return;}
+      await new Promise(r=>window.setTimeout(r,1600));
+    }
+  }
+  async function restore(kind:'analysis'|'generation'){
+    let op=readOperation(kind);
+    if(!op){
+      const active=await listActiveJobs(kind);const job=active.jobs[0];if(!job)return;
+      op={kind,jobId:job.id,requestId:job.requestId,inputFingerprint:job.inputFingerprint,ownerId:ownerId()};saveOperation(op);
+    }
+    await track(op);
   }
   useEffect(()=>{
     mounted.current=true;
-    const id=userStorage.getItem(storageKey);
-    if(id) {
-      activeId.current=id;setWorking(true);setNotice('正在恢复上次任务…');
-      void getReplicationJob(id).then(async next=>{
-        if(!mounted.current)return;
-        applyJob(next);
-        if(!terminal(next))await track(id);
-        if(mounted.current && !activeId.current)setWorking(false);
-      }).catch(err=>{
-        if(!mounted.current)return;
-        // An expired task can be cleared; network failures must remain recoverable.
-        if(message(err).includes('任务不存在')){userStorage.removeItem(storageKey);activeId.current=null;setWorking(false);}
-        else setDisconnected(true);
-        setError(message(err));
-      });
-    }
-    return ()=>{mounted.current=false;tracking.current++;for(const url of objectUrls.current)URL.revokeObjectURL(url);objectUrls.current.clear();};
+    void getReplicationCapabilities().then(c=>mounted.current&&setCaps(c)).catch(()=>{});
+    void (async()=>{try{await restore('analysis');await restore('generation');}catch(e){if(mounted.current)setError(issue(e));}})();
+    if(userStorage.getItem('replication_active_job'))setNotice('检测到旧版任务标识，未自动关联到新版分析；历史费用与任务需单独核对。');
+    return()=>{mounted.current=false;loops.current.analysis++;loops.current.generation++;urls.current.forEach(u=>URL.revokeObjectURL(u));};
   },[]);
-  async function readImage(file: File): Promise<Asset> {
-    if(!['image/jpeg','image/png','image/webp'].includes(file.type))throw new Error('仅支持 JPG、PNG、WEBP 图片。');
-    if(file.size>20*1024*1024)throw new Error('单张图片不能超过 20 MB。');
-    const preview=URL.createObjectURL(file), image=new Image();
-    try {
-      await new Promise<void>((resolve,reject)=>{image.onload=()=>resolve();image.onerror=()=>reject(new Error('图片无法读取，请确认文件未损坏。'));image.src=preview;});
-      if(image.naturalWidth*image.naturalHeight>32*1024*1024)throw new Error('图片最多支持 3200 万像素，请缩小后上传。');
-      if(!mounted.current)throw new Error('页面已关闭');
-      objectUrls.current.add(preview);
-      return {id:crypto.randomUUID(),file,preview,width:image.naturalWidth,height:image.naturalHeight,angle:'other'};
-    } catch(err){URL.revokeObjectURL(preview);throw err;}
+  function stale(){
+    setAnalysisJob(null);setGenerationJob(null);setAnalysisText('');setAnalysisConfirmed(false);setFingerprint('');currentFingerprint.current='';
+    setSelectedIds([]);setMasks([]);setProtectMasks([]);setDrawing(null);setPoints([]);setCandidate(null);setMode('original');setCostConfirmed(false);setError('');setNotice('素材已改变，请重新分析。');
+    forgetOperation('analysis');forgetOperation('generation');
   }
-  async function upload(files: FileList|File[], kind: 'source'|'refs') {
-    if(locked || !files.length)return;
-    setReading(true);setError('');const accepted:Asset[]=[];
-    try {
-      const candidates=Array.from(files);
-      if(kind==='refs' && references.length+candidates.length>12)throw new Error('最多上传 12 张产品参考图。');
-      if(kind==='source' && candidates.length>1)throw new Error('场景原图每次请选择 1 张。');
-      const existingBytes=kind==='source'?references.reduce((sum,ref)=>sum+ref.file.size,0):
-        (source?.file.size||0)+references.reduce((sum,ref)=>sum+ref.file.size,0);
-      if(existingBytes+candidates.reduce((sum,file)=>sum+file.size,0)>32*1024*1024)throw new Error('原图和参考图合计不能超过 32 MB，请压缩图片后上传。');
-      for(const file of candidates)accepted.push(await readImage(file));
-      invalidate(true);setAnalysis('');
-      if(kind==='source'){free(source);setSource(accepted[0]);setRegion(null);setSelecting(false);}
-      else setReferences(previous=>[...previous,...accepted]);
-    } catch(err){accepted.forEach(free);if(mounted.current)setError(message(err));}
-    finally{if(mounted.current)setReading(false);}
-  }
-  function inputData(description=analysis): ReplicationInput {
-    if(!source)throw new Error('请先上传场景原图。');
-    if(!references.length)throw new Error('请至少上传一张产品参考图。');
-    return {source:source.file,references:references.map(ref=>({file:ref.file,angle:ref.angle})),target:target.trim(),analysis:description,preserve,resolution,count,notes,region};
-  }
-  async function run(kind: ReplicationKind, input: ReplicationInput) {
-    const next=await startReplication(kind,input);
-    if(!mounted.current)return null;
-    activeId.current=next.id;userStorage.setItem(storageKey,next.id);applyJob(next);
-    return track(next.id);
-  }
-  async function start(kind: ReplicationKind) {
-    if(locked || activeId.current)return;
-    try {
-      let input=inputData();
-      if(kind==='generation'&&!region){setMode('original');setSelecting(true);throw new Error('请先在原图上框选完整产品及必要的接触阴影，区域外将保持原图。');}
-      setWorking(true);setDisconnected(false);setError('');setNotice('正在提交任务…');
-      setSelected(null);setMode('original');setJob(null);operationSource.current=source?.preview||null;
-      if(kind==='analysis')await run('analysis',input);
-      else {
-        if(!input.analysis.trim()){
-          const analyzed=await run('analysis',input);
-          if(!analyzed || analyzed.status!=='succeeded' || !analyzed.analysis)return;
-          input={...input,analysis:analyzed.analysis};
-        }
-        setNotice('');await run('generation',input);
-      }
-    } catch(err){
-      if(mounted.current){
-        setError(message(err));
-        const pending=userStorage.getItem(storageKey);
-        if(pending){activeId.current=pending;setDisconnected(true);}
-      }
-    }
-    finally {if(mounted.current && !activeId.current)setWorking(false);}
-  }
-  async function reconnect() {
-    const id=activeId.current;if(!id)return;
-    setError('');setDisconnected(false);setWorking(true);
-    // Direct read distinguishes expiration from a temporary outage.
-    try {
-      const next=await getReplicationJob(id);applyJob(next);
-      if(!terminal(next))await track(id);
-    } catch(err){
-      if(message(err).includes('任务不存在')){userStorage.removeItem(storageKey);activeId.current=null;}
-      else setDisconnected(true);
-      setError(message(err));
-    } finally {if(!activeId.current)setWorking(false);}
-  }
-  async function cancel() {
-    if(!activeId.current)return;
-    try {const next=await cancelReplicationJob(activeId.current);applyJob(next);if(disconnected)void reconnect();}
-    catch(err){setError('取消请求未确认：'+message(err));}
-  }
-  function clear() {
-    if(locked || !window.confirm('清空本次素材、产品描述和预览记录？电脑上的原文件不会被删除。'))return;
-    objectUrls.current.forEach(url=>URL.revokeObjectURL(url));objectUrls.current.clear();
-    invalidate(true);setSource(null);setReferences([]);setTarget('');setAnalysis('');setNotes('');setJob(null);setRegion(null);setSelecting(false);
-  }
-  async function checkConnection() {
-    setConnecting(true);setError('');setNotice('');
-    try{await checkReplicationConnection();setNotice('分析与生图模型均可访问。此检查不产生生图任务。');}
-    catch(err){setError(message(err));}finally{setConnecting(false);}
-  }
-  async function download(result: Result) {
+  async function upload(files:FileList|File[],kind:'source'|'refs'){
+    if(locked||operationBusy.current||!files.length)return;setReading(true);setError('');
     try{
-      const response=await fetch(result.url,{credentials:'same-origin'});
-      if(!response.ok)throw new Error('下载失败，请检查登录状态后重试。');
-      const url=URL.createObjectURL(await response.blob()),link=document.createElement('a');
-      link.href=url;link.download='图像复刻_'+result.time+'_'+result.resolution+'.png';link.click();
-      window.setTimeout(()=>URL.revokeObjectURL(url),1000);
-    }catch(err){setError(message(err));}
+      const list=Array.from(files);
+      if((kind==='source'&&list.length!==1)||(kind==='refs'&&references.length+list.length>caps.maxReferences))throw new Error(`原图须1张；新产品参考最多${caps.maxReferences}张。`);
+      const total=list.reduce((n,f)=>n+f.size,0)+(kind==='source'?references.reduce((n,r)=>n+(r.file?.size||0),0):(source?.file?.size||0)+references.reduce((n,r)=>n+(r.file?.size||0),0));
+      if(total>32*1024*1024)throw new Error('图片总计不能超过32 MB。');
+      const added:Material[]=[];
+      for(const file of list){
+        if(!['image/jpeg','image/png','image/webp'].includes(file.type)||file.size>20*1024*1024)throw new Error('支持 JPG/PNG/WEBP，单张最多20 MB。');
+        const url=URL.createObjectURL(file);urls.current.add(url);const img=new Image();
+        await new Promise<void>((resolve,reject)=>{img.onload=()=>resolve();img.onerror=()=>reject(new Error('图片无法读取。'));img.src=url;});
+        if(img.naturalWidth*img.naturalHeight>32*1024*1024)throw new Error('图片最多支持3200万像素。');
+        added.push({id:crypto.randomUUID(),file,preview:url,width:img.naturalWidth,height:img.naturalHeight,angle:'other'});
+      }
+      stale();if(kind==='source')setSource(added[0]);else setReferences(prev=>[...prev,...added]);
+    }catch(e){setError(issue(e));}finally{setReading(false);}
   }
-  const drop = (kind:'source'|'refs') => ({
-    onDragOver:(event:React.DragEvent)=>{event.preventDefault();if(!locked)setDragging(kind);},
-    onDragLeave:(event:React.DragEvent)=>{if(!event.currentTarget.contains(event.relatedTarget as Node))setDragging(null);},
-    onDrop:(event:React.DragEvent)=>{event.preventDefault();setDragging(null);void upload(event.dataTransfer.files,kind);}
-  });
-  const regionPoint=(event:React.PointerEvent<SVGSVGElement>)=>{
-    const transform=event.currentTarget.getScreenCTM();
-    if(!transform||!source)return null;
-    const point=new DOMPoint(event.clientX,event.clientY).matrixTransform(transform.inverse());
-    return {x:Math.min(1,Math.max(0,point.x/source.width)),y:Math.min(1,Math.max(0,point.y/source.height))};
-  };
-  const regionPointer={
-    onPointerDown:(event:React.PointerEvent<SVGSVGElement>)=>{
-      if(!selecting||locked||event.button!==0)return;
-      const point=regionPoint(event);if(!point)return;
-      event.preventDefault();event.currentTarget.setPointerCapture(event.pointerId);
-      invalidate();regionAnchor.current=point;setRegion(null);
-    },
-    onPointerMove:(event:React.PointerEvent<SVGSVGElement>)=>{
-      const anchor=regionAnchor.current,point=regionPoint(event);if(!anchor||!point)return;
-      setRegion({x:Math.min(anchor.x,point.x),y:Math.min(anchor.y,point.y),width:Math.abs(anchor.x-point.x),height:Math.abs(anchor.y-point.y)});
-    },
-    onPointerUp:(event:React.PointerEvent<SVGSVGElement>)=>{
-      const anchor=regionAnchor.current,point=regionPoint(event);if(!anchor||!point)return;
-      regionAnchor.current=null;setSelecting(false);
-      const next={x:Math.min(anchor.x,point.x),y:Math.min(anchor.y,point.y),width:Math.abs(anchor.x-point.x),height:Math.abs(anchor.y-point.y)};
-      if(next.width<.01||next.height<.01){setRegion(null);setError('框选范围太小，请拖动覆盖完整产品。');}
-      else {setRegion(next);setNotice('替换区域已锁定。框外将保留原图，完整产品和必要的阴影应包含在框内。');}
-    },
-    onPointerCancel:()=>{regionAnchor.current=null;setSelecting(false);setRegion(null);}
-  };
-  const resultSource=selected?.source || source?.preview;
-  const previewImage=mode==='result'?selected?.url:resultSource;
-  const active=job && !terminal(job);
+  async function analyze(){
+    if(locked||operationBusy.current)return;
+    if(!source?.file||!references.length||references.some(r=>!r.file)){setError('请上传场景原图和产品参考。已恢复的分析可直接确认并复刻；重新分析需重新上传素材。');return;}
+    operationBusy.current=true;setPendingKind('analysis');setError('');setNotice('仅执行 o4-mini 产品文字分析，不会生成图片。');
+    try{
+      setAnalysisConfirmed(false);setMasks([]);setProtectMasks([]);setSelectedIds([]);
+      const next=await startAnalysis(source.file,references.map(r=>({file:r.file!,angle:r.angle})),target);
+      currentFingerprint.current=next.inputFingerprint;setFingerprint(next.inputFingerprint);apply(next);
+      const op=readOperation('analysis');if(op)await track(op);
+    }catch(e){setError(issue(e));if(!readOperation('analysis'))setPendingKind(null);}
+    finally{operationBusy.current=false;}
+  }
+  async function confirmAnalysis(){
+    if(!validAnalysis||!analysisJob)return;operationBusy.current=true;setReading(true);setError('');
+    try{const next=await reviseAnalysis(analysisJob,analysisText);setAnalysisJob(next);setAnalysisText(next.analysis!.text);setAnalysisConfirmed(true);setNotice('分析已确认。选择要替换的对象，并分别绘制编辑范围。');}
+    catch(e){setError(issue(e));}finally{operationBusy.current=false;setReading(false);}
+  }
+  async function generate(){
+    if(locked||operationBusy.current)return;
+    if(!validAnalysis||!analysisConfirmed||!analysisJob){setError('请先完成并确认产品分析；此按钮不会自动分析或生图。');return;}
+    if(!selectedIds.length||selectedIds.some(id=>!masks.some(m=>m.instanceId===id))){setError('请明确选择替换对象，为每个对象绘制多边形范围。');return;}
+    if(!costConfirmed){setError(`请确认本次会请求${count}个图像预测，费用以供应商记录为准。`);return;}
+    operationBusy.current=true;setPendingKind('generation');setError('');setReviewChecks({});setCostConfirmed(false);
+    try{
+      const next=await startGeneration({inputFingerprint:fingerprint,analysisJobId:analysisJob.id,analysisRevisionHash:analysisJob.analysis!.revisionHash,
+        selectedInstances:selectedIds,masks:masks.filter(m=>selectedIds.includes(m.instanceId)),protectMasks,
+        maskSpace:{width:analysisJob.source.width,height:analysisJob.source.height,sourceHash:analysisJob.source.sha256},
+        resolution,count,preserve,notes,confirmedPredictions:count});
+      apply(next);const op=readOperation('generation');if(op)await track(op);
+    }catch(e){setError(issue(e));if(!readOperation('generation'))setPendingKind(null);}
+    finally{operationBusy.current=false;}
+  }
+  function selectInstance(id:string,checked:boolean){setSelectedIds(ids=>checked?[...ids,id]:ids.filter(i=>i!==id));setDrawing(null);setPoints([]);setCostConfirmed(false);}
+  function beginDrawing(kind:'edit'|'protect',id=''){setMode('original');setDrawing(kind);setDrawInstance(id);setPoints([]);setError('');}
+  function finishDrawing(){
+    if(points.length<3){setError('至少点击3个顶点再完成选区。');return;}
+    if(drawing==='edit')setMasks(prev=>[...prev.filter(m=>m.instanceId!==drawInstance),{instanceId:drawInstance,points}]);
+    if(drawing==='protect')setProtectMasks(prev=>[...prev,points]);
+    setPoints([]);setDrawing(null);setCostConfirmed(false);
+  }
+  function point(event:React.PointerEvent<SVGSVGElement>){
+    if(!drawing||locked||!source)return;const matrix=event.currentTarget.getScreenCTM();if(!matrix)return;
+    const p=new DOMPoint(event.clientX,event.clientY).matrixTransform(matrix.inverse());
+    setPoints(prev=>prev.length<200?[...prev,{x:Math.min(1,Math.max(0,p.x/source.width)),y:Math.min(1,Math.max(0,p.y/source.height))}]:prev);
+  }
+  async function cancel(){if(!activeJob)return;try{const next=await cancelReplicationJob(activeJob.id);apply(next);const op=readOperation(next.kind);if(op)await track(op);}catch(e){setError(issue(e));}}
+  async function reconnect(){setError('');try{await Promise.all([restore('analysis'),restore('generation')]);}catch(e){setError(issue(e));}}
+  async function reconcile(){if(!activeJob||!reconcileId)return;try{const next=await reconcileReplication(activeJob.id,reconcileId.trim());apply(next);setReconcileId('');const op=readOperation(next.kind);if(op)await track(op);}catch(e){setError(issue(e));}}
+  async function review(decision:'accept'|'reject'){
+    if(!candidate)return;try{const next=await reviewReplication(candidate.job.id,decision,reviewChecks);apply(next);setCandidate({job:next,result:next.results.at(-1)!});}catch(e){setError(issue(e));}
+  }
+  async function download(url:string,label:string){try{const response=await fetch(url,{credentials:'same-origin'});if(!response.ok)throw new Error('下载失败。');
+    const u=URL.createObjectURL(await response.blob()),a=document.createElement('a');a.href=u;a.download=`图像复刻_${label}_${Date.now()}.png`;a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);}catch(e){setError(issue(e));}}
+  const originalUrl=candidate&&mode!=='original'?candidate.job.source.url:source?.preview;
+  const preview=mode==='raw'?candidate?.result.raw.url:mode==='result'?candidate?.result.composite?.url:originalUrl;
+  const polygonPoints=(p:Point[])=>p.map(v=>`${v.x*(source?.width||1)},${v.y*(source?.height||1)}`).join(' ');
+  const generationReady=validAnalysis&&analysisConfirmed&&!locked&&caps.enabled;
   return <section className="rp-view" aria-label="图像复刻工作台">
-    <div className="rp-heading"><div><h1>图像复刻 <span>产品场景替换</span></h1><p>保留好场景，让画面里的主角换成你的产品。</p></div>
-      <div className="rp-actions"><button className="rp-button" onClick={checkConnection} disabled={connecting||locked}>{connecting?<LoaderCircle className="rp-spin"/>:<PlugZap/>}检查连接</button><button className="rp-button rp-primary" onClick={()=>start('generation')} disabled={locked}><Sparkles/>开始复刻</button></div>
-    </div>
-    <div className="rp-workflow"><span>01 上传场景原图</span><ArrowRight/><span>02 添加产品参考</span><ArrowRight/><span>03 分析并复刻</span><small>o4-mini 分析 · Nano Banana 2 生图</small></div>
+    <div className="rp-heading"><div><h1>图像复刻 <span>产品场景替换</span></h1><p>先分析并确认产品，再明确替换范围。每一步独立执行。</p></div>
+      <button className="rp-button" disabled={locked} onClick={async()=>{try{await checkReplicationConnection();setNotice('两模型元数据可访问，未创建预测任务。');}catch(e){setError(issue(e));}}}><PlugZap/>检查连接</button></div>
+    <div className="rp-workflow"><span>01 上传素材</span><span>02 分析并确认</span><span>03 选择对象与范围</span><span>04 复刻与审核</span></div>
+    {!caps.enabled&&<div className="rp-message">新任务入口已关闭，现有任务仍可查询。</div>}
     {(error||notice)&&<div className={'rp-message '+(error?'rp-error':'')} role={error?'alert':'status'}>{error||notice}</div>}
-    {disconnected&&<button className="rp-button" onClick={reconnect}><RefreshCw/>重新连接后台任务</button>}
-    <div className="rp-layout">
-      <section className="rp-card rp-materials">
-        <div className="rp-card-title"><h2><Layers/>输入素材</h2><button className="rp-text" onClick={clear} disabled={locked}><Trash2/>清空</button></div>
-        <div className="rp-section-label"><b>01</b>场景原图<small>1 张</small></div>
-        <div className={'rp-source '+(dragging==='source'?'rp-drag':'')} {...drop('source')}>
-          <button onClick={()=>sourceInput.current?.click()} disabled={locked} aria-label="上传或更换场景原图">
-            {source?<><img src={source.preview} alt="场景原图缩略图"/><span className="rp-upload-overlay">点击更换原图</span></>:<span className="rp-empty-upload"><ImagePlus/><strong>拖入原图，或点击上传</strong><small>场景图、海报或其他产品图片</small></span>}
-          </button>
-          <input ref={sourceInput} type="file" accept="image/jpeg,image/png,image/webp" aria-label="上传场景原图" hidden onChange={event=>{if(event.target.files)void upload(event.target.files,'source');event.target.value='';}}/>
-        </div>
-        {source&&<div className="rp-file-meta"><span title={source.file.name}>{source.file.name}</span><small>{source.width} × {source.height}</small><button aria-label="移除原图" disabled={locked} onClick={()=>{invalidate(true);setAnalysis('');free(source);setSource(null);setRegion(null);setSelecting(false);}}><X/></button></div>}
-        <div className="rp-section-label"><b>02</b>你的产品参考图<small>{references.length} / 12 张</small></div>
-        <div className={'rp-references '+(dragging==='refs'?'rp-drag':'')} {...drop('refs')}>
-          {references.map((ref,index)=><div className="rp-reference" key={ref.id}><button onClick={()=>setEnlarged(ref.preview)} aria-label={'放大参考图 '+(index+1)}><img src={ref.preview} alt={'产品参考图 '+(index+1)}/></button><button className="rp-remove" disabled={locked} aria-label={'删除参考图 '+(index+1)} onClick={()=>{invalidate(true);setAnalysis('');free(ref);setReferences(previous=>previous.filter(item=>item.id!==ref.id));}}><X/></button><select aria-label={'参考图 '+(index+1)+' 的角度'} value={ref.angle} disabled={locked} onChange={event=>{invalidate(true);setAnalysis('');setReferences(previous=>previous.map(item=>item.id===ref.id?{...item,angle:event.target.value as ReferenceAngle}:item));}}>{Object.entries(angleLabels).map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></div>)}
-          {references.length<12&&<button className="rp-add-ref" disabled={locked} onClick={()=>refsInput.current?.click()}><Plus/><span>添加图片</span></button>}
-          <input ref={refsInput} type="file" accept="image/jpeg,image/png,image/webp" multiple aria-label="上传多张产品参考图" hidden onChange={event=>{if(event.target.files)void upload(event.target.files,'refs');event.target.value='';}}/>
-        </div>
-        <p className="rp-hint">上传同一产品的正面、侧面、背面及细节。支持 JPG / PNG / WEBP；单张 20 MB，合计 32 MB。</p>
-        <div className="rp-section-label"><b>03</b>产品特征<small>可编辑</small></div>
-        <div className="rp-analysis-title"><ScanEye/>o4-mini 产品分析</div>
-        <textarea className="rp-analysis" aria-label="产品特征分析" value={analysis} maxLength={16000} disabled={locked} onChange={event=>{invalidate();setAnalysis(event.target.value);}} placeholder="综合多角度图分析产品的结构、材质、颜色、标识及与原场景的关系。"/>
-        <button className="rp-button rp-wide" disabled={locked} onClick={()=>start('analysis')}>{working&&job?.kind==='analysis'?<LoaderCircle className="rp-spin"/>:<ScanEye/>}{working&&job?.kind==='analysis'?'AI 正在分析产品…':analysis?'重新分析产品':'分析产品特征'}</button>
-        <p className="rp-hint">{source&&references.length?'已添加场景原图和 '+references.length+' 张产品参考图，可直接分析。':'上传场景原图和产品参考图，即可由 AI 分析特征。'}无需先手填产品描述或框选。开始复刻时需框选替换区域。</p>
+    <div className="rp-layout"><section className="rp-card rp-materials">
+      <div className="rp-card-title"><h2><Layers/>输入素材</h2><button className="rp-text" disabled={locked} onClick={()=>{if(window.confirm('清空本次素材与编辑？已保存的任务不会删除。')){stale();setSource(null);setReferences([]);setTarget('');}}}><Trash2/>清空</button></div>
+      <div className="rp-section-label"><b>01</b>场景原图</div>
+      <div className="rp-source" onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();void upload(e.dataTransfer.files,'source');}}>
+        <button disabled={locked} onClick={()=>sourceInput.current?.click()} aria-label="上传场景原图">{source?<img src={source.preview} alt="场景原图缩略图"/>:<span className="rp-empty-upload"><ImagePlus/>上传场景原图</span>}</button>
+        <input ref={sourceInput} type="file" hidden accept="image/jpeg,image/png,image/webp" onChange={e=>{if(e.target.files)void upload(e.target.files,'source');e.target.value='';}}/></div>
+      {source&&<p className="rp-hint">{source.width} × {source.height} · {source.file?'本地上传':'已恢复的服务器素材'}</p>}
+      <div className="rp-section-label"><b>02</b>新产品多角度参考<small>{references.length}/{caps.maxReferences}</small></div>
+      <div className="rp-references" onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();void upload(e.dataTransfer.files,'refs');}}>
+        {references.map((r,i)=><div className="rp-reference" key={r.id}><button onClick={()=>setEnlarged(r.preview)}><img src={r.preview} alt={`产品参考${i+1}`}/></button><button className="rp-remove" disabled={locked} aria-label={`移除参考${i+1}`} onClick={()=>{stale();setReferences(list=>list.filter(item=>item.id!==r.id));}}><X/></button><select aria-label={`参考${i+1}角度`} disabled={locked} value={r.angle} onChange={e=>{stale();setReferences(list=>list.map(item=>item.id===r.id?{...item,angle:e.target.value as ReferenceAngle}:item));}}>{Object.entries(angles).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></div>)}
+        {references.length<caps.maxReferences&&<button disabled={locked} className="rp-add-ref" onClick={()=>refsInput.current?.click()}><Plus/>添加参考</button>}
+        <input ref={refsInput} type="file" hidden multiple accept="image/jpeg,image/png,image/webp" onChange={e=>{if(e.target.files)void upload(e.target.files,'refs');e.target.value='';}}/></div>
+      <p className="rp-hint">同一新产品；JPG/PNG/WEBP；单张20 MB，合计32 MB。</p>
+      <label className="rp-label">替换对象（可留空自动识别）<input disabled={locked} maxLength={500} value={target} onChange={e=>{stale();setTarget(e.target.value);}} placeholder="例如：两只鞋，或桌上的瓶子"/></label>
+      <button className="rp-button rp-wide" disabled={locked||!caps.enabled} onClick={analyze}><ScanEye/>{pendingKind==='analysis'||analysisJob&&!isFinalJob(analysisJob)?'正在分析产品…':'分析产品特征（仅文字）'}</button>
+      <p className="rp-hint">o4-mini · 无需先框选。此按钮不会调用生图模型。</p>
+      <textarea className="rp-analysis" aria-label="产品分析摘要" value={analysisText} disabled={locked||!validAnalysis} maxLength={16000} onChange={e=>{setAnalysisText(e.target.value);setAnalysisConfirmed(false);setCostConfirmed(false);}} placeholder="分析成功后显示可编辑的产品特征"/>
+      <button className="rp-button rp-wide" disabled={locked||!validAnalysis||!analysisText.trim()} onClick={confirmAnalysis}><Check/>{analysisConfirmed?'分析已确认':'确认分析内容'}</button>
+      {!!analysisJob?.analysis?.rawText&&<details className="rp-advanced"><summary>查看结构化分析 / 原始返回</summary><pre className="rp-json">{analysisJob.analysis.rawText}</pre></details>}
+    </section><div className="rp-right">
+      <section className="rp-card rp-preview"><div className="rp-preview-head"><div className="rp-tabs" role="tablist" aria-label="预览模式">
+        {([['original','原图'],['raw','模型原始结果'],['result','最终合成候选'],['compare','滑动对比']] as const).map(([key,label])=><button role="tab" aria-selected={mode===key} key={key} disabled={key!=='original'&&(!candidate||(key!=='raw'&&!candidate.result.composite))} className={mode===key?'rp-tab-active':''} onClick={()=>setMode(key)}>{label}</button>)}
+      </div><button className="rp-icon-button" aria-label="放大当前预览" disabled={!preview} onClick={()=>preview&&setEnlarged(preview)}><Expand/></button></div>
+      <div className="rp-canvas-wrap"><div className="rp-canvas" style={{aspectRatio:source?source.width/source.height:1.6}}>
+        {preview?<img className="rp-canvas-image" src={preview} alt={mode==='original'?'场景原图':mode==='raw'?'模型原始结果':'待审核合成候选'}/>:<div className="rp-canvas-empty"><ImagePlus/><p>上传场景原图和新产品参考</p></div>}
+        {mode==='compare'&&candidate?.result.composite&&<><img className="rp-canvas-image" src={candidate.result.composite.url} alt="最终合成候选" style={{clipPath:`inset(0 0 0 ${split}%)`}}/><div className="rp-compare-line" style={{left:split+'%'}}><span><ArrowLeftRight/></span></div><input className="rp-compare-range" type="range" value={split} onChange={e=>setSplit(Number(e.target.value))} aria-label="原图与合成候选滑动对比"/></>}
+        {source&&mode==='original'&&<svg className={'rp-region-svg '+(drawing?'rp-region-selecting':'')} viewBox={`0 0 ${source.width} ${source.height}`} preserveAspectRatio="xMidYMid meet" onPointerDown={point} aria-label="多边形编辑范围画布">
+          {masks.filter(m=>selectedIds.includes(m.instanceId)).map(m=><polygon key={m.instanceId} points={polygonPoints(m.points)} fill="#3b75ef40" stroke="#2864df" strokeWidth="2" vectorEffect="non-scaling-stroke"/>)}
+          {protectMasks.map((p,i)=><polygon key={i} points={polygonPoints(p)} fill="#e85c5750" stroke="#d23e38" strokeWidth="2" vectorEffect="non-scaling-stroke"/>)}
+          {!!points.length&&<polyline points={polygonPoints(points)} fill="none" stroke={drawing==='protect'?'#d23e38':'#2864df'} strokeWidth="3" vectorEffect="non-scaling-stroke"/>}
+        </svg>}
+        <span className="rp-image-label">{mode==='original'?'原图':mode==='raw'?'模型原始结果':candidate?.job.status==='succeeded'?'人工确认合格':'待审核候选 · 尚未确认替换成功'}</span>
+      </div></div>
+      <div className="rp-preserve-strip"><ShieldCheck/>蓝色：允许替换区域　红色：前景保护区（优先保留原图）</div></section>
+      <section className="rp-card rp-settings"><div className="rp-card-title"><h2><Settings2/>确认对象与替换范围</h2></div>
+        {!validAnalysis?<p className="rp-hint">先完成产品分析。原图中若有两只鞋，会分别列出，默认不选择。</p>:<>
+          {instances.length>1&&<button className="rp-button" disabled={locked} onClick={()=>{setSelectedIds(instances.map((i:any)=>i.instance_id));setCostConfirmed(false);}}>选择全部 {instances.length} 个对象</button>}
+          {instances.map((i:any)=><div className="rp-instance" key={i.instance_id}><label><input type="checkbox" disabled={locked} checked={selectedIds.includes(i.instance_id)} onChange={e=>selectInstance(i.instance_id,e.target.checked)}/>{i.location}<small>遮挡：{i.occluders.join('、')||'unknown'}</small></label>
+            <button className="rp-button" disabled={locked||!selectedIds.includes(i.instance_id)} onClick={()=>beginDrawing('edit',i.instance_id)}>{masks.some(m=>m.instanceId===i.instance_id)?'重画编辑范围':'绘制编辑范围'}</button></div>)}
+          <div className="rp-mask-tools"><button className="rp-button" disabled={locked} onClick={()=>beginDrawing('protect')}>添加裤脚 / 袜子等保护区</button><button className="rp-button" disabled={locked||!protectMasks.length} onClick={()=>{setProtectMasks(prev=>prev.slice(0,-1));setCostConfirmed(false);}}>撤销最后保护区</button></div>
+          {drawing&&<div className="rp-message">{drawing==='protect'?'保护区':'编辑范围'}：在原图上沿轮廓点击至少3个顶点，覆盖新产品可能变大的轮廓及必要阴影。<div className="rp-mask-tools"><button className="rp-button" onClick={()=>setPoints(p=>p.slice(0,-1))}>撤销顶点</button><button className="rp-button rp-primary" onClick={finishDrawing}>完成选区</button><button className="rp-button" onClick={()=>{setDrawing(null);setPoints([]);}}>取消绘制</button></div></div>}
+        </>}
+        <div className="rp-settings-grid"><div><span className="rp-field-label">场景保留要求</span><div className="rp-locks">{Object.entries(locks).map(([k,v])=><label key={k}><input type="checkbox" disabled={locked} checked={preserve.includes(k as PreserveKey)} onChange={e=>{setPreserve(p=>e.target.checked?[...p,k as PreserveKey]:p.filter(v=>v!==k));setCostConfirmed(false);}}/>{v}</label>)}</div></div>
+          <div><span className="rp-field-label">输出设置</span><div className="rp-output"><select aria-label="模型分辨率" disabled={locked} value={resolution} onChange={e=>{setResolution(e.target.value);setCostConfirmed(false);}}>{caps.resolutions.map(v=><option key={v}>{v}</option>)}</select><select aria-label="候选数量" disabled={locked} value={count} onChange={e=>{setCount(Number(e.target.value));setCostConfirmed(false);}}>{caps.counts.map(v=><option key={v} value={v}>{v} 张</option>)}</select></div><p className="rp-hint">首版默认单张，4K/批量需验证后由维护者开放。合成输出保持原图像素尺寸。</p></div></div>
+        <label className="rp-label">补充要求<textarea disabled={locked} value={notes} maxLength={4000} onChange={e=>{setNotes(e.target.value);setCostConfirmed(false);}}/></label>
+        <label className="rp-cost"><input type="checkbox" disabled={locked||!generationReady} checked={costConfirmed} onChange={e=>setCostConfirmed(e.target.checked)}/>本次请求 {count} 个 Nano Banana 2 图像预测；金额以供应商实际记录为准，失败或取消也可能计费。</label>
+        <button className="rp-button rp-primary" disabled={!generationReady||!!drawing} onClick={generate}><Sparkles/>开始复刻（仅生图）</button>
       </section>
-      <div className="rp-right">
-        <section className="rp-card rp-preview">
-          <div className="rp-preview-head"><div className="rp-tabs" role="tablist" aria-label="预览模式">{([['original','原图'],['result','复刻效果'],['compare','滑动对比']] as const).map(([value,label])=><button role="tab" aria-selected={mode===value} key={value} className={mode===value?'rp-tab-active':''} disabled={value!=='original'&&(!selected||(value==='compare'&&!selected.source))} onClick={()=>setMode(value)}>{value==='compare'&&<ArrowLeftRight/>}{label}</button>)}</div><div className="rp-actions"><button className="rp-icon-button" title="放大查看" aria-label="放大当前图片" disabled={!previewImage} onClick={()=>previewImage&&setEnlarged(previewImage)}><Expand/></button><button className="rp-icon-button" title="下载结果" aria-label="下载复刻结果" disabled={!selected} onClick={()=>selected&&download(selected)}><Download/></button></div></div>
-          {source&&<div className="rp-region-toolbar"><button className={'rp-button '+(selecting?'rp-primary':'')} disabled={locked} onClick={()=>{setMode('original');setSelecting(value=>!value);setError('');}}><ScanEye/>{selecting?'正在框选：在原图上拖动':region?'重新框选产品区域':'框选替换区域'}</button><small>{region?'区域已锁定 · 框外保持原图':'覆盖完整产品，并留出光影适配空间'}</small></div>}
-          <div className="rp-canvas-wrap"><div className="rp-canvas" style={{aspectRatio:source?source.width/source.height:1.6}}>
-            {previewImage?<img className="rp-canvas-image" src={previewImage} alt={mode==='result'?'复刻生成结果':'场景原图'}/>:<div className="rp-canvas-empty"><ImagePlus/><p>你的产品，即将成为画面主角</p><small>上传场景原图和产品参考图后开始</small></div>}
-            {mode==='compare'&&selected&&<><img className="rp-canvas-image" src={selected.url} alt="替换后的产品场景" style={{clipPath:'inset(0 0 0 '+split+'%)'}}/><div className="rp-compare-line" style={{left:split+'%'}}><span><ArrowLeftRight/></span></div><input type="range" min="0" max="100" value={split} onChange={event=>setSplit(Number(event.target.value))} aria-label="原图与复刻效果滑动对比" className="rp-compare-range"/></>}
-            {source&&mode==='original'&&!working&&<svg className={'rp-region-svg '+(selecting?'rp-region-selecting':'')} viewBox={'0 0 '+source.width+' '+source.height} preserveAspectRatio="xMidYMid meet" aria-label="产品替换区域框选画布" {...regionPointer}>{region&&<rect x={region.x*source.width} y={region.y*source.height} width={region.width*source.width} height={region.height*source.height} fill="#3b75ef16" stroke="#4b80e8" strokeWidth="2" strokeDasharray="6 4" vectorEffect="non-scaling-stroke"/>}</svg>}
-            {previewImage&&<span className="rp-image-label">{mode==='result'?'复刻效果':'场景原图'}</span>}
-            {mode==='compare'&&<span className="rp-image-label rp-label-right">替换后</span>}
-            {working&&<div className="rp-progress" role="status"><LoaderCircle className="rp-spin"/><h3>{disconnected?'等待重新连接':job?.status==='canceling'?'正在取消远端任务':job?.kind==='analysis'&&active?'正在分析产品与场景':job?.kind==='generation'&&active?'正在生成第 '+Math.min(job.completed+1,job.total)+' / '+job.total+' 张':'正在准备任务'}</h3><p>{job?.kind==='generation'? 'Nano Banana 2 · 已完成 '+job.completed+' 张':'o4-mini · 多角度产品理解'}</p>{active&&job?.kind==='generation'&&<progress value={job.completed} max={job.total}/>}<button className="rp-button" disabled={!activeId.current||job?.status==='canceling'} onClick={cancel}>取消任务</button><small>取消会请求停止远端任务；已完成的调用仍可能计费。</small></div>}
-          </div><div className="rp-canvas-footer"><span>{selected?'模型生成 + 原图区域合成 · 请核对产品细节':'上传素材预览'}</span><span>{selected?'模型 '+selected.resolution+' · 输出原图尺寸':source?source.width+' × '+source.height:'跟随原图比例'}</span></div></div>
-          <div className="rp-preserve-strip"><ShieldCheck/>场景保留{preserve.map(key=><span key={key}><Check/>{preserveLabels[key]}</span>)}</div>
-        </section>
-        <section className="rp-card rp-settings"><div className="rp-card-title"><h2><Settings2/>复刻设置</h2><small>场景跟随原图 · 产品忠于参考</small></div>
-          <label className="rp-target"><span>替换对象（可选）</span><input value={target} maxLength={500} disabled={locked} onChange={event=>{invalidate();setTarget(event.target.value);setAnalysis('');}} placeholder="留空由 AI 识别；有多个同类产品时可指定，例如：抬起的脚上的鞋"/></label>
-          <div className="rp-settings-grid"><div><span className="rp-field-label">框内生成约束</span><div className="rp-locks">{Object.entries(preserveLabels).map(([key,label])=><label key={key}><input type="checkbox" disabled={locked} checked={preserve.includes(key as PreserveKey)} onChange={event=>{invalidate();setPreserve(previous=>event.target.checked?[...previous,key as PreserveKey]:previous.filter(item=>item!==key));}}/>{label}</label>)}</div><p className="rp-hint">新产品结构以参考图为准；框外始终保留原图。</p></div><div><span className="rp-field-label">模型输出设置</span><div className="rp-output"><select aria-label="输出分辨率" value={resolution} disabled={locked} onChange={event=>{invalidate();setResolution(event.target.value);}}>{['1K','2K','4K'].map(value=><option key={value} value={value}>{value} 模型分辨率</option>)}</select><select aria-label="生成数量" value={count} disabled={locked} onChange={event=>{invalidate();setCount(Number(event.target.value));}}>{[1,2,4].map(value=><option key={value} value={value}>生成 {value} 张</option>)}</select></div><p className="rp-hint">按原图尺寸合成 PNG，保留框外像素。多张结果逐张生成。</p></div></div>
-          <details className="rp-advanced"><summary>补充要求与细节约束</summary><textarea aria-label="补充复刻要求" value={notes} maxLength={4000} disabled={locked} onChange={event=>{invalidate();setNotes(event.target.value);}} placeholder="例如：保留标签上的全部文字，不改变右侧绿植与底座。"/></details>
-          <div className="rp-generate-row"><button className="rp-button rp-primary" disabled={locked} onClick={()=>start('generation')}>{working?<LoaderCircle className="rp-spin"/>:<Sparkles/>}{working?'处理进行中':'开始复刻'}<ArrowRight/></button><p>o4-mini 分析 · Nano Banana 2 生图<br/><span>严格保留场景为生成目标，请通过对比核验最终结果。</span></p></div>
-        </section>
-        {!!results.length&&<section className="rp-card rp-history"><div className="rp-card-title"><h2>本次生成记录</h2><small>图片已保存到当前账号</small></div><div>{results.map((result,index)=><button key={result.url} className={selected?.url===result.url?'rp-selected':''} onClick={()=>{setSelected(result);setMode(result.source?'compare':'result');}} aria-label={'查看结果 '+(index+1)}><img src={result.url} alt={'复刻结果 '+(index+1)}/><span>{result.resolution} · {new Date(result.time).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})}</span></button>)}</div></section>}
-      </div>
-    </div>
-    {enlarged&&<ImageModal src={enlarged} onClose={()=>setEnlarged(null)}/>}
-  </section>;
+      {(analysisJob||generationJob||pendingKind)&&<section className="rp-card rp-settings" aria-label="任务状态">
+        <div className="rp-card-title"><h2>独立任务状态</h2><button className="rp-button" onClick={reconnect}><RefreshCw/>重新连接查询</button></div>
+        {pendingKind&&<p>{pendingKind==='analysis'?'分析':'生图'}请求尚在提交或接收待确认；请勿重复提交。</p>}
+        {[analysisJob,generationJob].filter(Boolean).map(j=><div className="rp-task" key={j!.id}><b>{j!.kind==='analysis'?'o4-mini 产品分析':'Nano Banana 2 图像生成'} · {stages[j!.status]||j!.status}</b><small>任务：{j!.id}<br/>请求：{j!.requestId}</small>{j!.predictions.map((p,i)=><small key={i}>{p.model} · {p.predictionId||'预测ID尚未确认'} · {p.remoteStatus||p.reconciliationState}</small>)}</div>)}
+        {activeJob&&<><button className="rp-button" onClick={cancel}>请求取消远端任务</button><p className="rp-hint">远端终态确认后才标记取消；中断浏览器不会自动停止收费。</p>{['submission_unknown','cancel_unknown'].includes(activeJob.status)&&<label className="rp-label">手动核对供应商预测ID（会验证模型、时间和输入摘要）<input value={reconcileId} onChange={e=>setReconcileId(e.target.value)}/><button className="rp-button" onClick={reconcile}>关联并查询原预测</button></label>}</>}
+      </section>}
+      {candidate&&<section className="rp-card rp-settings" aria-label="候选质量审核"><h2>结果审核 · {stages[candidate.job.status]||candidate.job.status}</h2>
+        <p className="rp-hint">像素检查无法证明新产品身份正确，请对照全部参考审核。</p><ul>{candidate.result.quality.reasons?.map(r=><li key={r}>{qualityMessage[r]||r}</li>)}</ul>
+        {candidate.job.status==='completed_needs_review'&&<><div className="rp-review-checks">{Object.entries({identity:'新产品结构、配色和标识正确',allInstances:'每个选中对象都已替换',occlusion:'裤脚、袜子等遮挡自然',scene:'场景、视角和光影合理'}).map(([k,v])=><label key={k}><input type="checkbox" checked={!!reviewChecks[k]} onChange={e=>setReviewChecks(p=>({...p,[k]:e.target.checked}))}/>{v}</label>)}</div><div className="rp-mask-tools"><button className="rp-button rp-primary" disabled={!['identity','allInstances','occlusion','scene'].every(k=>reviewChecks[k])} onClick={()=>review('accept')}>确认替换合格</button><button className="rp-button" onClick={()=>review('reject')}>标记效果不合格</button></div></>}
+        <div className="rp-mask-tools"><button className="rp-button" onClick={()=>download(candidate.result.raw.url,'模型原始结果')}><Download/>下载原始候选</button>{candidate.result.composite&&<button className="rp-button" onClick={()=>download(candidate.result.composite!.url,candidate.job.status==='succeeded'?'确认合格':'待审核候选')}><Download/>下载合成{candidate.job.status==='succeeded'?'结果':'候选'}</button>}</div>
+      </section>}
+    </div></div>{enlarged&&<ImageModal src={enlarged} onClose={()=>setEnlarged(null)}/>}</section>;
 };

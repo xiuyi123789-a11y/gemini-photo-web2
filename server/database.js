@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { randomUUID } from 'node:crypto';
+import { REPLICATION_SCHEMA_SQL } from './replication-store.js';
 
 export const createStore = (pool) => ({
   pool,
@@ -24,6 +25,7 @@ export const createStore = (pool) => ({
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
+    await pool.query(REPLICATION_SCHEMA_SQL);
   },
   async createUser(username, passwordHash) {
     const { rows } = await pool.query('INSERT INTO users(id, username, password_hash) VALUES($1,$2,$3) RETURNING id, username', [randomUUID(), username, passwordHash]);

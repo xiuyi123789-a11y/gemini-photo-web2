@@ -1,6 +1,7 @@
 // Separate drafts, chat history and provider credentials for each signed-in account.
 let accountId: string | null = null;
 export const setStorageUser = (id: string | null) => { accountId = id; };
+export const getStorageUser = () => accountId;
 const keyFor = (key: string) => accountId ? `ql_account:${accountId}:${key}` : key;
 const targetFor = (key: string) => key === 'replicate_api_token' ? sessionStorage : localStorage;
 export const userStorage = {

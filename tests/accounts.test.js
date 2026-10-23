@@ -7,6 +7,10 @@ import { newDb } from 'pg-mem';
 import { createStore } from '../server/database.js';
 import { hashPassword, digest } from '../server/auth.js';
 import { createApp } from '../server/app.js';
+import { randomUUID } from 'node:crypto';
+import sharp from 'sharp';
+import { sha256 } from '../server/replication-assets.js';
+import { canonicalJson, materialIdentity } from '../shared/replication-contract.js';
 
 let store, server, base, directory, alice, bob, aliceCookie, bobCookie;
 const testRoot = fileURLToPath(new URL('../.local/migration-archive/test-data/', import.meta.url));
@@ -83,23 +87,32 @@ test('images require the owning account', async () => {
   assert.equal((await request(endpoint, { cookie: aliceCookie })).status, 200);
 });
 test('replication jobs use the signed-in owner even when x-user-id is forged', async () => {
-  const provider = { predictions: {
-    create: async () => ({ id:'test-replication-provider', status:'processing' }),
-    get: async () => ({ id:'test-replication-provider', status:'processing' }),
-    cancel: async () => ({ status:'canceled' })
-  }};
-  const app = createApp({ database: store, dataDir: directory, replicateClientFactory: () => provider });
+  let canceled=false;
+  const provider = {accountRef:'fake-account',
+    create: async () => ({ id:'test-replication-provider', model:'openai/o4-mini', status:'processing' }),
+    get: async () => ({ id:'test-replication-provider', model:'openai/o4-mini', status:canceled?'canceled':'processing' }),
+    cancel: async () => {canceled=true;return {status:'canceled'};}
+  };
+  const app = createApp({ database: store, dataDir: directory, replicationProviderFactory: () => provider,replicationOptions:{pollMs:2,logger:()=>{}} });
   const listener = await new Promise(resolve => { const s=app.listen(0,'127.0.0.1',()=>resolve(s)); });
   const endpoint = 'http://127.0.0.1:'+listener.address().port+'/api/replication';
-  const png='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
+  const bytes=await sharp({create:{width:16,height:16,channels:3,background:'white'}}).png().toBuffer();
+  const png='data:image/png;base64,'+bytes.toString('base64');
+  const inputFingerprint=sha256(canonicalJson(materialIdentity(sha256(bytes),[{hash:sha256(bytes),angle:'front'}],'产品')));
   const call=(url,cookie,body)=>fetch(endpoint+url,{method:body?'POST':'GET',headers:{cookie,'x-user-id':bob.id,'x-replicate-token':'test-only-unused-token','Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
   try {
-    const start=await call('/analysis',aliceCookie,{requestId:'test-replication-request',sourceImage:png,references:[{image:png,angle:'front'}],target:'产品'});
+    const start=await call('/analysis',aliceCookie,{requestId:randomUUID(),inputFingerprint,sourceImage:png,references:[{image:png,angle:'front'}],target:'产品'});
     assert.equal(start.status,202);const {id}=await start.json();
     assert.equal((await call('/'+id,bobCookie)).status,404);
     assert.equal((await call('/'+id+'/cancel',bobCookie,{})).status,404);
     assert.equal((await call('/'+id,aliceCookie)).status,200);
-    assert.equal((await call('/'+id+'/cancel',aliceCookie,{})).status,200);
+    // An asset's legacy owner hint must NEVER override the production login cookie.
+    const job=await (await call('/'+id,aliceCookie)).json();
+    const forgedAsset=job.source.url.replace(/owner=[^&]+/,'owner='+bob.id);
+    const assetRequest=(cookie)=>fetch('http://127.0.0.1:'+listener.address().port+forgedAsset,{headers:{cookie}});
+    assert.equal((await assetRequest(aliceCookie)).status,200);
+    assert.equal((await assetRequest(bobCookie)).status,404);
+    assert.equal((await call('/'+id+'/cancel',aliceCookie,{})).status,202);
     for(let i=0;i<20;i++){
       const job=await (await call('/'+id,aliceCookie)).json();
       if(job.status==='canceled')break;

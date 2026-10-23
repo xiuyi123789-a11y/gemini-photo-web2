@@ -127,3 +127,17 @@
 @keyframes rp-spin{to{transform:rotate(360deg)}}
 @media(max-width:1350px){.rp-layout{grid-template-columns:280px minmax(0,1fr);gap:16px}.rp-materials{padding:17px}.rp-settings-grid{grid-template-columns:1fr;gap:14px}.rp-output{max-width:280px}.rp-preserve-strip{gap:10px}}
 @media(prefers-reduced-motion:reduce){.rp-spin{animation:none}}
+.rp-label{display:flex;flex-direction:column;gap:7px;font-size:12px;margin:14px 0;color:#4d617e}
+.rp-label input,.rp-label textarea{border:1px solid #d4deec;border-radius:6px;padding:9px;font:inherit;min-width:0;width:100%}
+.rp-label textarea{min-height:70px;resize:vertical}
+.rp-instance{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid #edf1f7;font-size:12px}
+.rp-instance label{display:flex;flex-wrap:wrap;align-items:center;gap:7px}
+.rp-instance small{width:100%;color:#6b7f9b;font-size:11px;margin-left:19px}
+.rp-mask-tools{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+.rp-cost{display:flex;align-items:flex-start;gap:8px;font-size:12px;color:#526783;line-height:1.8;margin:16px 0}
+.rp-task{padding:10px;background:#f5f8fc;border:1px solid #e5ebf4;border-radius:7px;margin:10px 0;font-size:12px}
+.rp-task small{display:block;overflow-wrap:anywhere;font-size:11px;color:#596e8d;line-height:1.8}
+.rp-json{font-size:11px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto}
+.rp-review-checks{display:flex;flex-direction:column;gap:10px;font-size:12px;margin:14px 0}
+.rp-settings h2{font-size:15px;color:#364e70}
+.rp-settings li{font-size:11px;overflow-wrap:anywhere;color:#6b7e98;line-height:1.8}

@@ -12,6 +12,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && npm cache clean --force
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --chown=node:node server ./server
+COPY --chown=node:node shared ./shared
 RUN chmod 0644 /app/package.json /app/package-lock.json && mkdir -p /app/data && chown node:node /app/data
 USER node
 # Check imports and the native image library as the same user that serves requests.

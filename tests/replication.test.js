@@ -1,213 +1,203 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import express from 'express';
+import { mkdtemp, mkdir, rm, readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as pause } from 'node:timers/promises';
-import { createReplicationRouter, validateReplicationInput, REPLICATION_MODELS } from '../server/replication.js';
+import express from 'express';
 import sharp from 'sharp';
-import { compositeReplicationImage } from '../server/replication-composite.js';
+import {newDb} from 'pg-mem';
+import {createStore} from '../server/database.js';
+import {createPgReplicationStore,createFileReplicationStore} from '../server/replication-store.js';
+import {createReplicationAssets,sha256} from '../server/replication-assets.js';
+import {createReplicationRouter} from '../server/replication.js';
+import {createReplicationProvider} from '../server/replication-provider.js';
+import {parseProductAnalysis,generationPrompt} from '../server/replication-prompts.js';
+import {compositeReplicationImage,prepareMasks} from '../server/replication-composite.js';
+import {canonicalJson,materialIdentity,REPLICATION_MODELS,isFinalJob,matchesOperation,recoveryKey} from '../shared/replication-contract.js';
+import {createApp} from '../server/app.js';
 
-const png='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
-const input=(overrides={})=>({requestId:randomUUID(),sourceImage:png,references:[{image:png,angle:'front'},{image:png,angle:'back'}],target:'桌面中央的瓶子',analysis:'琥珀玻璃瓶，黑色滴管，米白标签',preserve:['background','composition','lighting','perspective'],resolution:'2K',count:1,notes:'保留标签文字',region:{x:.2,y:.1,width:.5,height:.8},...overrides});
+const testRoot=fileURLToPath(new URL('../.local/migration-archive/test-data/',import.meta.url));
+const source=await sharp({create:{width:96,height:64,channels:4,background:'#777777'}}).png().toBuffer();
+const dataUri='data:image/png;base64,'+source.toString('base64');
+const fixture=()=>({schema_version:'1.0',new_product:{category:'鞋',brand:null,colors:['黑','白'],observed_features:[{name:'黑白拼接鞋面',evidence_refs:[1,2],certainty:'observed'}],uncertainties:['背面不可见']},reference_views:[{ref_index:1,view:'front',visible_features:['鞋头']},{ref_index:2,view:'side',visible_features:['鞋底']}],scene:{old_product_instances:[{instance_id:'left',location:'画面左侧鞋',visible_view:'side',occluders:['裤脚'],selection_required:true},{instance_id:'right',location:'画面右侧鞋',visible_view:'side',occluders:['袜子'],selection_required:true}],lighting:{direction:'unknown',temperature:'unknown'}},old_new_differences:[{attribute:'配色',observation:'新参考黑白'}],warnings:['确认两只鞋的范围']});
+const rect=(x,y,w,h)=>[{x,y},{x:x+w,y},{x:x+w,y:y+h},{x,y:y+h}];
+const editMasks=[{instanceId:'left',points:rect(.1,.3,.3,.45)},{instanceId:'right',points:rect(.55,.3,.3,.45)}];
+const fingerprint=sha256(canonicalJson(materialIdentity(sha256(source),[{hash:sha256(source),angle:'front'},{hash:sha256(source),angle:'side'}],'')));
+const analysisBody=(patch={})=>({requestId:randomUUID(),inputFingerprint:fingerprint,sourceImage:dataUri,references:[{image:dataUri,angle:'front'},{image:dataUri,angle:'side'}],target:'',...patch});
+const generated=await sharp(source).composite([{input:Buffer.from('<svg width="96" height="64"><rect x="9" y="19" width="30" height="30" fill="black"/><rect x="52" y="19" width="30" height="30" fill="white"/></svg>')}]).png().toBuffer();
+function generationBody(job,patch={}){return {requestId:randomUUID(),inputFingerprint:job.inputFingerprint,analysisJobId:job.id,analysisRevisionHash:job.analysis.revisionHash,
+  selectedInstances:['left','right'],masks:editMasks,protectMasks:[rect(.1,.3,.75,.06)],maskSpace:{width:job.source.width,height:job.source.height,sourceHash:job.source.sha256},resolution:'2K',count:1,preserve:['background','lighting'],notes:'',confirmedPredictions:1,...patch};}
+
 async function harness(options={}) {
-  const created=[], canceled=[], saved=[];
+  await mkdir(testRoot,{recursive:true});const directory=options.directory||await mkdtemp(path.join(testRoot,'replication-v2-'));
+  const store=options.store||createFileReplicationStore(directory),created=[],canceled=[],logs=[],predictions=new Map();
   let serial=0;
-  const client={
-    models:{get:async()=>({})},
-    predictions:{
-      create:async args=>{
-        created.push(args);const id='prediction-'+(++serial);
-        if(options.createError)throw options.createError;
-        if(options.failOn===serial)throw Object.assign(new Error('unsafe provider input: secret-token'),{status:422});
-        return {id,status:options.pending?'processing':'succeeded',output:args.model===REPLICATION_MODELS.analysis?['产品','分析']: 'https://replicate.delivery/test-'+serial+'.png'};
-      },
-      get:async(id)=>({id,status:'processing'}),
-      cancel:async id=>{canceled.push(id);return {id,status:'canceled'};}
-    }
+  const provider={accountRef:'fake-account',connectivity:async()=>Object.values(REPLICATION_MODELS).map(model=>({model,accessible:true})),
+    create:async(model,input)=>{
+      created.push({model,input});const id='prediction-'+(++serial);
+      const p={id,model,input,status:options.pending||(options.pendingGeneration&&model===REPLICATION_MODELS.generation)?'processing':'succeeded',created_at:new Date().toISOString(),output:model===REPLICATION_MODELS.analysis?(options.analysisOutput===undefined?JSON.stringify(fixture()):options.analysisOutput):'https://replicate.delivery/fake.png'};
+      predictions.set(id,p);
+      if(options.createDelayMs)await pause(options.createDelayMs);
+      if(options.createError)throw options.createError;
+      if(options.rejectCreateAt===serial)throw {code:'PROVIDER_REJECTED',status:422};
+      return p;
+    },
+    get:async id=>{if(options.getError)throw new Error('fake disconnect');const p=predictions.get(id);if(!p)throw new Error('not found');return {...p};},
+    cancel:async id=>{canceled.push(id);if(options.cancelError)throw new Error('fake cancel disconnect');const p=predictions.get(id);p.status='canceled';return p;}};
+  const assets=createReplicationAssets(directory,{download:options.download||(async()=>options.outputBytes||generated)});
+  const routers=[];let server,base;
+  const start=async()=>{
+    const app=express();app.use(express.json({limit:'50mb'}));app.use((req,res,next)=>{req.userId=req.get('x-user-id')||'alice';next();});
+    const router=createReplicationRouter({store,assets,getProvider:req=>req.get('x-replicate-token')==='wrong'?{...provider,accountRef:'other-account'}:provider,pollMs:2,budgetMs:options.budgetMs||5000,leaseMs:200,logger:e=>logs.push(e),advancedOutputs:!!options.advanced,enabled:()=>!options.disabled});
+    routers.push(router);app.use('/replication',router);server=await new Promise(r=>{const s=app.listen(0,'127.0.0.1',()=>r(s));});base='http://127.0.0.1:'+server.address().port+'/replication';
   };
-  const app=express();app.use(express.json());
-  app.use((req,res,next)=>{req.userId=req.get('x-user-id')||'alice';next();});
-  app.use('/replication',createReplicationRouter({
-    getClient:()=>client,saveOutput:async(url,owner)=>{saved.push({url,owner});return '/api/images/'+owner+'/'+saved.length+'.png';},processOutput:async url=>url,
-    pollMs:2,predictionTimeoutMs:options.timeout||1000
-  }));
-  const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});
-  const base='http://127.0.0.1:'+server.address().port+'/replication';
-  const request=(path,body,owner='alice')=>fetch(base+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json','x-user-id':owner},...(body?{body:JSON.stringify(body)}:{})});
-  return {created,canceled,saved,request,close:()=>new Promise(resolve=>server.close(resolve))};
+  await start();
+  const request=(url,body,owner=options.owner||'alice',token='fake')=>fetch(base+url,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json','x-user-id':owner,'x-replicate-token':token},...(body===undefined?{}:{body:JSON.stringify(body)})});
+  return {created,canceled,logs,predictions,request,store,assets,directory,
+    async restart(){routers.at(-1).worker.stop();await routers.at(-1).worker.idle();await new Promise(r=>server.close(r));await start();},
+    async close(){for(const router of routers)router.worker.stop();await Promise.all(routers.map(r=>r.worker.idle()));await new Promise(r=>server.close(r));
+      if(!options.directory&&path.resolve(directory).startsWith(path.resolve(testRoot)+path.sep))await rm(directory,{recursive:true,force:true});},
+    cleanup:()=>routers.at(-1).cleanup()};
 }
-async function done(h,id) {
-  for(let i=0;i<150;i++){
-    const job=await (await h.request('/'+id)).json();
-    if(['succeeded','failed','canceled'].includes(job.status))return job;
-    await pause(5);
-  }
-  throw new Error('Task did not finish');
+async function waitFor(h,id,predicate=j=>isFinalJob(j)||['submission_unknown','cancel_unknown'].includes(j.status)) {
+  for(let i=0;i<250;i++){const r=await h.request('/jobs/'+id);assert.equal(r.status,200);const job=await r.json();if(predicate(job))return job;await pause(5);}throw new Error('job did not reach expected state');
 }
-test('rejects remote URLs, bad image signatures, invalid output settings and excess references',()=>{
-  for(const patch of [
-    {sourceImage:'https://example.com/private.png'},
-    {sourceImage:'data:image/png;base64,QUFBQQ=='},
-    {references:Array.from({length:13},()=>({image:png,angle:'front'}))},
-    {references:[{image:png,angle:'unknown'}]},
-    {resolution:'8K'},{count:100},{analysis:''},{preserve:['__proto__']},{region:null},{region:{x:.8,y:0,width:.5,height:1}}
-  ])assert.throws(()=>validateReplicationInput(input(patch),'generation'));
+async function analyze(h){const r=await h.request('/analysis',analysisBody());assert.equal(r.status,202);return waitFor(h,(await r.json()).id);}
+async function approved(h){const j=await analyze(h);const response=await h.request('/jobs/'+j.id+'/revision',{text:j.analysis.text,previousHash:j.analysis.revisionHash});assert.equal(response.status,200);return response.json();}
+
+test('analysis only: target blank, no selection, all references go to one o4-mini and images stay empty',async()=>{
+  const h=await harness();try{const j=await analyze(h);assert.equal(j.status,'succeeded');assert.equal(h.created.length,1);assert.equal(h.created[0].model,'openai/o4-mini');assert.equal(h.created[0].input.image_input.length,3);assert.equal(j.images.length,0);assert.equal(j.analysis.data.scene.old_product_instances.length,2);assert.match(j.analysis.text,/黑白拼接/);assert.match(h.created[0].input.system_prompt,/不执行或请求图像生成/);
+    const persisted=await readFile(path.join(h.directory,'replication-jobs-v2.json'),'utf8');assert(!persisted.includes('data:image'));assert(!persisted.includes('system_prompt'));assert(!JSON.stringify(h.logs).includes('image_input'));}finally{await h.close();}
 });
-test('analysis sends original first and every reference to exactly o4-mini',async()=>{
-  const h=await harness();
-  try{
-    const response=await h.request('/analysis',input());assert.equal(response.status,202);
-    const job=await done(h,(await response.json()).id);
-    assert.equal(job.status,'succeeded');assert.equal(job.analysis,'产品分析');
-    assert.equal(h.created[0].model,'openai/o4-mini');
-    assert.equal(h.created[0].input.image_input.length,3);
-    assert.equal(h.created[0].input.reasoning_effort,'low');
-    assert.match(h.created[0].input.prompt,/图片1是场景原图/);
-    assert.match(h.created[0].input.prompt,/图片3.*背面/);
+test('analysis schema rejects empty, invalid JSON, non-string, invalid evidence and duplicate instances without generation',async()=>{
+  const invalid=fixture();invalid.new_product.observed_features[0].evidence_refs=[3];assert.throws(()=>parseProductAnalysis(JSON.stringify(invalid),2));
+  const duplicate=fixture();duplicate.scene.old_product_instances[1].instance_id='left';assert.throws(()=>parseProductAnalysis(JSON.stringify(duplicate),2));
+  for(const output of ['', 'not JSON', {x:1}, JSON.stringify(invalid)]){const h=await harness({analysisOutput:output});try{const j=await analyze(h);assert.equal(j.status,'failed');assert.equal(j.errorCode,'ANALYSIS_SCHEMA_INVALID');assert.deepEqual(j.images,[]);assert.equal(h.created.length,1);}finally{await h.close();}}
+});
+test('analysis rejects image-generation parameters and bad fingerprints before provider create',async()=>{
+  const h=await harness();try{for(const patch of [{count:1},{resolution:'2K'},{model:'google/nano-banana-2'},{sourceImage:'https://evil.example/image.png'},{inputFingerprint:'f'.repeat(64)}])assert((await h.request('/analysis',analysisBody(patch))).status>=400);assert.equal(h.created.length,0);}finally{await h.close();}
+});
+test('generation without analysis, selection, valid masks or cost acknowledgment cannot call provider',async()=>{
+  const h=await harness();try{let r=await h.request('/generation',{requestId:randomUUID(),inputFingerprint:fingerprint});assert.equal(r.status,409);assert.equal((await r.json()).errorCode,'ANALYSIS_REQUIRED');assert.equal(h.created.length,0);
+    const unconfirmed=await analyze(h);assert.equal((await h.request('/generation',generationBody(unconfirmed))).status,409);assert.equal(h.created.length,1);
+    const j=await (await h.request('/jobs/'+unconfirmed.id+'/revision',{text:unconfirmed.analysis.text,previousHash:unconfirmed.analysis.revisionHash})).json();
+    for(const patch of [{selectedInstances:[]},{masks:[]},{protectMasks:[rect(0,0,.8,.9)]},{maskSpace:{width:1,height:1,sourceHash:j.source.sha256}},{masks:[{instanceId:'left',points:rect(-.1,0,.3,.3)}]},{selectedInstances:['absent']},{confirmedPredictions:0}]){const response=await h.request('/generation',generationBody(j,patch));assert.equal(response.status,422);}
+    assert.equal(h.created.length,1);
   }finally{await h.close();}
 });
-
-test('uploaded images can be analyzed without a target description, region or generation settings',async()=>{
-  const h=await harness();
-  try{
-    const payload={requestId:randomUUID(),sourceImage:png,references:[{image:png,angle:'front'},{image:png,angle:'side'}]};
-    const response=await h.request('/analysis',payload);assert.equal(response.status,202);
-    const job=await done(h,(await response.json()).id);
-    assert.equal(job.status,'succeeded');assert.equal(job.analysis,'产品分析');
-    assert.equal(h.created.length,1);assert.equal(h.created[0].model,'openai/o4-mini');
-    assert.equal(h.created[0].input.image_input.length,3);
-    assert.match(h.created[0].input.prompt,/根据全部参考图识别新产品类别/);
-    assert.match(h.created[0].input.prompt,/多个同类产品/);
-    assert.match(h.created[0].input.prompt,/尚未框选/);
-    assert.equal(h.saved.length,0);
+test('same request ID with identical body returns one job across concurrent requests; conflicting kind/payload is 409',async()=>{
+  const h=await harness();try{const body=analysisBody();const responses=await Promise.all(Array.from({length:4},()=>h.request('/analysis',body)));const jobs=await Promise.all(responses.map(r=>r.json()));assert.equal(new Set(jobs.map(j=>j.id)).size,1);const j=await waitFor(h,jobs[0].id);assert.equal(h.created.length,1);
+    assert.equal((await h.request('/analysis',{...body,target:'different'})).status,409);
+    const conflict=await h.request('/generation',generationBody(j,{requestId:body.requestId}));assert.equal(conflict.status,409);assert.equal((await conflict.json()).errorCode,'IDEMPOTENCY_CONFLICT');assert.equal(h.created.length,1);
   }finally{await h.close();}
 });
-
-test('optional target handles blank input and still rejects malformed or oversized descriptions',()=>{
-  for(const target of ['', '   ', undefined, null]) {
-    assert.equal(validateReplicationInput(input({target,region:null}),'analysis').target,'');
-    assert.equal(validateReplicationInput(input({target}),'generation').target,'');
-  }
-  assert.equal(validateReplicationInput(input({target:'  抬起的脚上的鞋  '}),'analysis').target,'抬起的脚上的鞋');
-  for(const target of [42,{},[], 'x'.repeat(501)]) {
-    assert.throws(()=>validateReplicationInput(input({target}),'analysis'),/替换对象/);
-    assert.throws(()=>validateReplicationInput(input({target}),'generation'),/替换对象/);
+test('analysis revisions are hashed and stale generation is blocked; explicit generation creates one Nano Banana 2',async()=>{
+  const h=await harness();try{const j=await analyze(h),body=generationBody(j);const revised=await (await h.request('/jobs/'+j.id+'/revision',{text:j.analysis.text+' 用户确认黑白配色',previousHash:j.analysis.revisionHash})).json();
+    assert.notEqual(revised.analysis.revisionHash,j.analysis.revisionHash);assert.equal((await h.request('/generation',body)).status,409);
+    const started=await h.request('/generation',generationBody(revised));assert.equal(started.status,202);const g=await waitFor(h,(await started.json()).id);
+    assert.equal(g.status,'completed_needs_review');assert.equal(h.created.length,2);assert.equal(h.created[1].model,'google/nano-banana-2');assert.equal(h.created[1].input.image_input.length,3);assert.equal(g.results.length,1);assert(g.results[0].raw.url);assert(g.results[0].composite.url);assert.notEqual(g.source.url,j.source.url);assert.equal(g.results[0].quality.identityVerified,false);
+    assert.equal((await h.request('/jobs/'+g.id+'/review',{decision:'accept',checks:{identity:true}})).status,422);
+    const reviewed=await (await h.request('/jobs/'+g.id+'/review',{decision:'accept',checks:{identity:true,allInstances:true,occlusion:true,scene:true}})).json();assert.equal(reviewed.status,'succeeded');assert.equal(reviewed.quality.status,'passed');
+  }finally{await h.close();}
+});
+test('unchanged source and wrong aspect ratio never get a successful business status; raw is retained',async()=>{
+  for(const outputBytes of [source,await sharp({create:{width:64,height:96,channels:4,background:'red'}}).png().toBuffer()]){
+    const h=await harness({outputBytes});try{const j=await approved(h);const r=await h.request('/generation',generationBody(j));const g=await waitFor(h,(await r.json()).id);assert.equal(g.status,'quality_failed');assert(g.results[0].raw.url);assert.notEqual(g.quality?.status,'passed');assert.equal(h.created.length,2);}finally{await h.close();}
   }
 });
-
-test('analysis uses an optional selected region and explicit target without requiring either',async()=>{
-  const h=await harness();
-  try{
-    const response=await h.request('/analysis',input({target:'抬起的脚上的鞋'}));
-    assert.equal(response.status,202);
-    await done(h,(await response.json()).id);
-    const prompt=h.created[0].input.prompt;
-    assert.match(prompt,/原图中的替换对象：抬起的脚上的鞋/);
-    assert.match(prompt,/已框选替换区域.*左 20%，上 10%，宽 50%，高 80%/);
-    assert.doesNotMatch(prompt,/用户未填写|尚未框选/);
-  }finally{await h.close();}
-});
-
-test('generation accepts an empty target but still requires images, analysis and a selected region',async()=>{
-  const h=await harness();
-  try{
-    for(const patch of [{sourceImage:null},{references:[]},{region:null},{analysis:''}]) {
-      const response=await h.request('/generation',input({target:'',...patch}));
-      assert.equal(response.status,400);
-    }
-    assert.equal(h.created.length,0);
-    const response=await h.request('/generation',input({target:'   '}));
-    assert.equal(response.status,202);
-    const job=await done(h,(await response.json()).id);
-    assert.equal(job.status,'succeeded');assert.equal(h.created.length,1);
-    assert.equal(h.created[0].model,'google/nano-banana-2');
-    assert.match(h.created[0].input.prompt,/框选区域内与新产品参考图对应的同类旧产品/);
-    assert.match(h.created[0].input.prompt,/限定替换区域/);
-  }finally{await h.close();}
-});
-test('generation uses Nano Banana 2, all references, original aspect, requested resolution and separate saved outputs',async()=>{
-  const h=await harness();
-  try{
-    const payload=input({count:2,resolution:'4K'});
-    const {id}=await (await h.request('/generation',payload)).json();
-    const job=await done(h,id);
-    assert.equal(job.status,'succeeded');assert.equal(h.created.length,2);assert.equal(job.images.length,2);
-    for(const call of h.created){
-      assert.equal(call.model,'google/nano-banana-2');
-      assert.equal(call.input.image_input.length,3);assert.equal(call.input.image_input[0],png);
-      assert.equal(call.input.aspect_ratio,'match_input_image');assert.equal(call.input.resolution,'4K');assert.equal(call.input.output_format,'png');
-      assert.match(call.input.prompt,/黑色滴管/);assert.match(call.input.prompt,/非目标元素/);
-      assert.equal(call.input.image_search,false);
-    }
-    assert(h.saved.every(item=>item.owner==='alice'));
-    assert.equal((await h.request('/'+id,undefined,'bob')).status,404);
-    assert.equal((await h.request('/'+id+'/cancel',{},'bob')).status,404);
-    assert.equal((await h.request('/request/'+payload.requestId,undefined,'bob')).status,404);
-  }finally{await h.close();}
-});
-test('idempotent request IDs never create duplicate paid predictions',async()=>{
-  const h=await harness();
-  try{
-    const payload=input();const first=await (await h.request('/generation',payload)).json();
-    await done(h,first.id);
-    const second=await (await h.request('/generation',payload)).json();
-    assert.equal(second.id,first.id);assert.equal(h.created.length,1);
-    const recovered=await (await h.request('/request/'+payload.requestId)).json();
-    assert.equal(recovered.id,first.id);
-  }finally{await h.close();}
-});
-test('partial failures preserve finished images and do not expose provider request details',async()=>{
-  const h=await harness({failOn:2});
-  try{
-    const {id}=await (await h.request('/generation',input({count:4}))).json();
-    const job=await done(h,id);
-    assert.equal(job.status,'failed');assert.equal(job.images.length,1);assert.equal(h.created.length,2);
-    assert.match(job.error,/模型拒绝/);assert(!JSON.stringify(job).includes('secret-token'));
-  }finally{await h.close();}
-});
-test('cancellation reaches the active provider prediction and stops the remaining batch',async()=>{
-  const h=await harness({pending:true});
-  try{
-    const {id}=await (await h.request('/generation',input({count:4}))).json();
-    assert.equal((await h.request('/generation',input())).status,409);
-    await h.request('/'+id+'/cancel',{});
-    const job=await done(h,id);
-    assert.equal(job.status,'canceled');assert.equal(h.canceled.length,1);assert.equal(h.created.length,1);
-  }finally{await h.close();}
-});
-test('provider timeout cancels the prediction instead of leaving it running',async()=>{
-  const h=await harness({pending:true,timeout:20});
-  try{
-    const {id}=await (await h.request('/analysis',input())).json();const job=await done(h,id);
-    assert.equal(job.status,'failed');assert.match(job.error,/超时/);assert.equal(h.canceled.length,1);
-  }finally{await h.close();}
-});
-test('invalid credentials are reported without exposing the credential',async()=>{
-  const h=await harness({createError:Object.assign(new Error('Bearer secret-token'),{status:401})});
-  try{
-    const {id}=await (await h.request('/analysis',input())).json();const job=await done(h,id);
-    assert.equal(job.status,'failed');assert.match(job.error,/Token 无效/);assert(!job.error.includes('secret-token'));
-  }finally{await h.close();}
-});
-test('composition changes the selected region while keeping every outside pixel identical',async()=>{
-  const source=await sharp({create:{width:48,height:32,channels:4,background:'#bb3344'}}).png().toBuffer();
-  const generated=await sharp({create:{width:96,height:64,channels:4,background:'#3388cc'}}).png().toBuffer();
-  const region={x:.25,y:.25,width:.5,height:.5};
-  const output=await compositeReplicationImage('data:image/png;base64,'+source.toString('base64'),generated,region);
-  const {data,info}=await sharp(output).raw().toBuffer({resolveWithObject:true});
-  const original=await sharp(source).raw().toBuffer();
-  assert.equal(info.width,48);assert.equal(info.height,32);
-  let changes=0;
-  for(let y=0;y<32;y++)for(let x=0;x<48;x++){
-    const offset=(y*48+x)*4;
-    if(x<12||x>=36||y<8||y>=24)assert.deepEqual(data.subarray(offset,offset+4),original.subarray(offset,offset+4));
-    else if(!data.subarray(offset,offset+4).equals(original.subarray(offset,offset+4)))changes++;
+test('creation lost response/429 becomes unknown and never resubmits through refresh or backend restart',async()=>{
+  for(const createError of [Object.assign(new Error('secret-token raw-body'),{uncertain:true,code:'SUBMISSION_UNKNOWN'}),Object.assign(new Error('429'),{uncertain:true,code:'SUBMISSION_UNKNOWN',status:429})]){
+    const h=await harness({createError});try{const body=analysisBody();const r=await h.request('/analysis',body);const j=await waitFor(h,(await r.json()).id);assert.equal(j.status,'submission_unknown');await h.restart();await h.request('/jobs/'+j.id);await h.request('/analysis',body);await pause(20);assert.equal(h.created.length,1);assert.equal((await h.request('/analysis',analysisBody())).status,409);assert(!JSON.stringify(j).includes('secret-token'));}finally{await h.close();}
   }
-  assert(changes>100);
 });
-test('composition follows EXIF orientation before applying the region',async()=>{
-  const source=await sharp({create:{width:40,height:24,channels:3,background:'red'}}).jpeg().withMetadata({orientation:6}).toBuffer();
-  const generated=await sharp({create:{width:24,height:40,channels:3,background:'blue'}}).png().toBuffer();
-  const output=await compositeReplicationImage('data:image/jpeg;base64,'+source.toString('base64'),generated,{x:.2,y:.2,width:.6,height:.6});
-  const metadata=await sharp(output).metadata();assert.equal(metadata.width,24);assert.equal(metadata.height,40);
+test('reconcile unknown attempt requires exact input evidence and never creates a new prediction',async()=>{
+  const h=await harness({createError:{uncertain:true,code:'SUBMISSION_UNKNOWN'}});try{const r=await h.request('/analysis',analysisBody()),j=await waitFor(h,(await r.json()).id);const p=h.predictions.get('prediction-1');
+    p.model='wrong/model';assert.equal((await h.request('/jobs/'+j.id+'/reconcile',{predictionId:p.id})).status,422);p.model=REPLICATION_MODELS.analysis;
+    assert.equal((await h.request('/jobs/'+j.id+'/reconcile',{predictionId:p.id})).status,200);const done=await waitFor(h,j.id);assert.equal(done.status,'succeeded');assert.equal(h.created.length,1);
+  }finally{await h.close();}
+});
+test('acknowledged running prediction resumes by GET after backend restart without another create',async()=>{
+  const h=await harness({pending:true});try{const r=await h.request('/analysis',analysisBody()),id=(await r.json()).id;await waitFor(h,id,j=>j.predictions.length&&j.predictions[0].predictionId);await h.restart();h.predictions.get('prediction-1').status='succeeded';const j=await waitFor(h,id);assert.equal(j.status,'succeeded');assert.equal(h.created.length,1);}finally{await h.close();}
+});
+test('cancel is confirmed with a GET; timeout or cancellation failure is never labeled canceled',async()=>{
+  const h=await harness({pending:true,cancelError:true});try{const r=await h.request('/analysis',analysisBody()),id=(await r.json()).id;await waitFor(h,id,j=>j.predictions[0]?.predictionId);await h.request('/jobs/'+id+'/cancel',{});const j=await waitFor(h,id);assert.equal(j.status,'cancel_unknown');assert.equal(j.errorCode,'CANCEL_UNKNOWN');assert.equal(h.created.length,1);}finally{await h.close();}
+  const ok=await harness({pending:true,budgetMs:15});try{const r=await ok.request('/analysis',analysisBody()),j=await waitFor(ok,(await r.json()).id);assert.equal(j.status,'canceled');assert(ok.canceled.length>0);assert.equal(ok.created.length,1);}finally{await ok.close();}
+  const race=await harness({createDelayMs:100,createError:{uncertain:true,code:'SUBMISSION_UNKNOWN'}});try{const r=await race.request('/analysis',analysisBody()),id=(await r.json()).id;await waitFor(race,id,j=>j.status==='submitting');await race.request('/jobs/'+id+'/cancel',{});const j=await waitFor(race,id);assert.equal(j.status,'cancel_unknown');assert.equal(j.errorCode,'CANCEL_UNKNOWN');assert.equal(race.created.length,1);}finally{await race.close();}
+});
+test('owner isolation covers jobs, assets, request lookup, cancel, review and original credential',async()=>{
+  const h=await harness({pending:true});try{const body=analysisBody(),r=await h.request('/analysis',body),j=await r.json();for(const url of ['/jobs/'+j.id,'/request/'+body.requestId,j.source.url.replace('/api/replication','')])assert.equal((await h.request(url,undefined,'bob')).status,404);
+    for(const url of ['/jobs/'+j.id+'/cancel','/jobs/'+j.id+'/review','/jobs/'+j.id+'/revision'])assert.equal((await h.request(url,{},'bob')).status,404);
+    assert.equal((await h.request('/jobs/'+j.id+'/cancel',{},'alice','wrong')).status,409);
+    const wrongCredential=await (await h.request('/jobs/'+j.id,undefined,'alice','wrong')).json();assert.equal(wrongCredential.recoveryErrorCode,'PROVIDER_ACCOUNT_MISMATCH');
+    await h.request('/jobs/'+j.id+'/cancel',{});assert.equal((await waitFor(h,j.id)).status,'canceled');
+  }finally{await h.close();}
+});
+test('batch cancellation stops later samples and partial failure retains completed candidate files',async()=>{
+  const h=await harness({pendingGeneration:true,advanced:true});try{const j=await approved(h),r=await h.request('/generation',generationBody(j,{count:4,confirmedPredictions:4})),g=await r.json();
+    await waitFor(h,g.id,x=>x.predictions[0]?.predictionId);await h.request('/jobs/'+g.id+'/cancel',{});assert.equal((await waitFor(h,g.id)).status,'canceled');assert.equal(h.created.length,2);
+  }finally{await h.close();}
+  const partial=await harness({advanced:true,rejectCreateAt:3});try{const j=await approved(partial),r=await partial.request('/generation',generationBody(j,{count:4,confirmedPredictions:4})),g=await waitFor(partial,(await r.json()).id);
+    assert.equal(g.status,'failed');assert.equal(g.results.length,1);assert.equal(g.images.length,1);assert.equal(partial.created.length,3);
+  }finally{await partial.close();}
+});
+test('expired unresolved submissions remain available for audit and still block a fresh charge',async()=>{
+  const h=await harness({createError:{uncertain:true,code:'SUBMISSION_UNKNOWN'}});try{const j=await analyze(h);await h.store.update(j.id,x=>({...x,expiresAt:Date.now()-1}));await h.cleanup();assert(await h.store.get(j.id));assert.equal((await h.request('/analysis',analysisBody())).status,409);}finally{await h.close();}
+});
+test('feature flag blocks new tasks; connectivity does not call predictions; advanced outputs gated',async()=>{
+  const h=await harness({disabled:true});try{assert.equal((await h.request('/analysis',analysisBody())).status,503);assert.equal((await h.request('/connectivity',{})).status,200);assert.equal(h.created.length,0);}finally{await h.close();}
+  const a=await harness();try{const j=await analyze(a);for(const patch of [{count:2,confirmedPredictions:2},{resolution:'4K'}])assert.equal((await a.request('/generation',generationBody(j,patch))).status,422);assert.equal(a.created.length,1);}finally{await a.close();}
+});
+test('two masks protect foreground and every outside pixel, with no fill stretching',async()=>{
+  const protect=[rect(.1,.3,.75,.06)];const result=await compositeReplicationImage(source,generated,{masks:editMasks,protectMasks:protect});const decoded=await sharp(result.buffer).raw().toBuffer();const original=await sharp(source).raw().toBuffer();const coverage=await prepareMasks(96,64,editMasks,protect);let changed=0;
+  for(let i=0;i<96*64;i++){const a=decoded.subarray(i*4,i*4+4),b=original.subarray(i*4,i*4+4);if(!coverage.edit[i]||coverage.protect[i])assert.deepEqual(a,b);else if(!a.equals(b))changed++;}assert(changed>100);assert.equal(result.quality.instances.length,2);assert(result.quality.instances.every(i=>i.changedFraction>.02));
+});
+test('orientation normalization is persisted before mask coordinates, and expires cleanup preserves unresolved jobs',async()=>{
+  const h=await harness();try{const j=await analyze(h);const job=await h.store.get(j.id);await h.store.update(j.id,x=>({...x,expiresAt:Date.now()-1}));await h.cleanup();assert.equal(await h.store.get(j.id),null);
+    const image=await sharp({create:{width:40,height:24,channels:3,background:'red'}}).jpeg().withMetadata({orientation:6}).toBuffer();const assets=await h.assets.prepare({...job,id:randomUUID()},{sourceImage:'data:image/jpeg;base64,'+image.toString('base64'),references:[{image:dataUri,angle:'front'}]});assert.equal(assets.source.width,24);assert.equal(assets.source.height,40);
+  }finally{await h.close();}
+});
+test('PostgreSQL store has additive tables, unique request/active user/attempt constraints, CAS and durable rereads',async()=>{
+  // pg-mem's AST coverage checker flags skipped IF NOT EXISTS definitions on the second init.
+  const {Pool}=newDb({noAstCoverageCheck:true}).adapters.createPg(),pool=new Pool(),db=createStore(pool);await db.init();await db.init();
+  const user=await db.createUser('replication-user','test-hash'),store=createPgReplicationStore(pool);
+  const job={id:randomUUID(),ownerId:user.id,requestId:randomUUID(),kind:'analysis',payloadHash:'hash',status:'queued',revision:0,createdAt:Date.now(),updatedAt:Date.now()};
+  try{await store.create(job);assert.equal((await store.byRequest(user.id,job.requestId)).id,job.id);await assert.rejects(store.create({...job,id:randomUUID(),requestId:randomUUID()}),/TASK_BUSY/);
+    const attempt={id:randomUUID(),jobId:job.id,attemptNo:1,predictionId:null};assert.equal(await store.claimAttempt(attempt),true);assert.equal(await store.claimAttempt({...attempt,id:randomUUID()}),false);
+    await Promise.all([store.update(job.id,j=>({...j,a:1})),store.update(job.id,j=>({...j,b:2}))]);const reread=await createPgReplicationStore(pool).get(job.id);assert.equal(reread.a,1);assert.equal(reread.b,2);
+    await store.updateAttempt({...attempt,predictionId:'prediction-persisted'});assert.equal((await store.attempts(job.id))[0].predictionId,'prediction-persisted');
+  }finally{await pool.end();}
+});
+test('client recovery identity checks kind + owner + fingerprint + requestId + jobId; slots are distinct',()=>{
+  const expected={kind:'analysis',ownerId:'alice',inputFingerprint:'hash',requestId:'request',jobId:'job'},job={...expected,id:'job'};assert(matchesOperation(expected,job));
+  for(const patch of [{kind:'generation'},{ownerId:'bob'},{inputFingerprint:'other'},{requestId:'other'},{id:'other'}])assert(!matchesOperation(expected,{...job,...patch}));assert.notEqual(recoveryKey('analysis'),recoveryKey('generation'));
+});
+test('complete analysis-confirm-generation-review flow also persists through the PostgreSQL adapter',async()=>{
+  const {Pool}=newDb().adapters.createPg(),pool=new Pool(),db=createStore(pool);await db.init();const user=await db.createUser('pg-flow','fixture-hash');
+  const store=createPgReplicationStore(pool),h=await harness({store,owner:user.id});
+  try{const a=await approved(h);assert(a.analysis.confirmedAt);const response=await h.request('/generation',generationBody(a));assert.equal(response.status,202);const g=await waitFor(h,(await response.json()).id);assert.equal(g.status,'completed_needs_review');
+    const recovered=await createPgReplicationStore(pool).get(g.id);assert.equal(recovered.results.length,1);assert.equal((await store.attempts(g.id))[0].predictionId,'prediction-2');assert.equal(h.created.length,2);
+  }finally{await h.close();await pool.end();}
+});
+test('generation prompt uses new identity and per-instance geometry; ordinary retouch models unchanged',async()=>{
+  const text=generationPrompt({selectedInstances:['left','right'],masks:editMasks,preserve:[],notes:''},'new product identity');assert.match(text,/NEW silhouette may legitimately differ/);assert.match(text,/left/);assert.match(text,/right/);
+  const appSource=await readFile(new URL('../server/app.js',import.meta.url),'utf8');assert.match(appSource,/model = "google\/nano-banana"/);assert.match(appSource,/model = "black-forest-labs\/flux-fill-dev"/);
+});
+test('legacy development image previews load without a custom header; ordinary retouch still uses its existing models',async()=>{
+  const h=await harness(),models=[];
+  const fakeSdk={models:{get:async(owner,name)=>{models.push(owner+'/'+name);return {latest_version:{id:'version-fixture'}};}},predictions:{create:async()=>({id:'ordinary-fixture',status:'succeeded',output:dataUri})}};
+  const app=createApp({dataDir:h.directory,replicateClientFactory:()=>fakeSdk,replicationProviderFactory:()=>{throw new Error('No replication calls in this test');}});
+  const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));}),url='http://127.0.0.1:'+server.address().port;
+  try{const j=await analyze(h);assert.equal((await fetch(url+j.source.url)).status,200);
+    for(const mask of [undefined,dataUri]){const response=await fetch(url+'/api/retouch-image',{method:'POST',headers:{'Content-Type':'application/json','x-user-id':'alice','x-replicate-token':'fake'},body:JSON.stringify({image:dataUri,prompt:'fixture edit',...(mask?{mask}:{})})});assert.equal(response.status,200);}
+    assert.deepEqual(models,['google/nano-banana','black-forest-labs/flux-fill-dev']);
+  }finally{app.locals.replication.worker.stop();await new Promise(resolve=>server.close(resolve));await h.close();}
+});
+test('native provider sends exactly one official-model POST with Cancel-After, even on network errors or 429',async()=>{
+  for(const behavior of ['network',429,201]){const calls=[];const provider=createReplicationProvider('fake-unit-test-token',{fetchImpl:async(url,options)=>{calls.push({url,options});if(behavior==='network')throw new TypeError('fetch failed with secret');return new Response(JSON.stringify({id:'prediction-native',model:REPLICATION_MODELS.analysis,status:'starting'}),{status:behavior});}});
+    if(behavior===201)await provider.create(REPLICATION_MODELS.analysis,{prompt:'safe fixture'});else await assert.rejects(provider.create(REPLICATION_MODELS.analysis,{prompt:'safe fixture'}),e=>e.code==='SUBMISSION_UNKNOWN');
+    assert.equal(calls.length,1);assert.equal(calls[0].url,'https://api.replicate.com/v1/models/openai/o4-mini/predictions');assert.equal(calls[0].options.headers['Cancel-After'],'300s');assert(!calls[0].options.headers.Prefer);
+    await assert.rejects(provider.create('unapproved/model',{}));assert.equal(calls.length,1);
+  }
 });

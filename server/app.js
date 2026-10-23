@@ -9,13 +9,18 @@ import Replicate from 'replicate';
 import dotenv from 'dotenv';
 import { createAuth } from './auth.js';
 import { createReplicationRouter } from './replication.js';
+import { createReplicationProvider } from './replication-provider.js';
+import { createPgReplicationStore, createFileReplicationStore } from './replication-store.js';
+import { createReplicationAssets } from './replication-assets.js';
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const replicationDeadlineSeconds = () => Math.max(5,Math.min(900,Math.floor(Number(process.env.REPLICATION_TIMEOUT_SECONDS)||300)));
 
-export function createApp({ database = null, dataDir, replicateClientFactory = token => new Replicate({ auth: token }) } = {}) {
+export function createApp({ database = null, dataDir, replicateClientFactory = token => new Replicate({ auth: token }),
+  replicationProviderFactory = token => createReplicationProvider(token,{deadlineSeconds:replicationDeadlineSeconds()}), replicationOptions = {} } = {}) {
 const app = express();
 app.set('trust proxy', 1); // The production container is reachable only through Caddy.
 const auth = createAuth(database);
@@ -125,7 +130,26 @@ const saveReplicateOutput = async (outputItem, userId, { signal } = {}) => {
   }
 };
 
-app.use('/api/replication', validateUserId, createReplicationRouter({ getClient: getReplicateClient, saveOutput: saveReplicateOutput }));
+const replication = createReplicationRouter({
+    store: database ? createPgReplicationStore(database.pool) : createFileReplicationStore(DATA_DIR),
+    assets: createReplicationAssets(DATA_DIR),
+    getProvider: req => replicationProviderFactory(req.get('x-replicate-token') || process.env.REPLICATE_API_TOKEN),
+    budgetMs: replicationDeadlineSeconds()*1000,
+    retentionDays: Math.max(1,Math.min(365,Number(process.env.REPLICATION_RETENTION_DAYS)||30)),
+    maxReferences: Math.max(1,Math.min(6,Math.floor(Number(process.env.REPLICATION_MAX_REFERENCES)||6))),
+    ...replicationOptions
+});
+app.locals.replication = replication;
+app.use('/api/replication', (req,res,next) => {
+    // <img> cannot send custom headers. Legacy development has no login cookie;
+    // production still ALWAYS derives ownership from its authenticated session.
+    if (!database && req.method === 'GET' && req.path.startsWith('/assets/') && !req.headers['x-user-id'] && typeof req.query.owner === 'string') {
+        req.headers['x-user-id'] = req.query.owner;
+    }
+    validateUserId(req,res,next);
+}, replication);
+const replicationCleanup = setInterval(() => replication.cleanup().catch(() => console.error('[Replication] Retention cleanup incomplete')), 3600000);
+replicationCleanup.unref();
 
 // Helper to execute Replicate operations with retry logic for 429 errors
 const executeWithRetry = async (operation, maxRetries = 10) => {
