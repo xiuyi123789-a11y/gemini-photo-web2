@@ -576,8 +576,8 @@ app.post('/api/generate-image', validateUserId, async (req, res) => {
         const replicateClient = getReplicateClient(req);
         const { prompt, aspect_ratio, image_input } = req.body;
 
-        // Using 'google/nano-banana' as requested
-        const model = "google/nano-banana";
+        // Nano Banana 2 accepts the existing prompt, reference images and output settings.
+        const model = "google/nano-banana-2";
         const input = {
             prompt: prompt,
             aspect_ratio: aspect_ratio || "3:4",
