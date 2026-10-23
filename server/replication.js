@@ -4,7 +4,7 @@ import { REPLICATION_MODELS, MAX_REFERENCES, isFinalJob, ERROR_MESSAGES, canonic
 import { sha256 } from './replication-assets.js';
 import { createReplicationWorker } from './replication-worker.js';
 import { prepareMasks } from './replication-composite.js';
-import { validateAnalysisInput, validateGenerationInput, payloadHash, fail, UUID } from './replication-validation.js';
+import { validateAnalysisInput, validateGenerationInput, validateRequestIdentity, payloadHash, fail, UUID } from './replication-validation.js';
 export { REPLICATION_MODELS };
 
 export function createReplicationRouter({store,assets,getProvider,pollMs,budgetMs,leaseMs,logger,
@@ -12,6 +12,7 @@ export function createReplicationRouter({store,assets,getProvider,pollMs,budgetM
   const router=Router(),worker=createReplicationWorker({store,assets,pollMs,budgetMs,leaseMs,logger});
   const view=async job=>({id:job.id,jobId:job.id,ownerId:job.ownerId,requestId:job.requestId,kind:job.kind,status:job.status,stage:job.stage,
     inputFingerprint:job.inputFingerprint,sourceHash:job.sourceHash,createdAt:job.createdAt,updatedAt:job.updatedAt,revision:job.revision,
+    recoveryNeeded:!isFinalJob(job)&&(!job.workerLease||job.workerLease.until<=Date.now()),
     completed:job.kind==='analysis'?(job.status==='succeeded'?1:0):job.results.length,total:job.total,
     analysis:job.analysis||null,analysisJobId:job.analysisJobId||null,approvedAnalysis:job.approvedAnalysis||null,
     source:job.assets.source,references:job.assets.references,target:job.target||'',input:job.kind==='generation'?job.input:null,
@@ -29,19 +30,25 @@ export function createReplicationRouter({store,assets,getProvider,pollMs,budgetM
   const route=handler=>async(req,res)=>{try{await handler(req,res);}catch(e){error(res,e);}};
   const resume=(req,job)=>{
     if(isFinalJob(job))return null;
-    try{const provider=getProvider(req);if(provider.accountRef!==job.providerAccountRef)return 'PROVIDER_ACCOUNT_MISMATCH';worker.wake(job,provider);return null;}
+    try{const provider=getProvider(req);if(provider.accountRef!==job.providerAccountRef)return 'PROVIDER_ACCOUNT_MISMATCH';worker.wake(job,provider,{resumeOnly:true});return null;}
     catch{return 'CREDENTIAL_REQUIRED';}
   };
-  const recoveringView=async(req,job)=>{const recoveryErrorCode=resume(req,job);return {...await view(job),recoveryErrorCode,
-    ...(recoveryErrorCode?{errorCode:recoveryErrorCode,error:ERROR_MESSAGES[recoveryErrorCode]}:{})};};
+  const receiptView=r=>({ownerId:r.ownerId,requestId:r.requestId,kind:r.kind,inputFingerprint:r.inputFingerprint,state:r.state,jobId:r.jobId||null,revision:r.revision});
+  async function reserve(identity) {
+    const old=await store.getRequest(identity.ownerId,identity.requestId);
+    if(old){if(old.kind!==identity.kind||old.inputFingerprint!==identity.inputFingerprint)throw fail('IDEMPOTENCY_CONFLICT',409);return old;}
+    if((await store.list()).some(j=>j.ownerId===identity.ownerId&&!isFinalJob(j)))throw fail('TASK_BUSY',409);
+    return store.reserveRequest({...identity,state:'reserved',jobId:null,revision:0,createdAt:Date.now(),updatedAt:Date.now()});
+  }
   function same(old,kind,hash) {
     if(old.kind!==kind||old.payloadHash!==hash)throw fail('IDEMPOTENCY_CONFLICT',409);return old;
   }
   async function create(req,res,kind) {
     if(!enabled())throw fail('FEATURE_DISABLED',503);
     const input=kind==='analysis'?validateAnalysisInput(req.body,{maxReferences}):validateGenerationInput(req.body,{advancedOutputs});
+    const identity={ownerId:req.userId,requestId:input.requestId,kind,inputFingerprint:input.inputFingerprint};
     const hash=payloadHash(input),old=await store.byRequest(req.userId,input.requestId);
-    if(old){same(old,kind,hash);resume(req,old);return res.status(202).json(await view(old));}
+    if(old){same(old,kind,hash);return res.status(202).json(await view(old));}
     let analysisJob;
     if(kind==='generation') {
       analysisJob=await own(req,input.analysisJobId);
@@ -57,6 +64,13 @@ export function createReplicationRouter({store,assets,getProvider,pollMs,budgetM
     const active=(await store.list()).filter(j=>!isFinalJob(j));
     if(active.some(j=>j.ownerId===req.userId))throw fail('TASK_BUSY',409);
     if(active.length>=20)throw fail('QUEUE_BUSY',503);
+    const receipt=await reserve(identity);
+    if(receipt.state==='closed')throw fail('REQUEST_CLOSED',410);
+    const intakeId=randomUUID();
+    const claimed=await store.updateRequest(req.userId,input.requestId,r=>r.state==='reserved'?{...r,state:'preparing',intakeId,payloadHash:hash}:null);
+    if(claimed?.state==='closed')throw fail('REQUEST_CLOSED',410);
+    if(claimed?.payloadHash!==hash)throw fail('IDEMPOTENCY_CONFLICT',409);
+    if(claimed?.intakeId!==intakeId)throw fail('REQUEST_PROCESSING',409);
     const job={id:randomUUID(),ownerId:req.userId,requestId:input.requestId,kind,payloadHash:hash,inputFingerprint:input.inputFingerprint,
       sourceHash:kind==='analysis'?input.sourceHash:analysisJob.sourceHash,referenceHashes:kind==='analysis'?input.referenceHashes:analysisJob.referenceHashes,
       target:kind==='analysis'?input.target:analysisJob.target,providerAccountRef:provider.accountRef,status:'queued',stage:'queued',revision:0,
@@ -66,32 +80,62 @@ export function createReplicationRouter({store,assets,getProvider,pollMs,budgetM
     try {
       job.assets=kind==='analysis'?await assets.prepare(job,input):await assets.cloneMaterials(job,analysisJob);
       const stored=await store.create(job);
-      if(stored.id!==job.id){await assets.remove(job);same(stored,kind,hash);resume(req,stored);return res.status(202).json(await view(stored));}
+      if(stored.id!==job.id){await assets.remove(job);same(stored,kind,hash);return res.status(202).json(await view(stored));}
+      const accepted=await store.updateRequest(req.userId,input.requestId,r=>r.state==='preparing'&&r.intakeId===intakeId?{...r,state:'accepted',jobId:job.id}:null);
+      if(accepted?.state!=='accepted'||accepted.jobId!==job.id){await store.closeRequest(identity);throw fail('REQUEST_CLOSED',410);}
       res.status(202).json(await view(job));worker.wake(job,provider);
-    } catch(e){if(!await store.get(job.id))await assets.remove(job).catch(()=>{});throw e;}
+    } catch(e){
+      // No worker has been dispatched until the accepted receipt is durable.
+      // Preserve a tombstone so a delayed body cannot be accepted later.
+      await store.closeRequest(identity).catch(()=>{});
+      if(!await store.get(job.id))await assets.remove(job).catch(()=>{});throw e;
+    }
   }
   router.get('/capabilities',route(async(req,res)=>res.json({version:2,enabled:enabled(),maxReferences,
     counts:advancedOutputs?[1,2,4]:[1],resolutions:advancedOutputs?['1K','2K','4K']:['1K','2K'],models:REPLICATION_MODELS,retentionDays})));
   router.post('/connectivity',route(async(req,res)=>res.json({success:true,models:await getProvider(req).connectivity()})));
+  router.post('/requests',route(async(req,res)=>{
+    if(!enabled())throw fail('FEATURE_DISABLED',503);
+    const identity={...validateRequestIdentity(req.body),ownerId:req.userId};const r=await reserve(identity);
+    if(r.state==='closed')throw fail('REQUEST_CLOSED',410);res.status(202).json(receiptView(r));
+  }));
+  router.get('/requests/:requestId',route(async(req,res)=>{
+    if(!UUID.test(req.params.requestId))throw fail('INPUT_INVALID');
+    const r=await store.getRequest(req.userId,req.params.requestId);if(!r)throw fail('JOB_NOT_FOUND',404);res.json(receiptView(r));
+  }));
+  router.post('/requests/:requestId/close',route(async(req,res)=>{
+    const identity={...validateRequestIdentity({...req.body,requestId:req.params.requestId}),ownerId:req.userId};
+    const result=await store.closeRequest(identity);res.json({closed:result.closed,receipt:receiptView(result.receipt),job:result.job?await view(result.job):null});
+  }));
   router.post('/analysis',route((req,res)=>create(req,res,'analysis')));
   router.post('/generation',route((req,res)=>create(req,res,'generation')));
   router.get('/active',route(async(req,res)=>{
     if(!['analysis','generation'].includes(req.query.kind))throw fail('INPUT_INVALID');
     const jobs=(await store.list()).filter(j=>j.ownerId===req.userId&&j.kind===req.query.kind&&!isFinalJob(j));
-    res.json({jobs:await Promise.all(jobs.map(j=>recoveringView(req,j)))});
+    res.json({jobs:await Promise.all(jobs.map(j=>view(j))),requests:(await store.activeRequests(req.userId,req.query.kind)).map(receiptView)});
   }));
   router.get('/request/:requestId',route(async(req,res)=>{
     if(!UUID.test(req.params.requestId))throw fail('JOB_NOT_FOUND',404);
     const job=await store.byRequest(req.userId,req.params.requestId);if(!job)throw fail('JOB_NOT_FOUND',404);
-    res.json(await recoveringView(req,job));
+    res.json(await view(job));
   }));
-  const read=route(async(req,res)=>{const job=await own(req,req.params.id);res.json(await recoveringView(req,job));});
+  const read=route(async(req,res)=>{const job=await own(req,req.params.id);res.json(await view(job));});
   router.get('/jobs/:id',read);router.get('/:id',read);
+  router.post('/jobs/:id/resume',route(async(req,res)=>{
+    const job=await own(req,req.params.id);
+    if(!isFinalJob(job)&&!(await store.attempts(job.id)).length){
+      if(job.workerLease?.until>Date.now())return res.json(await view(job));
+      const result=await store.closeRequest({ownerId:job.ownerId,requestId:job.requestId,kind:job.kind,inputFingerprint:job.inputFingerprint});
+      return res.json(await view(result.job));
+    }
+    const recoveryErrorCode=resume(req,job);
+    res.json({...await view(job),recoveryErrorCode,...(recoveryErrorCode?{errorCode:recoveryErrorCode,error:ERROR_MESSAGES[recoveryErrorCode]}:{})});
+  }));
   const cancel=route(async(req,res)=>{
     const job=await own(req,req.params.id);if(isFinalJob(job))return res.status(202).json(await view(job));
     const provider=getProvider(req);if(provider.accountRef!==job.providerAccountRef)throw fail('PROVIDER_ACCOUNT_MISMATCH',409);
     const next=await store.update(job.id,j=>isFinalJob(j)?null:{...j,cancelRequested:true,status:'cancel_requested',stage:'cancel_requested'});
-    worker.wake(next,provider);res.status(202).json(await view(next));
+    worker.wake(next,provider,{resumeOnly:true});res.status(202).json(await view(next));
   });
   router.post('/jobs/:id/cancel',cancel);router.post('/:id/cancel',cancel);
   router.post('/jobs/:id/revision',route(async(req,res)=>{
@@ -124,7 +168,7 @@ export function createReplicationRouter({store,assets,getProvider,pollMs,budgetM
       !Number.isFinite(createdAt)||createdAt<attempt.createStartedAt-120000||createdAt>attempt.deadlineAt)throw fail('RECONCILIATION_EVIDENCE_REQUIRED',422);
     await store.updateAttempt({...attempt,predictionId:prediction.id,remoteStatus:prediction.status,reconciliationState:'manual_evidence_linked',createAckAt:Date.now()});
     const next=await store.update(job.id,j=>({...j,status:j.cancelRequested?'cancel_requested':'running',errorCode:null}));
-    worker.wake(next,provider);res.json(await view(next));
+    worker.wake(next,provider,{resumeOnly:true});res.json(await view(next));
   }));
   router.get('/assets/:id/:name',route(async(req,res)=>{
     const job=await own(req,req.params.id);

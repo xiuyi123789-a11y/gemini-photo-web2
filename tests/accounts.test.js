@@ -46,10 +46,10 @@ after(async () => { if (server) await new Promise(resolve => server.close(resolv
 
 test('every API except auth and health requires a valid session', async () => {
   assert.equal((await request('/api/health')).status, 200);
-  for (const endpoint of ['/api/knowledge', '/api/error-notebook', '/api/images/any/file.png', '/api/upscale-image/result/missing', '/api/replication/missing', '/api/replication/request/missing']) {
+  for (const endpoint of ['/api/knowledge', '/api/error-notebook', '/api/images/any/file.png', '/api/upscale-image/result/missing', '/api/replication/missing', '/api/replication/request/missing', '/api/replication/requests/missing', '/api/replication/active?kind=analysis']) {
     assert.equal((await request(endpoint, { headers: { 'x-user-id': alice.id } })).status, 401);
   }
-  for (const endpoint of ['/api/analyze-image', '/api/generate-image', '/api/retouch-image', '/api/upscale-image/start', '/api/replication/analysis', '/api/replication/generation', '/api/replication/connectivity', '/api/replication/missing/cancel']) {
+  for (const endpoint of ['/api/analyze-image', '/api/generate-image', '/api/retouch-image', '/api/upscale-image/start', '/api/replication/analysis', '/api/replication/generation', '/api/replication/connectivity', '/api/replication/missing/cancel', '/api/replication/requests', '/api/replication/requests/missing/close', '/api/replication/jobs/missing/resume']) {
     assert.equal((await request(endpoint, { body: {} })).status, 401);
   }
 });
@@ -101,10 +101,15 @@ test('replication jobs use the signed-in owner even when x-user-id is forged', a
   const inputFingerprint=sha256(canonicalJson(materialIdentity(sha256(bytes),[{hash:sha256(bytes),angle:'front'}],'产品')));
   const call=(url,cookie,body)=>fetch(endpoint+url,{method:body?'POST':'GET',headers:{cookie,'x-user-id':bob.id,'x-replicate-token':'test-only-unused-token','Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
   try {
-    const start=await call('/analysis',aliceCookie,{requestId:randomUUID(),inputFingerprint,sourceImage:png,references:[{image:png,angle:'front'}],target:'产品'});
+    const requestId=randomUUID();
+    assert.equal((await call('/requests',aliceCookie,{requestId,kind:'analysis',inputFingerprint})).status,202);
+    assert.equal((await call('/requests/'+requestId,bobCookie)).status,404);
+    assert.equal((await call('/requests/'+requestId,aliceCookie)).status,200);
+    const start=await call('/analysis',aliceCookie,{requestId,inputFingerprint,sourceImage:png,references:[{image:png,angle:'front'}],target:'产品'});
     assert.equal(start.status,202);const {id}=await start.json();
     assert.equal((await call('/'+id,bobCookie)).status,404);
     assert.equal((await call('/'+id+'/cancel',bobCookie,{})).status,404);
+    assert.equal((await call('/jobs/'+id+'/resume',bobCookie,{})).status,404);
     assert.equal((await call('/'+id,aliceCookie)).status,200);
     // An asset's legacy owner hint must NEVER override the production login cookie.
     const job=await (await call('/'+id,aliceCookie)).json();
@@ -118,7 +123,7 @@ test('replication jobs use the signed-in owner even when x-user-id is forged', a
       if(job.status==='canceled')break;
       await new Promise(resolve=>setTimeout(resolve,10));
     }
-  } finally { await new Promise(resolve=>listener.close(resolve)); }
+  } finally { app.locals.replication.worker.stop();await app.locals.replication.worker.idle();await new Promise(resolve=>listener.close(resolve)); }
 });
 test('error notebook is private per account', async () => {
   assert.equal((await request('/api/error-notebook', { cookie: aliceCookie, body: { issue: 'alice only', solution: 'fixed' } })).status, 200);

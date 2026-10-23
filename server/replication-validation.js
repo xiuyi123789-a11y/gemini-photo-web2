@@ -5,6 +5,11 @@ export const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[
 const HASH=/^[0-9a-f]{64}$/;
 const text=(v,max,empty=true)=>{if(typeof v!=='string'||v.length>max||(!empty&&!v.trim()))throw fail('INPUT_INVALID');return v.trim();};
 const only=(body,keys)=>{if(!body||Array.isArray(body)||Object.keys(body).some(k=>!keys.includes(k)))throw fail('INPUT_INVALID');};
+export function validateRequestIdentity(body) {
+  only(body,['requestId','kind','inputFingerprint']);
+  if(!UUID.test(body.requestId||'')||!['analysis','generation'].includes(body.kind)||!HASH.test(body.inputFingerprint||''))throw fail('INPUT_INVALID');
+  return {requestId:body.requestId,kind:body.kind,inputFingerprint:body.inputFingerprint};
+}
 export function validateAnalysisInput(body,{maxReferences=MAX_REFERENCES}={}) {
   only(body,['requestId','inputFingerprint','sourceImage','references','target']);
   if(!UUID.test(body.requestId||'')||!HASH.test(body.inputFingerprint||''))throw fail('INPUT_INVALID');

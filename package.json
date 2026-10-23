@@ -13,7 +13,7 @@
     "preview": "vite preview",
     "release": "node scripts/update-changelog.js && git add src/data/changelog.json && git commit -m \"chore: update changelog\" && git push origin main",
     "create-user": "node server/create-user.js",
-    "test": "node --test tests/*.test.js",
+    "test": "node --import ./tests/block-external-fetch.js --test tests/*.test.js",
     "typecheck": "tsc --noEmit",
     "export:source": "node scripts/export-source.mjs"
   },

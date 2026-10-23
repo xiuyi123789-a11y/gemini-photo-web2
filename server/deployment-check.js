@@ -21,8 +21,9 @@ async function checkHttp(origin) {
   check(me.status === 200 && account.mode === 'accounts' && account.user === null, 'ACCOUNT_MODE_FAILED');
   for (const [method, pathname] of [
     ['GET', '/capabilities'], ['GET', '/active?kind=analysis'],
-    ['GET', '/jobs/' + fakeId], ['GET', '/assets/' + fakeId + '/source.png?owner=' + fakeId],
-    ['POST', '/connectivity'], ['POST', '/analysis'], ['POST', '/generation']
+    ['GET', '/jobs/' + fakeId], ['GET', '/requests/' + fakeId], ['GET', '/assets/' + fakeId + '/source.png?owner=' + fakeId],
+    ['POST', '/connectivity'], ['POST', '/analysis'], ['POST', '/generation'],
+    ['POST', '/requests'], ['POST', '/requests/' + fakeId + '/close'], ['POST', '/jobs/' + fakeId + '/resume']
   ]) {
     const response = await get(origin + '/api/replication' + pathname, {
       method, headers: { 'Content-Type': 'application/json', 'x-user-id': fakeId },
@@ -40,7 +41,7 @@ async function checkDatabase() {
   let transactionOpen = false;
   try {
     client = await pool.connect();
-    for (const name of ['users', 'sessions', 'knowledge_bases', 'error_notebook', 'replication_jobs', 'replication_predictions']) {
+    for (const name of ['users', 'sessions', 'knowledge_bases', 'error_notebook', 'replication_jobs', 'replication_predictions', 'replication_requests']) {
       const result = await client.query('SELECT to_regclass($1) AS relation', [name]);
       check(result.rows[0]?.relation, 'MISSING_TABLE_' + name);
     }
@@ -56,7 +57,7 @@ async function checkDatabase() {
       [ownerId, 'deployment-check-' + ownerId, 'disabled-deployment-fixture']);
     const job = { id: jobId, ownerId, requestId, kind: 'analysis', payloadHash: 'deployment-check',
       status: 'queued', revision: 0, updatedAt: Date.now() };
-    const store = createPgReplicationStore(client);
+    const store = createPgReplicationStore(client,{inTransaction:true});
     await store.create(job);
     assert.equal((await createPgReplicationStore(client).byRequest(ownerId, requestId)).id, jobId);
     await store.update(jobId, current => ({ ...current, status: 'running' }));
@@ -101,7 +102,7 @@ async function checkBundles(publicOrigin) {
       check(response.status === 200 && hash(Buffer.from(await response.arrayBuffer())) === hash(bytes), 'PUBLIC_BUNDLE_MISMATCH');
     }
   }
-  for (const marker of ['v1.4.0', 'replication_v2_', '确认分析内容', '开始复刻（仅生图）']) check(text.includes(marker), 'V2_UI_MARKER_MISSING_' + marker);
+  for (const marker of ['v1.4.1', 'replication_v2_', '确认分析内容', '开始复刻（仅生图）', '安全结束本次提交']) check(text.includes(marker), 'V2_UI_MARKER_MISSING_' + marker);
   if (publicOrigin) {
     const response = await get(publicOrigin);
     const publicHtml = await response.text();

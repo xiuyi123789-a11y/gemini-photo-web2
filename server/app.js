@@ -45,7 +45,7 @@ const getReplicateClient = (req) => {
 app.use(cors({
     origin: (origin, callback) => callback(null, !origin || (process.env.CORS_ORIGINS || 'http://localhost:5173').split(',').map(s => s.trim()).includes(origin)),
     methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-replicate-token', 'x-user-id']
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-replicate-token', 'x-user-id', 'x-replication-request-id']
 }));
 app.use(express.json({ limit: '50mb' })); // Increase limit for base64 images
 app.use(express.urlencoded({ extended: true }));
@@ -1088,6 +1088,20 @@ app.get(/(.*)/, (req, res) => {
 });
 
 app.use((error, req, res, next) => {
+  if(req.path.startsWith('/api/replication')) {
+    const code=error.type==='entity.too.large'?'PAYLOAD_TOO_LARGE':error.type==='entity.parse.failed'?'INVALID_JSON':
+      error.code==='ECONNABORTED'||error.type==='request.aborted'?'UPLOAD_INTERRUPTED':'INTERNAL_ERROR';
+    const status=code==='PAYLOAD_TOO_LARGE'?413:['INVALID_JSON','UPLOAD_INTERRUPTED'].includes(code)?400:
+      (Number.isInteger(error.status)&&error.status>=400&&error.status<500?error.status:500);
+    const id=req.get('x-replication-request-id');
+    console.error(JSON.stringify({event:'replication.request_error',method:req.method,path:req.path,error_code:code,http_status:status,
+      request_id:/^[0-9a-f-]{36}$/i.test(id||'')?id:null,
+      received_bytes:Number.isFinite(error.received)?error.received:null,expected_bytes:Number.isFinite(error.expected)?error.expected:null}));
+    if(res.headersSent)return next(error);
+    if(req.aborted||res.destroyed)return;
+    return res.status(status).json({errorCode:code,error:code==='INTERNAL_ERROR'?'请求未完成，请核对任务状态。':
+      ({PAYLOAD_TOO_LARGE:'上传请求过大，请减小图片体积。',INVALID_JSON:'请求内容不完整或格式无效。',UPLOAD_INTERRUPTED:'素材传输已中断，请核对原请求。'})[code]});
+  }
   console.error('[Server] Request failed:', error.code || error.name);
   if (res.headersSent) return next(error);
   res.status(500).json({ error: 'Internal server error' });

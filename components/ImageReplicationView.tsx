@@ -5,6 +5,7 @@ import { userStorage } from '../services/browserStorage';
 import { MAX_REFERENCES, isFinalJob } from '../shared/replication-contract.js';
 import { startAnalysis,startGeneration,getReplicationJob,findReplicationRequest,listActiveJobs,cancelReplicationJob,checkReplicationConnection,getReplicationCapabilities,
   reviseAnalysis,reviewReplication,reconcileReplication,readOperation,saveOperation,forgetOperation,assertOperation,ownerId,
+  lookupOperation,closeOperation,resumeReplicationJob,
   type Operation,type ReplicationJob,type ReferenceAngle,type PreserveKey,type Point,type EditMask,type JobResult } from '../services/replicationService';
 import './ImageReplicationView.css';
 
@@ -24,6 +25,7 @@ export const ImageReplicationView:React.FC=()=>{
   const [preserve,setPreserve]=useState<PreserveKey[]>(Object.keys(locks) as PreserveKey[]),[notes,setNotes]=useState(''),[count,setCount]=useState(1),[resolution,setResolution]=useState('2K');
   const [caps,setCaps]=useState({enabled:true,maxReferences:MAX_REFERENCES,counts:[1],resolutions:['1K','2K']});
   const [pendingKind,setPendingKind]=useState<'analysis'|'generation'|null>(null),[reading,setReading]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
+  const [operations,setOperations]=useState<{analysis:Operation|null;generation:Operation|null}>(()=>({analysis:readOperation('analysis'),generation:readOperation('generation')}));
   const [mode,setMode]=useState<'original'|'raw'|'result'|'compare'>('original'),[candidate,setCandidate]=useState<Candidate|null>(null),[split,setSplit]=useState(50),[enlarged,setEnlarged]=useState<string|null>(null);
   const [costConfirmed,setCostConfirmed]=useState(false),[reviewChecks,setReviewChecks]=useState<Record<string,boolean>>({}),[reconcileId,setReconcileId]=useState('');
   const sourceInput=useRef<HTMLInputElement>(null),refsInput=useRef<HTMLInputElement>(null),mounted=useRef(true),urls=useRef(new Set<string>()),operationBusy=useRef(false);
@@ -31,7 +33,10 @@ export const ImageReplicationView:React.FC=()=>{
   const latestRevisions=useRef(new Map<string,number>());
   const restoredInputs=useRef(new Set<string>());
   const activeJob=[analysisJob,generationJob].find(j=>j&&!isFinalJob(j));
-  const locked=reading||!!pendingKind||!!activeJob;
+  const unresolved=(Object.values(operations) as Array<Operation|null>).filter((op):op is Operation=>!!op&&![analysisJob,generationJob].some(j=>j?.requestId===op.requestId&&isFinalJob(j)));
+  const feeLocked=!!activeJob||unresolved.length>0;
+  const locked=reading||!!pendingKind||feeLocked;
+  const syncOperations=()=>setOperations({analysis:readOperation('analysis'),generation:readOperation('generation')});
   const instances=analysisJob?.analysis?.data?.scene?.old_product_instances||[];
   const validAnalysis=analysisJob?.status==='succeeded'&&analysisJob.inputFingerprint===fingerprint&&!!analysisJob.analysis?.data;
   const materialFrom=(a:any):Material=>({id:a.name,file:null,preview:a.url,width:a.width,height:a.height,angle:a.angle||'other'});
@@ -63,37 +68,47 @@ export const ImageReplicationView:React.FC=()=>{
     if(isFinalJob(next))setNotice(next.kind==='analysis'?'产品分析已结束。请核对文字、选择对象并绘制范围；不会自动生图。':
       next.status==='completed_needs_review'?'候选已生成，需核对新产品身份与场景后再确认合格。':stages[next.status]||next.status);
   }
-  async function track(operation:Operation){
+  async function track(operation:Operation,recover=false){
     const serial=++loops.current[operation.kind];
     while(mounted.current&&serial===loops.current[operation.kind]){
       try{
-        const job=operation.jobId?await getReplicationJob(operation.jobId):await findReplicationRequest(operation.requestId);
+        const result=await lookupOperation(operation);
+        if(!mounted.current||serial!==loops.current[operation.kind])return;
+        setPendingKind(previous=>previous===operation.kind?null:previous);
+        if(result.closed){forgetOperation(operation.kind);syncOperations();setError('');setNotice('本次提交已安全结束，可以重新上传或提交。');return;}
+        if(!result.job){syncOperations();setNotice('原请求尚无模型任务。可重新连接查询，或安全结束本次提交；不会自动重发。');return;}
+        let job=result.job;
+        if(recover&&job.recoveryNeeded&&!isFinalJob(job)&&!['submission_unknown','cancel_unknown'].includes(job.status))job=await resumeReplicationJob(job.id);
+        if(!mounted.current||serial!==loops.current[operation.kind])return;
         assertOperation(operation,job);operation={...operation,jobId:job.id};saveOperation(operation);apply(job,true);
-        setPendingKind(null);
+        syncOperations();
         if(isFinalJob(job)||job.recoveryErrorCode||['submission_unknown','cancel_unknown'].includes(job.status))return;
-      }catch(e){if(mounted.current){setError(issue(e));setNotice('后台可能仍在运行。请重新连接查询，勿重复提交。');}return;}
+      }catch(e){if(mounted.current){setPendingKind(previous=>previous===operation.kind?null:previous);syncOperations();setError(issue(e));setNotice('查询已中断。原请求仍保留，可重新连接或安全结束；不会自动重发。');}return;}
       await new Promise(r=>window.setTimeout(r,1600));
     }
   }
   async function restore(kind:'analysis'|'generation'){
     let op=readOperation(kind);
     if(!op){
-      const active=await listActiveJobs(kind);const job=active.jobs[0];if(!job)return;
-      op={kind,jobId:job.id,requestId:job.requestId,inputFingerprint:job.inputFingerprint,ownerId:ownerId()};saveOperation(op);
+      const active=await listActiveJobs(kind);const job=active.jobs[0],receipt=active.requests?.[0];if(!job&&!receipt)return;
+      op=job?{kind,jobId:job.id,requestId:job.requestId,inputFingerprint:job.inputFingerprint,ownerId:ownerId()}:
+        {kind,requestId:receipt!.requestId,inputFingerprint:receipt!.inputFingerprint,ownerId:ownerId()};saveOperation(op);syncOperations();
     }
-    await track(op);
+    await track(op,true);
   }
   useEffect(()=>{
     mounted.current=true;
     void getReplicationCapabilities().then(c=>mounted.current&&setCaps(c)).catch(()=>{});
-    void (async()=>{try{await restore('analysis');await restore('generation');}catch(e){if(mounted.current)setError(issue(e));}})();
+    void Promise.all([restore('analysis'),restore('generation')]).catch(e=>{if(mounted.current)setError(issue(e));});
     if(userStorage.getItem('replication_active_job'))setNotice('检测到旧版任务标识，未自动关联到新版分析；历史费用与任务需单独核对。');
     return()=>{mounted.current=false;loops.current.analysis++;loops.current.generation++;urls.current.forEach(u=>URL.revokeObjectURL(u));};
   },[]);
   function stale(){
+    if(feeLocked)return;
     setAnalysisJob(null);setGenerationJob(null);setAnalysisText('');setAnalysisConfirmed(false);setFingerprint('');currentFingerprint.current='';
     setSelectedIds([]);setMasks([]);setProtectMasks([]);setDrawing(null);setPoints([]);setCandidate(null);setMode('original');setCostConfirmed(false);setError('');setNotice('素材已改变，请重新分析。');
     forgetOperation('analysis');forgetOperation('generation');
+    syncOperations();
   }
   async function upload(files:FileList|File[],kind:'source'|'refs'){
     if(locked||operationBusy.current||!files.length)return;setReading(true);setError('');
@@ -122,8 +137,8 @@ export const ImageReplicationView:React.FC=()=>{
       const next=await startAnalysis(source.file,references.map(r=>({file:r.file!,angle:r.angle})),target);
       currentFingerprint.current=next.inputFingerprint;setFingerprint(next.inputFingerprint);apply(next);
       const op=readOperation('analysis');if(op)await track(op);
-    }catch(e){setError(issue(e));if(!readOperation('analysis'))setPendingKind(null);}
-    finally{operationBusy.current=false;}
+    }catch(e){setError(issue(e));}
+    finally{operationBusy.current=false;setPendingKind(null);syncOperations();}
   }
   async function confirmAnalysis(){
     if(!validAnalysis||!analysisJob)return;operationBusy.current=true;setReading(true);setError('');
@@ -142,8 +157,8 @@ export const ImageReplicationView:React.FC=()=>{
         maskSpace:{width:analysisJob.source.width,height:analysisJob.source.height,sourceHash:analysisJob.source.sha256},
         resolution,count,preserve,notes,confirmedPredictions:count});
       apply(next);const op=readOperation('generation');if(op)await track(op);
-    }catch(e){setError(issue(e));if(!readOperation('generation'))setPendingKind(null);}
-    finally{operationBusy.current=false;}
+    }catch(e){setError(issue(e));}
+    finally{operationBusy.current=false;setPendingKind(null);syncOperations();}
   }
   function selectInstance(id:string,checked:boolean){setSelectedIds(ids=>checked?[...ids,id]:ids.filter(i=>i!==id));setDrawing(null);setPoints([]);setCostConfirmed(false);}
   function beginDrawing(kind:'edit'|'protect',id=''){setMode('original');setDrawing(kind);setDrawInstance(id);setPoints([]);setError('');}
@@ -160,6 +175,12 @@ export const ImageReplicationView:React.FC=()=>{
   }
   async function cancel(){if(!activeJob)return;try{const next=await cancelReplicationJob(activeJob.id);apply(next);const op=readOperation(next.kind);if(op)await track(op);}catch(e){setError(issue(e));}}
   async function reconnect(){setError('');try{await Promise.all([restore('analysis'),restore('generation')]);}catch(e){setError(issue(e));}}
+  async function safelyEnd(op:Operation){
+    try{const result=await closeOperation(op);syncOperations();if(result.job)apply(result.job);
+      if(result.closed){setError('');setNotice('已确认未提交模型并封存原请求，可以重新提交。');}
+      else setNotice('该请求已有预测记录，费用保护仍保留；请查询或取消原任务，不会重新创建预测。');
+    }catch(e){setError(issue(e));}finally{setPendingKind(null);syncOperations();}
+  }
   async function reconcile(){if(!activeJob||!reconcileId)return;try{const next=await reconcileReplication(activeJob.id,reconcileId.trim());apply(next);setReconcileId('');const op=readOperation(next.kind);if(op)await track(op);}catch(e){setError(issue(e));}}
   async function review(decision:'accept'|'reject'){
     if(!candidate)return;try{const next=await reviewReplication(candidate.job.id,decision,reviewChecks);apply(next);setCandidate({job:next,result:next.results.at(-1)!});}catch(e){setError(issue(e));}
@@ -172,7 +193,7 @@ export const ImageReplicationView:React.FC=()=>{
   const generationReady=validAnalysis&&analysisConfirmed&&!locked&&caps.enabled;
   return <section className="rp-view" aria-label="图像复刻工作台">
     <div className="rp-heading"><div><h1>图像复刻 <span>产品场景替换</span></h1><p>先分析并确认产品，再明确替换范围。每一步独立执行。</p></div>
-      <button className="rp-button" disabled={locked} onClick={async()=>{try{await checkReplicationConnection();setNotice('两模型元数据可访问，未创建预测任务。');}catch(e){setError(issue(e));}}}><PlugZap/>检查连接</button></div>
+      <button className="rp-button" disabled={reading||!!pendingKind} onClick={async()=>{try{await checkReplicationConnection();setNotice('两模型元数据可访问，未创建预测任务。');}catch(e){setError(issue(e));}}}><PlugZap/>检查连接</button></div>
     <div className="rp-workflow"><span>01 上传素材</span><span>02 分析并确认</span><span>03 选择对象与范围</span><span>04 复刻与审核</span></div>
     {!caps.enabled&&<div className="rp-message">新任务入口已关闭，现有任务仍可查询。</div>}
     {(error||notice)&&<div className={'rp-message '+(error?'rp-error':'')} role={error?'alert':'status'}>{error||notice}</div>}
@@ -190,7 +211,7 @@ export const ImageReplicationView:React.FC=()=>{
         <input ref={refsInput} type="file" hidden multiple accept="image/jpeg,image/png,image/webp" onChange={e=>{if(e.target.files)void upload(e.target.files,'refs');e.target.value='';}}/></div>
       <p className="rp-hint">同一新产品；JPG/PNG/WEBP；单张20 MB，合计32 MB。</p>
       <label className="rp-label">替换对象（可留空自动识别）<input disabled={locked} maxLength={500} value={target} onChange={e=>{stale();setTarget(e.target.value);}} placeholder="例如：两只鞋，或桌上的瓶子"/></label>
-      <button className="rp-button rp-wide" disabled={locked||!caps.enabled} onClick={analyze}><ScanEye/>{pendingKind==='analysis'||analysisJob&&!isFinalJob(analysisJob)?'正在分析产品…':'分析产品特征（仅文字）'}</button>
+      <button className="rp-button rp-wide" disabled={locked||!caps.enabled} onClick={analyze}><ScanEye/>{pendingKind==='analysis'?'正在提交分析素材…':analysisJob&&!isFinalJob(analysisJob)?(['submission_unknown','cancel_unknown'].includes(analysisJob.status)?'分析任务待核对':stages[analysisJob.status]||'分析任务待恢复'):unresolved.some(op=>op.kind==='analysis')?'分析提交待核对':'分析产品特征（仅文字）'}</button>
       <p className="rp-hint">o4-mini · 无需先框选。此按钮不会调用生图模型。</p>
       <textarea className="rp-analysis" aria-label="产品分析摘要" value={analysisText} disabled={locked||!validAnalysis} maxLength={16000} onChange={e=>{setAnalysisText(e.target.value);setAnalysisConfirmed(false);setCostConfirmed(false);}} placeholder="分析成功后显示可编辑的产品特征"/>
       <button className="rp-button rp-wide" disabled={locked||!validAnalysis||!analysisText.trim()} onClick={confirmAnalysis}><Check/>{analysisConfirmed?'分析已确认':'确认分析内容'}</button>
@@ -224,9 +245,10 @@ export const ImageReplicationView:React.FC=()=>{
         <label className="rp-cost"><input type="checkbox" disabled={locked||!generationReady} checked={costConfirmed} onChange={e=>setCostConfirmed(e.target.checked)}/>本次请求 {count} 个 Nano Banana 2 图像预测；金额以供应商实际记录为准，失败或取消也可能计费。</label>
         <button className="rp-button rp-primary" disabled={!generationReady||!!drawing} onClick={generate}><Sparkles/>开始复刻（仅生图）</button>
       </section>
-      {(analysisJob||generationJob||pendingKind)&&<section className="rp-card rp-settings" aria-label="任务状态">
+      {(analysisJob||generationJob||pendingKind||unresolved.length>0)&&<section className="rp-card rp-settings" aria-label="任务状态">
         <div className="rp-card-title"><h2>独立任务状态</h2><button className="rp-button" onClick={reconnect}><RefreshCw/>重新连接查询</button></div>
         {pendingKind&&<p>{pendingKind==='analysis'?'分析':'生图'}请求尚在提交或接收待确认；请勿重复提交。</p>}
+        {unresolved.map(op=><div className="rp-task" key={op.requestId}><b>{op.kind==='analysis'?'分析':'生图'}请求 · 原请求保留</b><small>请求：{op.requestId}</small><button className="rp-button" disabled={!!pendingKind} onClick={()=>safelyEnd(op)}>安全结束本次提交</button><small>仅当服务端确认没有预测提交记录时解除费用保护；不取消、不重建预测。</small></div>)}
         {[analysisJob,generationJob].filter(Boolean).map(j=><div className="rp-task" key={j!.id}><b>{j!.kind==='analysis'?'o4-mini 产品分析':'Nano Banana 2 图像生成'} · {stages[j!.status]||j!.status}</b><small>任务：{j!.id}<br/>请求：{j!.requestId}</small>{j!.predictions.map((p,i)=><small key={i}>{p.model} · {p.predictionId||'预测ID尚未确认'} · {p.remoteStatus||p.reconciliationState}</small>)}</div>)}
         {activeJob&&<><button className="rp-button" onClick={cancel}>请求取消远端任务</button><p className="rp-hint">远端终态确认后才标记取消；中断浏览器不会自动停止收费。</p>{['submission_unknown','cancel_unknown'].includes(activeJob.status)&&<label className="rp-label">手动核对供应商预测ID（会验证模型、时间和输入摘要）<input value={reconcileId} onChange={e=>setReconcileId(e.target.value)}/><button className="rp-button" onClick={reconcile}>关联并查询原预测</button></label>}</>}
       </section>}

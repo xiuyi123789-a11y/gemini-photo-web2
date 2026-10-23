@@ -17,6 +17,9 @@ import {parseProductAnalysis,generationPrompt} from '../server/replication-promp
 import {compositeReplicationImage,prepareMasks} from '../server/replication-composite.js';
 import {canonicalJson,materialIdentity,REPLICATION_MODELS,isFinalJob,matchesOperation,recoveryKey} from '../shared/replication-contract.js';
 import {createApp} from '../server/app.js';
+import http from 'node:http';
+import { Readable } from 'node:stream';
+import { createGzip } from 'node:zlib';
 
 const testRoot=fileURLToPath(new URL('../.local/migration-archive/test-data/',import.meta.url));
 const source=await sharp({create:{width:96,height:64,channels:4,background:'#777777'}}).png().toBuffer();
@@ -32,7 +35,7 @@ function generationBody(job,patch={}){return {requestId:randomUUID(),inputFinger
 
 async function harness(options={}) {
   await mkdir(testRoot,{recursive:true});const directory=options.directory||await mkdtemp(path.join(testRoot,'replication-v2-'));
-  const store=options.store||createFileReplicationStore(directory),created=[],canceled=[],logs=[],predictions=new Map();
+  const store=options.store||createFileReplicationStore(directory),created=[],canceled=[],queried=[],logs=[],predictions=new Map();
   let serial=0;
   const provider={accountRef:'fake-account',connectivity:async()=>Object.values(REPLICATION_MODELS).map(model=>({model,accessible:true})),
     create:async(model,input)=>{
@@ -44,7 +47,7 @@ async function harness(options={}) {
       if(options.rejectCreateAt===serial)throw {code:'PROVIDER_REJECTED',status:422};
       return p;
     },
-    get:async id=>{if(options.getError)throw new Error('fake disconnect');const p=predictions.get(id);if(!p)throw new Error('not found');return {...p};},
+    get:async id=>{queried.push(id);if(options.getError)throw new Error('fake disconnect');const p=predictions.get(id);if(!p)throw new Error('not found');return {...p};},
     cancel:async id=>{canceled.push(id);if(options.cancelError)throw new Error('fake cancel disconnect');const p=predictions.get(id);p.status='canceled';return p;}};
   const assets=createReplicationAssets(directory,{download:options.download||(async()=>options.outputBytes||generated)});
   const routers=[];let server,base;
@@ -55,7 +58,7 @@ async function harness(options={}) {
   };
   await start();
   const request=(url,body,owner=options.owner||'alice',token='fake')=>fetch(base+url,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json','x-user-id':owner,'x-replicate-token':token},...(body===undefined?{}:{body:JSON.stringify(body)})});
-  return {created,canceled,logs,predictions,request,store,assets,directory,
+  return {created,canceled,queried,logs,predictions,request,store,assets,directory,
     async restart(){routers.at(-1).worker.stop();await routers.at(-1).worker.idle();await new Promise(r=>server.close(r));await start();},
     async close(){for(const router of routers)router.worker.stop();await Promise.all(routers.map(r=>r.worker.idle()));await new Promise(r=>server.close(r));
       if(!options.directory&&path.resolve(directory).startsWith(path.resolve(testRoot)+path.sep))await rm(directory,{recursive:true,force:true});},
@@ -88,7 +91,10 @@ test('generation without analysis, selection, valid masks or cost acknowledgment
   }finally{await h.close();}
 });
 test('same request ID with identical body returns one job across concurrent requests; conflicting kind/payload is 409',async()=>{
-  const h=await harness();try{const body=analysisBody();const responses=await Promise.all(Array.from({length:4},()=>h.request('/analysis',body)));const jobs=await Promise.all(responses.map(r=>r.json()));assert.equal(new Set(jobs.map(j=>j.id)).size,1);const j=await waitFor(h,jobs[0].id);assert.equal(h.created.length,1);
+  const h=await harness();try{const body=analysisBody();const responses=await Promise.all(Array.from({length:4},()=>h.request('/analysis',body)));const values=await Promise.all(responses.map(r=>r.json()));
+    responses.forEach((r,i)=>assert(r.status===202||r.status===409&&values[i].errorCode==='REQUEST_PROCESSING'));
+    const jobs=values.filter(j=>j.id);assert(jobs.length);assert.equal(new Set(jobs.map(j=>j.id)).size,1);const j=await waitFor(h,jobs[0].id);assert.equal(h.created.length,1);
+    assert.equal((await (await h.request('/analysis',body)).json()).id,j.id);
     assert.equal((await h.request('/analysis',{...body,target:'different'})).status,409);
     const conflict=await h.request('/generation',generationBody(j,{requestId:body.requestId}));assert.equal(conflict.status,409);assert.equal((await conflict.json()).errorCode,'IDEMPOTENCY_CONFLICT');assert.equal(h.created.length,1);
   }finally{await h.close();}
@@ -118,8 +124,10 @@ test('reconcile unknown attempt requires exact input evidence and never creates 
     assert.equal((await h.request('/jobs/'+j.id+'/reconcile',{predictionId:p.id})).status,200);const done=await waitFor(h,j.id);assert.equal(done.status,'succeeded');assert.equal(h.created.length,1);
   }finally{await h.close();}
 });
-test('acknowledged running prediction resumes by GET after backend restart without another create',async()=>{
-  const h=await harness({pending:true});try{const r=await h.request('/analysis',analysisBody()),id=(await r.json()).id;await waitFor(h,id,j=>j.predictions.length&&j.predictions[0].predictionId);await h.restart();h.predictions.get('prediction-1').status='succeeded';const j=await waitFor(h,id);assert.equal(j.status,'succeeded');assert.equal(h.created.length,1);}finally{await h.close();}
+test('acknowledged prediction stays unchanged on GET after restart; explicit resume only queries the existing prediction',async()=>{
+  const h=await harness({pending:true});try{const r=await h.request('/analysis',analysisBody()),id=(await r.json()).id;await waitFor(h,id,j=>j.predictions.length&&j.predictions[0].predictionId);await h.restart();h.predictions.get('prediction-1').status='succeeded';
+    const before=await h.store.get(id),reads=h.queried.length;await h.request('/jobs/'+id);await h.request('/request/'+before.requestId);await h.request('/active?kind=analysis');await pause(20);assert.equal((await h.store.get(id)).revision,before.revision);assert.equal(h.queried.length,reads);assert.equal(h.created.length,1);
+    await h.request('/jobs/'+id+'/resume',{});const j=await waitFor(h,id);assert.equal(j.status,'succeeded');assert.equal(h.created.length,1);}finally{await h.close();}
 });
 test('cancel is confirmed with a GET; timeout or cancellation failure is never labeled canceled',async()=>{
   const h=await harness({pending:true,cancelError:true});try{const r=await h.request('/analysis',analysisBody()),id=(await r.json()).id;await waitFor(h,id,j=>j.predictions[0]?.predictionId);await h.request('/jobs/'+id+'/cancel',{});const j=await waitFor(h,id);assert.equal(j.status,'cancel_unknown');assert.equal(j.errorCode,'CANCEL_UNKNOWN');assert.equal(h.created.length,1);}finally{await h.close();}
@@ -130,7 +138,9 @@ test('owner isolation covers jobs, assets, request lookup, cancel, review and or
   const h=await harness({pending:true});try{const body=analysisBody(),r=await h.request('/analysis',body),j=await r.json();for(const url of ['/jobs/'+j.id,'/request/'+body.requestId,j.source.url.replace('/api/replication','')])assert.equal((await h.request(url,undefined,'bob')).status,404);
     for(const url of ['/jobs/'+j.id+'/cancel','/jobs/'+j.id+'/review','/jobs/'+j.id+'/revision'])assert.equal((await h.request(url,{},'bob')).status,404);
     assert.equal((await h.request('/jobs/'+j.id+'/cancel',{},'alice','wrong')).status,409);
-    const wrongCredential=await (await h.request('/jobs/'+j.id,undefined,'alice','wrong')).json();assert.equal(wrongCredential.recoveryErrorCode,'PROVIDER_ACCOUNT_MISMATCH');
+    await waitFor(h,j.id,x=>x.predictions[0]?.predictionId);
+    const readable=await (await h.request('/jobs/'+j.id,undefined,'alice','wrong')).json();assert.equal(readable.recoveryErrorCode,undefined);
+    const wrongCredential=await (await h.request('/jobs/'+j.id+'/resume',{},'alice','wrong')).json();assert.equal(wrongCredential.recoveryErrorCode,'PROVIDER_ACCOUNT_MISMATCH');
     await h.request('/jobs/'+j.id+'/cancel',{});assert.equal((await waitFor(h,j.id)).status,'canceled');
   }finally{await h.close();}
 });
@@ -200,4 +210,188 @@ test('native provider sends exactly one official-model POST with Cancel-After, e
     assert.equal(calls.length,1);assert.equal(calls[0].url,'https://api.replicate.com/v1/models/openai/o4-mini/predictions');assert.equal(calls[0].options.headers['Cancel-After'],'300s');assert(!calls[0].options.headers.Prefer);
     await assert.rejects(provider.create('unapproved/model',{}));assert.equal(calls.length,1);
   }
+});
+
+test('pre-submission asset read failure terminates safely, including after restart, with zero predictions',async()=>{
+  const h=await harness();
+  try{
+    h.assets.dataUri=async()=>{throw Object.assign(new Error('MOCK missing asset'),{code:'ENOENT'});};
+    const response=await h.request('/analysis',analysisBody());assert.equal(response.status,202);
+    const id=(await response.json()).id;
+    const first=await waitFor(h,id,j=>j.errorCode==='INPUT_PREPARATION_FAILED');
+    assert.equal(first.status,'failed');assert(isFinalJob(first));assert.equal(h.created.length,0);assert.equal((await h.store.attempts(id)).length,0);
+    await h.restart();
+    const after=await waitFor(h,id,j=>j.errorCode==='INPUT_PREPARATION_FAILED');
+    assert.equal(after.status,'failed');assert.equal(h.created.length,0);assert.equal((await h.store.attempts(id)).length,0);
+  }finally{await h.close();}
+});
+
+test('array text chunks parse and refill as one analysis, without invoking generation',async()=>{
+  const text=JSON.stringify(fixture());
+  const h=await harness({analysisOutput:[text.slice(0,40),text.slice(40)]});
+  try{const r=await h.request('/analysis',analysisBody());const j=await waitFor(h,(await r.json()).id);
+    assert.equal(j.status,'succeeded');assert.equal(j.analysis.rawText,text);assert(j.analysis.text.length>0);
+    assert.equal(h.created.length,1);assert.equal(h.created[0].model,'openai/o4-mini');
+  }finally{await h.close();}
+});
+
+test('GET of queued legacy generation is read-only; explicit recovery terminates without any Nano Banana 2',async()=>{
+  const h=await harness();
+  try{
+    const a=await approved(h),original=await h.store.get(a.id);
+    const job={...original,id:randomUUID(),requestId:randomUUID(),kind:'generation',status:'queued',stage:'queued',workerLease:null,
+      analysis:null,analysisJobId:a.id,approvedAnalysis:{text:a.analysis.text,revisionHash:a.analysis.revisionHash},input:generationBody(a),results:[],images:[],total:1};
+    job.assets=await h.assets.cloneMaterials(job,original);
+    await h.store.create(job);
+    assert.equal(h.created.length,1);assert.equal((await h.store.attempts(job.id)).length,0);
+    assert.equal((await h.request('/jobs/'+job.id)).status,200);
+    await pause(20);assert.equal(h.created.length,1);assert.equal((await h.store.get(job.id)).status,'queued');
+    await h.request('/jobs/'+job.id+'/resume',{});const g=await waitFor(h,job.id);assert.equal(g.status,'failed');assert.equal(h.created.length,1);
+  }finally{await h.close();}
+});
+
+async function intakeApp(){
+  const h=await harness();let providerCalls=0;
+  const blocked=()=>{providerCalls++;throw new Error('MOCK_PROVIDER_MUST_NOT_BE_CALLED');};
+  const app=createApp({dataDir:h.directory,replicateClientFactory:()=>({}),replicationProviderFactory:blocked});
+  const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});
+  return {h,app,server,port:server.address().port,calls:()=>providerCalls,async close(){app.locals.replication.worker.stop();await app.locals.replication.worker.idle();await new Promise(resolve=>server.close(resolve));await h.close();}};
+}
+
+test('actual Express intake: interrupted JSON upload logs UPLOAD_INTERRUPTED, no POST intake log/job/model; original request lookup is 404',async()=>{
+  const x=await intakeApp(),errors=[],logs=[],originalError=console.error,originalLog=console.log;
+  console.error=(...args)=>errors.push(args);console.log=(...args)=>logs.push(args);
+  try{
+    const requestId=randomUUID();
+    await new Promise(resolve=>{
+      const request=http.request({host:'127.0.0.1',port:x.port,path:'/api/replication/analysis',method:'POST',
+        headers:{'Content-Type':'application/json','Content-Length':'100000','x-user-id':'alice','x-replication-request-id':requestId}},response=>response.resume());
+      request.on('error',resolve);
+      request.write('{"requestId":"'+requestId+'","sourceImage":"');
+      setTimeout(()=>request.destroy(),30);
+    });
+    for(let i=0;i<20&&!errors.length;i++)await pause(5);
+    const entry=errors.map(args=>{try{return JSON.parse(args[0]);}catch{return null;}}).find(e=>e?.error_code==='UPLOAD_INTERRUPTED');
+    assert(entry);assert.equal(entry.http_status,400);assert.equal(entry.request_id,requestId);
+    assert.equal(entry.expected_bytes,100000);assert(entry.received_bytes>0&&entry.received_bytes<entry.expected_bytes);
+    assert(!logs.some(args=>String(args[0]).includes('[Request] POST /api/replication/analysis')));
+    const response=await fetch('http://127.0.0.1:'+x.port+'/api/replication/request/'+requestId,{headers:{'x-user-id':'alice'}});
+    assert.equal(response.status,404);assert.equal((await response.json()).errorCode,'JOB_NOT_FOUND');
+    assert.equal((await x.h.store.list()).length,0);assert.equal(x.calls(),0);
+  }finally{console.error=originalError;console.log=originalLog;await x.close();}
+});
+
+test('actual Express intake: malformed JSON returns its correct 400 classification, without a task or model call',async()=>{
+  const x=await intakeApp();
+  try{
+    const response=await fetch('http://127.0.0.1:'+x.port+'/api/replication/analysis',{method:'POST',headers:{'Content-Type':'application/json'},body:'{'});
+    assert.equal(response.status,400);assert.equal((await response.json()).errorCode,'INVALID_JSON');assert.equal((await x.h.store.list()).length,0);assert.equal(x.calls(),0);
+  }finally{await x.close();}
+});
+
+test('actual Express intake: expanded body over 50 MiB returns 413 with a safe request trace and zero model calls',async()=>{
+  const x=await intakeApp(),errors=[],originalError=console.error,requestId=randomUUID();console.error=(...args)=>errors.push(args);
+  try{
+    // Reuse a 1 MiB whitespace block through gzip: exercise the real parser
+    // limit without allocating or transmitting a 51 MiB request body at once.
+    const block=Buffer.alloc(1024*1024,32);
+    const response=await new Promise((resolve,reject)=>{
+      const request=http.request({host:'127.0.0.1',port:x.port,path:'/api/replication/analysis',method:'POST',
+        headers:{'Content-Type':'application/json','Content-Encoding':'gzip','x-user-id':'alice',
+          'x-replication-request-id':requestId,'x-replicate-token':'MOCK_SECRET_DO_NOT_LOG'}},response=>{
+          let text='';response.setEncoding('utf8');response.on('data',chunk=>text+=chunk);response.on('end',()=>resolve({status:response.statusCode,body:JSON.parse(text)}));
+        });
+      request.setTimeout(10000,()=>request.destroy(new Error('MOCK_REQUEST_TIMEOUT')));request.on('error',reject);
+      const source=Readable.from(Array(51).fill(block)),zip=createGzip();source.on('error',reject);zip.on('error',reject);source.pipe(zip).pipe(request);
+    });
+    assert.equal(response.status,413);assert.equal(response.body.errorCode,'PAYLOAD_TOO_LARGE');
+    const entry=JSON.parse(errors.find(args=>String(args[0]).includes('PAYLOAD_TOO_LARGE'))[0]);assert.equal(entry.http_status,413);assert.equal(entry.request_id,requestId);
+    assert(!JSON.stringify(errors).includes('MOCK_SECRET_DO_NOT_LOG'));assert.equal((await x.h.store.list()).length,0);assert.equal(x.calls(),0);
+  }finally{console.error=originalError;await x.close();}
+});
+
+const requestIdentity=body=>({requestId:body.requestId,kind:'analysis',inputFingerprint:body.inputFingerprint});
+test('intake survives restart; GET is read-only; sealing a 404 request fences all delayed submissions',async()=>{
+  const h=await harness();try{
+    const body=analysisBody(),identity=requestIdentity(body);
+    assert.equal((await h.request('/requests',identity)).status,202);assert.equal(h.created.length,0);
+    await h.restart();assert.equal((await h.request('/requests/'+body.requestId)).status,200);
+    assert.equal((await h.request('/request/'+body.requestId)).status,404);
+    assert.equal((await (await h.request('/active?kind=analysis')).json()).requests.length,1);
+    const sealed=await (await h.request('/requests/'+body.requestId+'/close',identity)).json();assert.equal(sealed.closed,true);
+    assert.equal((await h.request('/analysis',body)).status,410);assert.equal((await h.request('/requests',identity)).status,410);
+    assert.equal(h.created.length,0);assert.equal((await h.store.list()).length,0);
+    assert.equal((await h.request('/requests/'+body.requestId,undefined,'bob')).status,404);
+    assert.equal((await h.request('/requests',{...identity,inputFingerprint:'b'.repeat(64)})).status,409);
+  }finally{await h.close();}
+});
+test('two concurrent reservations for one account accept only one; closing the rejected identity never releases the accepted one',async()=>{
+  const h=await harness();try{
+    const a=requestIdentity(analysisBody()),b=requestIdentity(analysisBody()),r=await Promise.all([h.request('/requests',a),h.request('/requests',b)]);
+    assert.deepEqual(r.map(x=>x.status).sort(),[202,409]);const accepted=r[0].status===202?a:b,rejected=r[0].status===202?b:a;
+    assert.equal((await (await h.request('/requests/'+rejected.requestId+'/close',rejected)).json()).closed,true);
+    assert.equal((await h.store.getRequest('alice',accepted.requestId)).state,'reserved');assert.equal(h.created.length,0);
+  }finally{await h.close();}
+});
+test('sealing during normalization wins before dispatch; the late body fails and a fresh request can run',async()=>{
+  const h=await harness();let release,entered;
+  const gate=new Promise(r=>release=r),ready=new Promise(r=>entered=r),prepare=h.assets.prepare.bind(h.assets);
+  h.assets.prepare=async(...args)=>{entered();await gate;return prepare(...args);};
+  try{
+    const body=analysisBody(),identity=requestIdentity(body);await h.request('/requests',identity);
+    const pending=h.request('/analysis',body);await ready;
+    assert.equal((await (await h.request('/requests/'+body.requestId+'/close',identity)).json()).closed,true);
+    release();assert.equal((await pending).status,410);assert.equal(h.created.length,0);
+    assert.equal((await h.store.byRequest('alice',body.requestId)).status,'failed');
+    h.assets.prepare=prepare;assert.equal((await analyze(h)).status,'succeeded');assert.equal(h.created.length,1);
+  }finally{release();await h.close();}
+});
+test('sealing while worker reads images fences its later attempt insertion, so a seal acknowledgment cannot be followed by a charge',async()=>{
+  const h=await harness();let release,entered;const gate=new Promise(r=>release=r),ready=new Promise(r=>entered=r),read=h.assets.dataUri.bind(h.assets);
+  h.assets.dataUri=async(...args)=>{entered();await gate;return read(...args);};
+  try{
+    const body=analysisBody(),r=await h.request('/analysis',body),job=await r.json();await ready;
+    const sealed=await (await h.request('/requests/'+body.requestId+'/close',requestIdentity(body))).json();assert.equal(sealed.closed,true);
+    release();await pause(30);assert.equal(h.created.length,0);assert.equal((await h.store.attempts(job.id)).length,0);
+    assert.equal((await h.store.get(job.id)).status,'failed');
+  }finally{release();await h.close();}
+});
+test('once an attempt exists, safe-end cannot clear the fee guard, including a lost provider acknowledgment',async()=>{
+  const h=await harness({createDelayMs:70,createError:{uncertain:true,code:'SUBMISSION_UNKNOWN'}});try{
+    const body=analysisBody(),r=await h.request('/analysis',body),job=await r.json();await waitFor(h,job.id,j=>j.predictions.length===1);
+    const sealed=await (await h.request('/requests/'+body.requestId+'/close',requestIdentity(body))).json();assert.equal(sealed.closed,false);
+    const unknown=await waitFor(h,job.id);assert.equal(unknown.status,'submission_unknown');
+    await h.restart();await h.request('/jobs/'+job.id+'/resume',{});await h.request('/analysis',body);await pause(20);
+    assert.equal(h.created.length,1);assert.equal((await h.request('/analysis',analysisBody())).status,409);
+  }finally{await h.close();}
+});
+test('PostgreSQL receipt sealing and attempt fencing are durable and reject a stale worker lease',async()=>{
+  const {Pool}=newDb().adapters.createPg(),pool=new Pool(),db=createStore(pool);await db.init();const user=await db.createUser('pg-seal','fixture'),store=createPgReplicationStore(pool);
+  try{
+    const identity={ownerId:user.id,requestId:randomUUID(),kind:'analysis',inputFingerprint:'f'.repeat(64)};
+    await store.reserveRequest({...identity,state:'reserved',revision:0});
+    const job={...identity,id:randomUUID(),payloadHash:'hash',status:'queued',revision:0,workerLease:{id:'old-lease',until:Date.now()+10000}};
+    await store.create(job);const result=await store.closeRequest(identity);assert(result.closed);assert.equal(result.job.status,'failed');
+    const a={id:randomUUID(),jobId:job.id,attemptNo:1};assert.equal(await store.claimAttempt(a,'old-lease'),false);
+    // pg-mem incorrectly selects the partial active-user index for a nonactive
+    // receipt lookup. Verify persisted rows by a full scan; real PostgreSQL
+    // indexed lookup/locking remains a separate pre-release integration check.
+    const persisted=(await pool.query('SELECT document FROM replication_requests')).rows.find(r=>r.document.requestId===identity.requestId).document;
+    assert.equal(persisted.state,'closed');
+    assert.equal((await store.attempts(job.id)).length,0);
+    const next={...identity,requestId:randomUUID()};await store.reserveRequest({...next,state:'reserved',revision:0});
+    const queued={...job,...next,id:randomUUID()};await store.create(queued);assert.equal(await store.claimAttempt({...a,id:randomUUID(),jobId:queued.id},'old-lease'),true);
+    assert.equal((await store.closeRequest(next)).closed,false);
+  }finally{await pool.end();}
+});
+test('resuming an interrupted batch keeps its existing candidate and cannot create the next paid sample',async()=>{
+  const h=await harness({advanced:true});let release,entered;const gate=new Promise(r=>release=r),ready=new Promise(r=>entered=r),save=h.assets.saveComposite.bind(h.assets);
+  h.assets.saveComposite=async(...args)=>{entered();await gate;return save(...args);};
+  try{
+    const a=await approved(h),r=await h.request('/generation',generationBody(a,{count:4,confirmedPredictions:4})),job=await r.json();await ready;
+    const restart=h.restart();release();await restart;
+    assert.equal((await h.store.get(job.id)).results.length,1);assert.equal(h.created.length,2);
+    await h.request('/jobs/'+job.id+'/resume',{});const done=await waitFor(h,job.id);
+    assert.equal(done.status,'failed');assert.equal(done.errorCode,'PRE_SUBMISSION_INTERRUPTED');assert.equal(done.results.length,1);assert.equal(h.created.length,2);
+  }finally{release();await h.close();}
 });

@@ -15,6 +15,14 @@ export function matchesOperation(expected, job) {
     (!expected.jobId || job.id === expected.jobId);
 }
 export const ERROR_MESSAGES = {
+  REQUEST_CLOSED: '本次素材提交未完成，已安全结束；可以重新提交。',
+  REQUEST_PROCESSING: '素材仍在接收，请查询原请求或安全结束本次提交。',
+  INPUT_PREPARATION_FAILED: '素材读取或准备失败，尚未调用模型；请检查图片后重新提交。',
+  PRE_SUBMISSION_INTERRUPTED: '服务重启前任务尚未提交模型，已安全结束；请重新提交。',
+  TOKEN_HEADER_INVALID: 'API Key 含无效字符，请在设置中检查；本次未发送请求。',
+  INVALID_JSON: '请求内容不完整或格式无效，请重新选择素材。',
+  PAYLOAD_TOO_LARGE: '上传请求过大，请减小图片体积。',
+  UPLOAD_INTERRUPTED: '素材传输已中断，请核对原请求状态。',
   ANALYSIS_REQUIRED: '请先分析产品特征，再确认分析内容。',
   ANALYSIS_SCHEMA_INVALID: '分析格式不符合要求，未启动生图。可查看原始分析文本。',
   ANALYSIS_STALE: '素材或分析版本已改变，请重新分析并确认。',

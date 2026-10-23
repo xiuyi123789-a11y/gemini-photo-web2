@@ -36,7 +36,7 @@ export function createReplicationWorker({store,assets,pollMs=1500,budgetMs=30000
       metricsSummary:prediction.metrics?Object.fromEntries(Object.entries(prediction.metrics).filter(([k,v])=>['predict_time','total_time','input_token_count','output_token_count'].includes(k)&&typeof v==='number')):attempt.metricsSummary};
     await store.updateAttempt(next);return {next,changed};
   }
-  async function run(id,provider) {
+  async function run(id,provider,{resumeOnly=false}={}) {
     const lease=randomUUID();let claimed=false,heartbeat;
     const state=(jobId,status,extra)=>transition(jobId,status,extra,lease);
     try {
@@ -60,11 +60,15 @@ export function createReplicationWorker({store,assets,pollMs=1500,budgetMs=30000
         let attempt=(await store.attempts(id)).find(a=>a.attemptNo===index),prediction;
         if(!attempt) {
           if(job.cancelRequested){await state(id,'canceled');return;}
-          const input=await inputFor(job);
+          // Recovery is never permission for a new paid POST, including a later
+          // sample in an interrupted batch or a queued task left by a restart.
+          if(resumeOnly){await state(id,'failed',{errorCode:'PRE_SUBMISSION_INTERRUPTED'});return;}
+          let input;
+          try{input=await inputFor(job);}catch{await state(id,'failed',{errorCode:'INPUT_PREPARATION_FAILED'});return;}
           attempt={id:randomUUID(),jobId:id,attemptNo:index,model:REPLICATION_MODELS[job.kind],providerAccountRef:provider.accountRef,
             inputHash:sha256(canonicalJson(input)),promptTemplateVersion:PROMPT_VERSIONS[job.kind],createStartedAt:Date.now(),deadlineAt:Date.now()+budgetMs,
             predictionId:null,remoteStatus:null,reconciliationState:'submitting',estimatedCost:null};
-          if(!await store.claimAttempt(attempt))continue;
+          if(!await store.claimAttempt(attempt,lease))continue;
           await state(id,'submitting');event(job,'prediction.create_started',{local_attempt_id:attempt.id,create_attempt_no:index});
           try {
             prediction=await provider.create(attempt.model,input);
@@ -131,10 +135,12 @@ export function createReplicationWorker({store,assets,pollMs=1500,budgetMs=30000
         if(index>=job.total){await state(id,'completed_needs_review',{quality:{status:'needs_review'},errorCode:null});return;}
       }
     } catch {
-      // Never log exceptions with provider payloads. Keep acknowledged attempts recoverable by GET.
+      // Never log exceptions with provider payloads. Keep acknowledged attempts
+      // queryable by GET and recoverable only by an explicit non-creating POST.
       const job=await store.get(id).catch(()=>null);
       if(job&&!isFinalJob(job)) {
-        const attempts=await store.attempts(id).catch(()=>[]);
+        let attempts;try{attempts=await store.attempts(id);}catch{return;}
+        if(!attempts.length){await state(id,'failed',{errorCode:'INPUT_PREPARATION_FAILED'}).catch(()=>{});return;}
         const uncertain=attempts.some(a=>!a.predictionId);
         await state(id,uncertain?'submission_unknown':'running',{errorCode:uncertain?'SUBMISSION_UNKNOWN':'POSTPROCESSING_INTERRUPTED'}).catch(()=>{});
       }
@@ -144,9 +150,9 @@ export function createReplicationWorker({store,assets,pollMs=1500,budgetMs=30000
     }
   }
   return {
-    wake(job,provider) {
+    wake(job,provider,options) {
       if(stopping||isFinalJob(job)||running.has(job.id)||provider.accountRef!==job.providerAccountRef)return;
-      const p=run(job.id,provider).finally(()=>running.delete(job.id));running.set(job.id,p);
+      const p=run(job.id,provider,options).finally(()=>running.delete(job.id));running.set(job.id,p);
     },
     async idle(){await Promise.all([...running.values()]);}
     ,stop(){stopping=true;}
