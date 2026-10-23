@@ -81,6 +81,22 @@ docker compose --env-file .env.tencent start app
 
 ## 6. 更新和回滚
 
+现有实例的实际工作目录为 /home/ubuntu/quantumleap-studio，当前使用 chore/tencent-cloud-migration 分支。不要把前文用于新建部署的 /opt/quantumleap 示例路径当作现有实例目录。
+
+deploy/update.sh 用于更新已有实例，调用时必须给出经本地验证并推送的完整 Git 提交 SHA。它会核对当前分支、远端提交、工作区修改和磁盘空间，保留服务器自行修改的 deploy/Caddyfile，保存当前镜像为回滚标签，并短暂停止应用获得数据库与图片的一致性备份。
+
+备份完成后先恢复旧应用，再拉取源码并构建新镜像，构建期间旧应用继续服务。新镜像先验证 Linux sharp 原生库，之后仅替换 app，核验容器健康、登录保护、新板块资源、公网 HTTPS 和 Replicate 出站网络。网络检查不验证用户 Token 或执行付费生成。替换后的检查失败时自动尝试恢复旧镜像；失败结果不会被报告为部署成功。部署锁阻止两个更新同时执行。
+
+从已有源码目录运行（将 SHA 替换为实际发布的完整提交号）：
+
+~~~bash
+bash deploy/update.sh 完整40位提交SHA https://studio.xiuyi-ai.cn
+~~~
+
+若服务器尚未拉到此脚本，先 git fetch，将经审核提交里的 deploy/update.sh 用 git show 导出到 .local/deployments 下，再执行该文件；这样可以在变更生产源码前完成备份。真实环境文件、数据库备份和图片备份仅留在服务器 .local/deployments/时间戳，权限受限，不能提交 Git 或进入镜像。
+
+脚本不会处理服务器密码。如果 Docker 权限要求认证，请由使用者在当前服务器终端运行 sudo docker info 并完成隐藏密码输入，再执行更新脚本。看到 DEPLOYMENT_OK 和对应提交号才说明脚本已完成发布检查；仍需在浏览器登录检查实际页面与用户提供 Token 的模型接口。
+
 更新前先备份，记录当前源码提交/源码包和镜像 ID；新源码 `up -d --build`，数据留在卷中。失败时使用之前保存的源码/镜像重建 app；未来涉及数据库结构变化时也需配套数据库恢复。本次是全新数据库，不导入旧站数据。
 
 现阶段只运行一个 app 副本。知识库为每账号整份写入，任务状态在内存中；多人同账号同时编辑有后写覆盖风险。后续团队协作可再做逐条数据库操作、共享知识库、持久任务队列和 COS 存储。
