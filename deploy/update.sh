@@ -121,13 +121,10 @@ for attempt in $(seq 1 60); do
   sleep 2
 done
 (( healthy )) || { echo "New app did not become healthy."; exit 1; }
-step "Check app health, authentication and feature" 45s "${compose[@]}" exec -T --interactive=false app node --input-type=module -e \
-  'import fs from "node:fs"; const health=await fetch("http://127.0.0.1:3001/api/health",{signal:AbortSignal.timeout(10000)}); if(!health.ok)process.exit(1); const protectedApi=await fetch("http://127.0.0.1:3001/api/replication/connectivity",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}",signal:AbortSignal.timeout(10000)}); if(protectedApi.status!==401)process.exit(1); const js=fs.readdirSync("dist/assets").filter(n=>n.endsWith(".js")).map(n=>fs.readFileSync("dist/assets/"+n,"utf8")).join(""); if(!js.includes("图像复刻"))process.exit(1); console.log("APP_HEALTH_AUTH_AND_FEATURE_OK");' </dev/null
+step "Check V2 database, authentication, deployed bundle and model metadata" 180s "${compose[@]}" exec -T --interactive=false app node server/deployment-check.js "$public_origin" </dev/null
 curl --fail --silent --show-error --max-time 20 "$public_origin/api/health" > "$backup/public-health.json"
 public_status="$(curl --silent --show-error --max-time 20 -o /dev/null -w '%{http_code}' "$public_origin")"
 [[ "$public_status" == 200 ]] || { echo "Public page returned HTTP $public_status"; exit 1; }
-step "Check Replicate network" 30s "${compose[@]}" exec -T --interactive=false app node --input-type=module -e \
-  'const r=await fetch("https://api.replicate.com/v1/models/openai/o4-mini",{signal:AbortSignal.timeout(20000)}); if(![200,401,403].includes(r.status))throw new Error("Unexpected Replicate status: "+r.status); console.log("REPLICATE_NETWORK_OK HTTP "+r.status+" (network only; user Token is checked in the page)");' </dev/null
 replaced=0
 printf '%s\n' "$expected" > "$backup/deployed-commit.txt"
 "${compose[@]}" ps
