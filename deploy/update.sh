@@ -100,7 +100,8 @@ step "Validate database backup" 60s "${docker_cmd[@]}" exec -i "$db_container" t
 step "Validate image backup" 60s tar -tzf "$backup/images.tar.gz" >/dev/null
 printf 'validated\n' > "$backup/backup-complete.txt"
 
-step "Update source" 90s git pull --ff-only origin "$branch"
+# Backups stay private under umask 077; Git-created source files need normal modes.
+( umask 022; step "Update source" 90s git pull --ff-only origin "$branch" )
 [[ "$(git rev-parse HEAD)" == "$expected" ]] || { echo "Unexpected source revision after pull."; exit 1; }
 cmp -- deploy/Caddyfile "$backup/Caddyfile" || { echo "Caddy configuration changed unexpectedly."; exit 1; }
 "${compose[@]}" build app
