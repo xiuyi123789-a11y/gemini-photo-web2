@@ -132,8 +132,7 @@ export const ImageReplicationView: React.FC = () => {
   function inputData(description=analysis): ReplicationInput {
     if(!source)throw new Error('请先上传场景原图。');
     if(!references.length)throw new Error('请至少上传一张产品参考图。');
-    if(!target.trim())throw new Error('请填写原图中需要替换的产品。');
-    return {source:source.file,references:references.map(ref=>({file:ref.file,angle:ref.angle})),target,analysis:description,preserve,resolution,count,notes,region};
+    return {source:source.file,references:references.map(ref=>({file:ref.file,angle:ref.angle})),target:target.trim(),analysis:description,preserve,resolution,count,notes,region};
   }
   async function run(kind: ReplicationKind, input: ReplicationInput) {
     const next=await startReplication(kind,input);
@@ -265,8 +264,8 @@ export const ImageReplicationView: React.FC = () => {
         <div className="rp-section-label"><b>03</b>产品特征<small>可编辑</small></div>
         <div className="rp-analysis-title"><ScanEye/>o4-mini 产品分析</div>
         <textarea className="rp-analysis" aria-label="产品特征分析" value={analysis} maxLength={16000} disabled={locked} onChange={event=>{invalidate();setAnalysis(event.target.value);}} placeholder="综合多角度图分析产品的结构、材质、颜色、标识及与原场景的关系。"/>
-        <button className="rp-button rp-wide" disabled={locked} onClick={()=>start('analysis')}>{working&&job?.kind==='analysis'?<LoaderCircle className="rp-spin"/>:<ScanEye/>}{analysis?'重新分析产品':'分析产品特征'}</button>
-        <p className="rp-hint">也可直接开始复刻，系统会先分析，再生成。</p>
+        <button className="rp-button rp-wide" disabled={locked} onClick={()=>start('analysis')}>{working&&job?.kind==='analysis'?<LoaderCircle className="rp-spin"/>:<ScanEye/>}{working&&job?.kind==='analysis'?'AI 正在分析产品…':analysis?'重新分析产品':'分析产品特征'}</button>
+        <p className="rp-hint">{source&&references.length?'已添加场景原图和 '+references.length+' 张产品参考图，可直接分析。':'上传场景原图和产品参考图，即可由 AI 分析特征。'}无需先手填产品描述或框选。开始复刻时需框选替换区域。</p>
       </section>
       <div className="rp-right">
         <section className="rp-card rp-preview">
@@ -283,7 +282,7 @@ export const ImageReplicationView: React.FC = () => {
           <div className="rp-preserve-strip"><ShieldCheck/>场景保留{preserve.map(key=><span key={key}><Check/>{preserveLabels[key]}</span>)}</div>
         </section>
         <section className="rp-card rp-settings"><div className="rp-card-title"><h2><Settings2/>复刻设置</h2><small>场景跟随原图 · 产品忠于参考</small></div>
-          <label className="rp-target"><span>替换哪个产品</span><input value={target} maxLength={500} disabled={locked} onChange={event=>{invalidate();setTarget(event.target.value);}} placeholder="例如：桌面中央的精华瓶，包含瓶盖和标签，不包含底座"/></label>
+          <label className="rp-target"><span>替换对象（可选）</span><input value={target} maxLength={500} disabled={locked} onChange={event=>{invalidate();setTarget(event.target.value);setAnalysis('');}} placeholder="留空由 AI 识别；有多个同类产品时可指定，例如：抬起的脚上的鞋"/></label>
           <div className="rp-settings-grid"><div><span className="rp-field-label">框内生成约束</span><div className="rp-locks">{Object.entries(preserveLabels).map(([key,label])=><label key={key}><input type="checkbox" disabled={locked} checked={preserve.includes(key as PreserveKey)} onChange={event=>{invalidate();setPreserve(previous=>event.target.checked?[...previous,key as PreserveKey]:previous.filter(item=>item!==key));}}/>{label}</label>)}</div><p className="rp-hint">新产品结构以参考图为准；框外始终保留原图。</p></div><div><span className="rp-field-label">模型输出设置</span><div className="rp-output"><select aria-label="输出分辨率" value={resolution} disabled={locked} onChange={event=>{invalidate();setResolution(event.target.value);}}>{['1K','2K','4K'].map(value=><option key={value} value={value}>{value} 模型分辨率</option>)}</select><select aria-label="生成数量" value={count} disabled={locked} onChange={event=>{invalidate();setCount(Number(event.target.value));}}>{[1,2,4].map(value=><option key={value} value={value}>生成 {value} 张</option>)}</select></div><p className="rp-hint">按原图尺寸合成 PNG，保留框外像素。多张结果逐张生成。</p></div></div>
           <details className="rp-advanced"><summary>补充要求与细节约束</summary><textarea aria-label="补充复刻要求" value={notes} maxLength={4000} disabled={locked} onChange={event=>{invalidate();setNotes(event.target.value);}} placeholder="例如：保留标签上的全部文字，不改变右侧绿植与底座。"/></details>
           <div className="rp-generate-row"><button className="rp-button rp-primary" disabled={locked} onClick={()=>start('generation')}>{working?<LoaderCircle className="rp-spin"/>:<Sparkles/>}{working?'处理进行中':'开始复刻'}<ArrowRight/></button><p>o4-mini 分析 · Nano Banana 2 生图<br/><span>严格保留场景为生成目标，请通过对比核验最终结果。</span></p></div>

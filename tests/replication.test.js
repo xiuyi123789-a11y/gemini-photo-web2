@@ -66,6 +66,65 @@ test('analysis sends original first and every reference to exactly o4-mini',asyn
     assert.match(h.created[0].input.prompt,/图片3.*背面/);
   }finally{await h.close();}
 });
+
+test('uploaded images can be analyzed without a target description, region or generation settings',async()=>{
+  const h=await harness();
+  try{
+    const payload={requestId:randomUUID(),sourceImage:png,references:[{image:png,angle:'front'},{image:png,angle:'side'}]};
+    const response=await h.request('/analysis',payload);assert.equal(response.status,202);
+    const job=await done(h,(await response.json()).id);
+    assert.equal(job.status,'succeeded');assert.equal(job.analysis,'产品分析');
+    assert.equal(h.created.length,1);assert.equal(h.created[0].model,'openai/o4-mini');
+    assert.equal(h.created[0].input.image_input.length,3);
+    assert.match(h.created[0].input.prompt,/根据全部参考图识别新产品类别/);
+    assert.match(h.created[0].input.prompt,/多个同类产品/);
+    assert.match(h.created[0].input.prompt,/尚未框选/);
+    assert.equal(h.saved.length,0);
+  }finally{await h.close();}
+});
+
+test('optional target handles blank input and still rejects malformed or oversized descriptions',()=>{
+  for(const target of ['', '   ', undefined, null]) {
+    assert.equal(validateReplicationInput(input({target,region:null}),'analysis').target,'');
+    assert.equal(validateReplicationInput(input({target}),'generation').target,'');
+  }
+  assert.equal(validateReplicationInput(input({target:'  抬起的脚上的鞋  '}),'analysis').target,'抬起的脚上的鞋');
+  for(const target of [42,{},[], 'x'.repeat(501)]) {
+    assert.throws(()=>validateReplicationInput(input({target}),'analysis'),/替换对象/);
+    assert.throws(()=>validateReplicationInput(input({target}),'generation'),/替换对象/);
+  }
+});
+
+test('analysis uses an optional selected region and explicit target without requiring either',async()=>{
+  const h=await harness();
+  try{
+    const response=await h.request('/analysis',input({target:'抬起的脚上的鞋'}));
+    assert.equal(response.status,202);
+    await done(h,(await response.json()).id);
+    const prompt=h.created[0].input.prompt;
+    assert.match(prompt,/原图中的替换对象：抬起的脚上的鞋/);
+    assert.match(prompt,/已框选替换区域.*左 20%，上 10%，宽 50%，高 80%/);
+    assert.doesNotMatch(prompt,/用户未填写|尚未框选/);
+  }finally{await h.close();}
+});
+
+test('generation accepts an empty target but still requires images, analysis and a selected region',async()=>{
+  const h=await harness();
+  try{
+    for(const patch of [{sourceImage:null},{references:[]},{region:null},{analysis:''}]) {
+      const response=await h.request('/generation',input({target:'',...patch}));
+      assert.equal(response.status,400);
+    }
+    assert.equal(h.created.length,0);
+    const response=await h.request('/generation',input({target:'   '}));
+    assert.equal(response.status,202);
+    const job=await done(h,(await response.json()).id);
+    assert.equal(job.status,'succeeded');assert.equal(h.created.length,1);
+    assert.equal(h.created[0].model,'google/nano-banana-2');
+    assert.match(h.created[0].input.prompt,/框选区域内与新产品参考图对应的同类旧产品/);
+    assert.match(h.created[0].input.prompt,/限定替换区域/);
+  }finally{await h.close();}
+});
 test('generation uses Nano Banana 2, all references, original aspect, requested resolution and separate saved outputs',async()=>{
   const h=await harness();
   try{
