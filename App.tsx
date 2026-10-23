@@ -9,13 +9,15 @@ import { AnalysisView } from './components/AnalysisView';
 import { GenerationView } from './components/GenerationView';
 import { KnowledgeBaseView } from './components/KnowledgeBaseView';
 import { SmartRetouchView } from './components/SmartRetouchView';
+import { ImageReplicationView } from './components/ImageReplicationView';
+import { Copy } from 'lucide-react';
 import { BookOpenIcon, HomeIcon, MagicWandIcon, PlayIcon, RefreshIcon } from './components/IconComponents';
 import { HomeView } from './components/HomeView';
 import { AnalysisResult } from './types';
 import { LoginView } from './components/LoginView';
 
 
-type View = 'home' | 'analyze' | 'generate' | 'retouch' | 'knowledge';
+type View = 'home' | 'analyze' | 'generate' | 'retouch' | 'replicate' | 'knowledge';
 
 const App: React.FC = () => {
   const [identity, setIdentity] = useState<{ mode: string; user: { id: string; username: string } | null } | null>(null);
@@ -53,6 +55,7 @@ const App: React.FC = () => {
       { label: '智能解析', viewName: 'analyze' as const, Icon: MagicWandIcon },
       { label: '创意生成', viewName: 'generate' as const, Icon: PlayIcon },
       { label: '图像处理', viewName: 'retouch' as const, Icon: RefreshIcon },
+      { label: '图像复刻', viewName: 'replicate' as const, Icon: Copy },
       { label: '灵感知识库', viewName: 'knowledge' as const, Icon: BookOpenIcon }
     ];
   }, []);
@@ -202,6 +205,9 @@ const App: React.FC = () => {
                       </div>
                       <div style={{ display: currentView === 'knowledge' ? 'block' : 'none' }}>
                         <KnowledgeBaseView />
+                      </div>
+                      <div style={{ display: currentView === 'replicate' ? 'block' : 'none' }}>
+                        <ImageReplicationView />
                       </div>
                     </div>
                   </div>

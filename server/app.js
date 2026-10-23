@@ -8,27 +8,26 @@ import { v4 as uuidv4 } from 'uuid';
 import Replicate from 'replicate';
 import dotenv from 'dotenv';
 import { createAuth } from './auth.js';
+import { createReplicationRouter } from './replication.js';
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-export function createApp({ database = null, dataDir } = {}) {
+export function createApp({ database = null, dataDir, replicateClientFactory = token => new Replicate({ auth: token }) } = {}) {
 const app = express();
 app.set('trust proxy', 1); // The production container is reachable only through Caddy.
 const auth = createAuth(database);
 
 // Initialize Replicate client (Fallback)
-const defaultReplicate = new Replicate({
-  auth: process.env.REPLICATE_API_TOKEN,
-});
+const defaultReplicate = replicateClientFactory(process.env.REPLICATE_API_TOKEN);
 
 // Helper to get Replicate client for request
 const getReplicateClient = (req) => {
     const token = req.headers['x-replicate-token'];
     if (token) {
-        return new Replicate({ auth: token });
+        return replicateClientFactory(token);
     }
     // Fallback to server token if available
     if (process.env.REPLICATE_API_TOKEN) {
@@ -96,7 +95,7 @@ const validateUserId = (req, res, next) => {
 };
 
 // Helper to save Replicate output (Stream or URL) to local file
-const saveReplicateOutput = async (outputItem, userId) => {
+const saveReplicateOutput = async (outputItem, userId, { signal } = {}) => {
   if (!outputItem) return null;
 
   try {
@@ -109,7 +108,7 @@ const saveReplicateOutput = async (outputItem, userId) => {
     if (typeof outputItem === 'string') {
         // If it's a URL, download it
         console.log(`Downloading generated image from: ${outputItem}`);
-        const response = await fetch(outputItem);
+        const response = await fetch(outputItem, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(60000)]) : AbortSignal.timeout(60000) });
         if (!response.ok) throw new Error(`Failed to download image: ${response.statusText}`);
         buffer = await response.arrayBuffer();
     } else {
@@ -125,6 +124,8 @@ const saveReplicateOutput = async (outputItem, userId) => {
     throw error;
   }
 };
+
+app.use('/api/replication', validateUserId, createReplicationRouter({ getClient: getReplicateClient, saveOutput: saveReplicateOutput }));
 
 // Helper to execute Replicate operations with retry logic for 429 errors
 const executeWithRetry = async (operation, maxRetries = 10) => {
@@ -1031,7 +1032,7 @@ app.get('/api/images/:userId/:filename', async (req, res) => {
   const filePath = path.join(getUserImagesDir(userId), filename);
 
   if (await fs.pathExists(filePath)) {
-    res.sendFile(filePath);
+    res.sendFile(filename, { root: getUserImagesDir(userId) });
   } else {
     res.status(404).send('Image not found');
   }

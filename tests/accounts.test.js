@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { newDb } from 'pg-mem';
 import { createStore } from '../server/database.js';
@@ -9,6 +9,7 @@ import { hashPassword, digest } from '../server/auth.js';
 import { createApp } from '../server/app.js';
 
 let store, server, base, directory, alice, bob, aliceCookie, bobCookie;
+const testRoot = fileURLToPath(new URL('../.local/migration-archive/test-data/', import.meta.url));
 const password = 'test-only-long-password-729';
 async function request(endpoint, { cookie, body, method, headers = {} } = {}) {
   return fetch(base + endpoint, {
@@ -30,20 +31,21 @@ before(async () => {
   const hash = await hashPassword(password);
   alice = await store.createUser('alice', hash);
   bob = await store.createUser('bob', hash);
-  directory = await mkdtemp(path.join(tmpdir(), 'quantumleap-test-'));
+  await mkdir(testRoot, { recursive: true });
+  directory = await mkdtemp(path.join(testRoot, 'quantumleap-test-'));
   const app = createApp({ database: store, dataDir: directory });
   server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
   base = `http://127.0.0.1:${server.address().port}`;
   aliceCookie = await login('alice'); bobCookie = await login('bob');
 });
-after(async () => { if (server) await new Promise(resolve => server.close(resolve)); await store?.pool.end(); if (directory) await rm(directory, { recursive: true, force: true }); });
+after(async () => { if (server) await new Promise(resolve => server.close(resolve)); await store?.pool.end(); if (directory && path.resolve(directory).startsWith(path.resolve(testRoot) + path.sep)) await rm(directory, { recursive: true, force: true }); });
 
 test('every API except auth and health requires a valid session', async () => {
   assert.equal((await request('/api/health')).status, 200);
-  for (const endpoint of ['/api/knowledge', '/api/error-notebook', '/api/images/any/file.png', '/api/upscale-image/result/missing']) {
+  for (const endpoint of ['/api/knowledge', '/api/error-notebook', '/api/images/any/file.png', '/api/upscale-image/result/missing', '/api/replication/missing', '/api/replication/request/missing']) {
     assert.equal((await request(endpoint, { headers: { 'x-user-id': alice.id } })).status, 401);
   }
-  for (const endpoint of ['/api/analyze-image', '/api/generate-image', '/api/retouch-image', '/api/upscale-image/start']) {
+  for (const endpoint of ['/api/analyze-image', '/api/generate-image', '/api/retouch-image', '/api/upscale-image/start', '/api/replication/analysis', '/api/replication/generation', '/api/replication/connectivity', '/api/replication/missing/cancel']) {
     assert.equal((await request(endpoint, { body: {} })).status, 401);
   }
 });
@@ -79,6 +81,31 @@ test('images require the owning account', async () => {
   const endpoint = `/api/images/${alice.id}/test.png`;
   assert.equal((await request(endpoint, { cookie: bobCookie })).status, 404);
   assert.equal((await request(endpoint, { cookie: aliceCookie })).status, 200);
+});
+test('replication jobs use the signed-in owner even when x-user-id is forged', async () => {
+  const provider = { predictions: {
+    create: async () => ({ id:'test-replication-provider', status:'processing' }),
+    get: async () => ({ id:'test-replication-provider', status:'processing' }),
+    cancel: async () => ({ status:'canceled' })
+  }};
+  const app = createApp({ database: store, dataDir: directory, replicateClientFactory: () => provider });
+  const listener = await new Promise(resolve => { const s=app.listen(0,'127.0.0.1',()=>resolve(s)); });
+  const endpoint = 'http://127.0.0.1:'+listener.address().port+'/api/replication';
+  const png='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
+  const call=(url,cookie,body)=>fetch(endpoint+url,{method:body?'POST':'GET',headers:{cookie,'x-user-id':bob.id,'x-replicate-token':'test-only-unused-token','Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
+  try {
+    const start=await call('/analysis',aliceCookie,{requestId:'test-replication-request',sourceImage:png,references:[{image:png,angle:'front'}],target:'产品'});
+    assert.equal(start.status,202);const {id}=await start.json();
+    assert.equal((await call('/'+id,bobCookie)).status,404);
+    assert.equal((await call('/'+id+'/cancel',bobCookie,{})).status,404);
+    assert.equal((await call('/'+id,aliceCookie)).status,200);
+    assert.equal((await call('/'+id+'/cancel',aliceCookie,{})).status,200);
+    for(let i=0;i<20;i++){
+      const job=await (await call('/'+id,aliceCookie)).json();
+      if(job.status==='canceled')break;
+      await new Promise(resolve=>setTimeout(resolve,10));
+    }
+  } finally { await new Promise(resolve=>listener.close(resolve)); }
 });
 test('error notebook is private per account', async () => {
   assert.equal((await request('/api/error-notebook', { cookie: aliceCookie, body: { issue: 'alice only', solution: 'fixed' } })).status, 200);
