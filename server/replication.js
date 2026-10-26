@@ -95,6 +95,7 @@ export function createReplicationRouter({store,assets,getProvider,pollMs,budgetM
       // No worker has been dispatched until the accepted receipt is durable.
       // Preserve a tombstone so a delayed body cannot be accepted later.
       await store.closeRequest(identity).catch(()=>{});
+      (logger||((entry)=>console.warn(JSON.stringify(entry))))({event:'request.preparation_failed',request_id:job.requestId,job_kind:kind,error_code:e.code||'INTERNAL_ERROR',http_status:e.status||500});
       if(!await store.get(job.id))await assets.remove(job).catch(()=>{});throw e;
     }
   }
@@ -179,7 +180,7 @@ export function createReplicationRouter({store,assets,getProvider,pollMs,budgetM
   }));
   router.get('/assets/:id/:name',route(async(req,res)=>{
     const job=await own(req,req.params.id);
-    const list=[job.assets.source,job.assets.guide,...job.assets.references,...job.results.flatMap(r=>[r.raw,r.composite]),job.pendingRaw].filter(Boolean);
+    const list=[job.assets.source,job.assets.inferenceSource,job.assets.guide,...job.assets.references,...job.results.flatMap(r=>[r.raw,r.composite]),job.pendingRaw].filter(Boolean);
     const asset=list.find(a=>a.name===req.params.name);if(!asset)throw fail('JOB_NOT_FOUND',404);
     res.type('png').send(await assets.read(job,asset));
   }));

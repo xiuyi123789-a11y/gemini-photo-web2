@@ -19,7 +19,7 @@ React + Express 的 AI 图片分析、生成、修图与灵感知识库应用。
 
 ### 图像复刻
 
-左侧“图像复刻”流程：上传 1 张场景照片与最多 6 张同一新产品的参考 → AI 识别产品及场景中的对应物品 → 画笔涂满要替换的产品 → 确认本次费用并开始替换 → 结果审核。无需填写替换对象、勾选实例或绘制多边形。分析模型为 [openai/o4-mini](https://replicate.com/openai/o4-mini/api)，生成模型为 [google/nano-banana-2](https://replicate.com/google/nano-banana-2/api)。普通修图旧模型不变。当前交付见 [涂抹流程验收](docs/REPLICATION_BRUSH_FLOW.md)，任务费用保护见 [P0 修复记录](docs/REPLICATION_P0_ACCEPTANCE.md)。
+左侧“图像复刻”流程：上传 1 张场景照片与最多 6 张同一新产品的参考 → AI 识别产品及场景中的对应物品 → 画笔涂满要替换的产品 → 确认本次费用并开始替换 → 结果审核。无需填写替换对象、勾选实例或绘制多边形。分析模型为 [google/gemini-2.5-flash](https://replicate.com/google/gemini-2.5-flash/api)，生成模型为 [google/nano-banana-2](https://replicate.com/google/nano-banana-2/api)。普通修图旧模型不变。当前交付见 [涂抹流程验收](docs/REPLICATION_BRUSH_FLOW.md)，任务费用保护见 [P0 修复记录](docs/REPLICATION_P0_ACCEPTANCE.md)。
 
 - 上传格式 JPG / PNG / WEBP，单张最大 20 MB、3200 万像素，原图和参考图合计最大 32 MB。
 - 分析不要求目标文字或选区，返回产品特征、场景中同类主体及归一化位置。页面展示易读摘要，完整特征可选查看/调整。点击“开始替换”时先以本地 revision 写入确认分析，再显式提交生成；没有确认过的分析，生成 API 仍返回 409。识别、涂抹均不会自动生图。

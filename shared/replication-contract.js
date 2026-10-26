@@ -1,4 +1,5 @@
-export const REPLICATION_MODELS = Object.freeze({ analysis: 'openai/o4-mini', generation: 'google/nano-banana-2' });
+export const REPLICATION_MODELS = Object.freeze({ analysis: 'google/gemini-2.5-flash', generation: 'google/nano-banana-2' });
+export const REPLICATION_MODEL_NAMES = Object.freeze({analysis:'Gemini 2.5 Flash',generation:'Nano Banana 2'});
 export const MAX_REFERENCES = 6;
 export const FINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'completed_needs_review', 'quality_failed']);
 export const isFinalJob = job => FINAL_STATUSES.has(job.status);
@@ -15,7 +16,11 @@ export function matchesOperation(expected, job) {
     (!expected.jobId || job.id === expected.jobId);
 }
 export const ERROR_MESSAGES = {
-  REQUEST_CLOSED: '本次素材提交未完成，已安全结束；可以重新提交。',
+  MODEL_UNAVAILABLE: '供应商返回模型不存在或已停用。任务已停止，未自动重试；请核对模型配置后再提交。',
+  REQUEST_CLOSED: '本次请求已安全结束，尚未启动模型。请核对素材后重新点击。',
+  ASSET_PREPARATION_FAILED: '素材已收到，但服务器处理失败。已保留当前选择，可稍后重试。',
+  ANIMATED_IMAGE_UNSUPPORTED: '暂不支持多帧或动态图片，请使用静态 JPG、PNG 或 WEBP。',
+  QUEUE_BUSY: '当前任务队列繁忙，请稍后重新提交。已保留所选素材。',
   REQUEST_PROCESSING: '素材仍在接收，请查询原请求或安全结束本次提交。',
   INPUT_PREPARATION_FAILED: '素材读取或准备失败，尚未调用模型；请检查图片后重新提交。',
   PRE_SUBMISSION_INTERRUPTED: '服务重启前任务尚未提交模型，已安全结束；请重新提交。',
@@ -24,7 +29,7 @@ export const ERROR_MESSAGES = {
   PAYLOAD_TOO_LARGE: '上传请求过大，请减小图片体积。',
   UPLOAD_INTERRUPTED: '素材传输已中断，请核对原请求状态。',
   ANALYSIS_REQUIRED: '请先识别产品与替换位置。',
-  ANALYSIS_SCHEMA_INVALID: '分析格式不符合要求，未启动生图。可查看原始分析文本。',
+  ANALYSIS_SCHEMA_INVALID: '分析返回不完整或格式不符合要求，未启动生图。可查看原始分析文本。',
   ANALYSIS_STALE: '素材或分析版本已改变，请重新分析并确认。',
   TARGET_SELECTION_REQUIRED: '请在识别到的产品上涂抹，确认需要替换的范围。',
   IDEMPOTENCY_CONFLICT: '请求标识已用于不同内容，已阻止重复提交。',

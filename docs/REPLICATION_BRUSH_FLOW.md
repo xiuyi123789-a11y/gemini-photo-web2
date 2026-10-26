@@ -18,6 +18,7 @@
 - 模型标识不变：分析 `openai/o4-mini`，生成 `google/nano-banana-2`；分析仍使用 `reasoning_effort: low`、`max_completion_tokens: 4096`。
 - 分析 `image_input` 顺序不变：原图、全部产品参考。输出为每个主体增加原图归一化 `[x,y,width,height]` 的 `bbox`，严格检查坐标，允许明确返回零主体。
 - 生图顺序：**未加标记的场景原图 → 全部新产品参考 → 最后一张蓝色区域指引图**。动态位置字段会明确这三个角色和图片编号，指引图不会混入产品参考列表。
+- 2026-10-26 上传修复补充：模型使用未加标记、按输入预算处理的场景与参考副本；完整场景仍用于涂抹坐标和最终合成。合法 JPEG/WebP 不会因为 PNG 转换膨胀而误判上传失败，详见 `REPLICATION_UPLOAD_FIX.md`。
 - 区域指引图由服务器根据实际编辑遮罩生成，最长边不超过 1536 像素，私有保存为 `guide.png`。它是普通视觉指引图片，并非虚构的供应商原生 mask 参数。当前最多 1+6+1=8 张，低于 [Nano Banana 2 官方页面](https://replicate.com/google/nano-banana-2) 标示的 14 张输入上限。
 
 ## 涂抹、复核和合成

@@ -102,7 +102,7 @@ async function checkBundles(publicOrigin) {
       check(response.status === 200 && hash(Buffer.from(await response.arrayBuffer())) === hash(bytes), 'PUBLIC_BUNDLE_MISMATCH');
     }
   }
-  for (const marker of ['v1.5.0', 'replication_v2_', '识别产品与替换位置', '开始替换', '安全结束本次提交']) check(text.includes(marker), 'V2_UI_MARKER_MISSING_' + marker);
+  for (const marker of ['v1.5.1', 'Gemini 2.5 Flash', 'replication_v2_', '识别产品与替换位置', '开始替换', '安全结束本次提交']) check(text.includes(marker), 'V2_UI_MARKER_MISSING_' + marker);
   if (publicOrigin) {
     const response = await get(publicOrigin);
     const publicHtml = await response.text();
@@ -114,7 +114,7 @@ async function checkBundles(publicOrigin) {
 async function main() {
   check(process.env.NODE_ENV === 'production', 'PRODUCTION_ENV_REQUIRED');
   check(process.env.DATABASE_URL || process.env.PGHOST, 'POSTGRES_CONFIG_REQUIRED');
-  assert.deepEqual(REPLICATION_MODELS, { analysis: 'openai/o4-mini', generation: 'google/nano-banana-2' });
+  assert.deepEqual(REPLICATION_MODELS, { analysis: 'google/gemini-2.5-flash', generation: 'google/nano-banana-2' });
   const publicOrigin = process.argv[2];
   check(!publicOrigin || /^https:\/\/[a-zA-Z0-9.-]+(?::[0-9]+)?$/.test(publicOrigin), 'INVALID_PUBLIC_ORIGIN');
   const png = await sharp({ create: { width: 4, height: 4, channels: 3, background: 'white' } }).png().toBuffer();

@@ -22,13 +22,14 @@ export function createReplicationWorker({store,assets,pollMs=1500,budgetMs=30000
     return {...j,...nextExtra,status:nextStatus,stage:nextStatus};
   });
   async function inputFor(job) {
-    const images=[await assets.dataUri(job,job.assets.source)];
+    const images=[await assets.dataUri(job,job.assets.inferenceSource||job.assets.source)];
     for(const ref of job.assets.references)images.push(await assets.dataUri(job,ref));
     if(job.kind==='generation'){
       if(!job.assets.guide)throw new Error('INPUT_PREPARATION_FAILED');
       images.push(await assets.dataUri(job,job.assets.guide));
     }
-    return job.kind==='analysis'?{system_prompt:ANALYSIS_SYSTEM,prompt:analysisPrompt({target:job.target,references:job.assets.references}),image_input:images,reasoning_effort:'low',max_completion_tokens:4096}:
+    return job.kind==='analysis'?{system_instruction:ANALYSIS_SYSTEM,prompt:analysisPrompt({target:job.target,references:job.assets.references}),images,
+      thinking_budget:0,dynamic_thinking:false,temperature:0,max_output_tokens:4096}:
       {prompt:generationPrompt(job.input,job.approvedAnalysis.text,{referenceCount:job.assets.references.length,subjects:job.approvedAnalysis.subjects}),image_input:images,aspect_ratio:'match_input_image',resolution:job.input.resolution,output_format:'png',image_search:false,google_search:false};
   }
   async function saveRemote(attempt,prediction) {
@@ -109,7 +110,10 @@ export function createReplicationWorker({store,assets,pollMs=1500,budgetMs=30000
         if(!remoteFinal.has(prediction.status)) {
           await state(id,'running',{errorCode:null});await pause(pollMs);continue;
         }
-        if(prediction.status!=='succeeded') {await state(id,prediction.status==='canceled'?'canceled':'failed',{errorCode:prediction.status==='failed'?'PREDICTION_FAILED':null});return;}
+        if(prediction.status!=='succeeded') {
+          const unavailable=typeof prediction.error==='string'&&/\bmodel_not_found\b|\bmodel\b[^\n]{0,150}\bhas been deprecated\b/i.test(prediction.error);
+          await state(id,prediction.status==='canceled'?'canceled':'failed',{errorCode:prediction.status==='failed'?(unavailable?'MODEL_UNAVAILABLE':'PREDICTION_FAILED'):null});return;
+        }
         await state(id,'postprocessing');
         if(job.kind==='analysis') {
           if(job.cancelRequested){await state(id,'canceled');return;}

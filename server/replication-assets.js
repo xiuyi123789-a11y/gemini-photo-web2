@@ -4,6 +4,22 @@ import { createHash } from 'node:crypto';
 import sharp from 'sharp';
 export const sha256 = value => createHash('sha256').update(value).digest('hex');
 const invalid=()=>Object.assign(new Error('INPUT_INVALID'),{code:'INPUT_INVALID',status:400});
+const preparationFailure=()=>Object.assign(new Error('ASSET_PREPARATION_FAILED'),{code:'ASSET_PREPARATION_FAILED',status:500});
+// Gemini's Replicate wrapper accepts at most 10 images, each up to 7 MB.
+// Upload limits stay independent; only model copies are bounded here.
+export const MODEL_IMAGE_LIMITS=Object.freeze({imageBytes:7_000_000,totalBytes:32*1024*1024,referenceEdge:3072});
+// Lossless PNG can be much larger than an otherwise valid uploaded JPEG/WebP.
+// Bound the model copies, rather than rejecting the user's valid upload after
+// receipt. The full scene remains the canonical pixel source for composition.
+async function modelCopy(bytes,budget){
+  let edge=MODEL_IMAGE_LIMITS.referenceEdge;
+  for(;;){
+    const copy=await sharp(bytes,{limitInputPixels:32*1024*1024}).rotate().resize({width:edge,height:edge,fit:'inside',withoutEnlargement:true}).toColourspace('srgb').png().toBuffer();
+    if(copy.length<=budget)return copy;
+    if(edge<=512)throw preparationFailure();
+    edge=Math.max(512,Math.floor(edge*Math.min(.8,Math.sqrt(budget/copy.length)*.95)));
+  }
+}
 export function decodeImage(value) {
   if(typeof value!=='string')throw invalid();
   const match=value.match(/^data:image\/(png|jpeg|webp);base64,([a-zA-Z0-9+/]+={0,2})$/);
@@ -23,7 +39,7 @@ export function createReplicationAssets(dataDir,{download=downloadModelImage}={}
     const dir=path.resolve(base,job.ownerId,'replication',job.id);
     if(!dir.startsWith(base+path.sep))throw invalid();return dir;
   };
-  const filename=name=>{if(!/^(?:source|guide|ref-\d+|raw-\d+|composite-\d+)\.png$/.test(name))throw invalid();return name;};
+  const filename=name=>{if(!/^(?:source|model-source|guide|ref-\d+|raw-\d+|composite-\d+)\.png$/.test(name))throw invalid();return name;};
   async function save(job,name,bytes) {
     const target=path.join(directory(job),filename(name));await fs.mkdir(path.dirname(target),{recursive:true});
     const metadata=await sharp(bytes,{limitInputPixels:64*1024*1024}).metadata();
@@ -35,24 +51,31 @@ export function createReplicationAssets(dataDir,{download=downloadModelImage}={}
     async prepare(job,input) {
       const buffers=[decodeImage(input.sourceImage),...input.references.map(r=>decodeImage(r.image))];
       if(buffers.reduce((n,b)=>n+b.length,0)>32*1024*1024)throw invalid();
-      const assets=[];let normalizedBytes=0;
-      for(let i=0;i<buffers.length;i++) {
-        const im=sharp(buffers[i],{limitInputPixels:32*1024*1024});const meta=await im.metadata();
-        if((meta.pages||1)>1)throw invalid();
-        const normalized=await im.rotate().toColourspace('srgb').png().toBuffer();
-        normalizedBytes+=normalized.length;
-        if(normalized.length>20*1024*1024||normalizedBytes>32*1024*1024)throw invalid();
-        assets.push({...await save(job,i===0?'source.png':`ref-${i}.png`,normalized),uploadedHash:sha256(buffers[i]),
-          ...(i?{angle:input.references[i-1].angle}:{})});
-      }
-      return {source:assets[0],references:assets.slice(1)};
+      try{
+        const metadata=[];
+        for(const bytes of buffers){const meta=await sharp(bytes,{limitInputPixels:32*1024*1024}).metadata();
+          if((meta.pages||1)>1)throw Object.assign(new Error('ANIMATED_IMAGE_UNSUPPORTED'),{code:'ANIMATED_IMAGE_UNSUPPORTED',status:422});metadata.push(meta);}
+        const canonical=await sharp(buffers[0],{limitInputPixels:32*1024*1024}).rotate().toColourspace('srgb').png().toBuffer();
+        const source={...await save(job,'source.png',canonical),uploadedHash:sha256(buffers[0]),uploadedBytes:buffers[0].length};
+        const sceneCopy=canonical.length>MODEL_IMAGE_LIMITS.imageBytes?await modelCopy(canonical,MODEL_IMAGE_LIMITS.imageBytes):canonical;
+        const inferenceSource=sceneCopy===canonical?null:await save(job,'model-source.png',sceneCopy);
+        const budget=Math.min(MODEL_IMAGE_LIMITS.imageBytes,Math.floor((MODEL_IMAGE_LIMITS.totalBytes-sceneCopy.length)/input.references.length));
+        const references=[];let modelInputBytes=sceneCopy.length;
+        for(let i=1;i<buffers.length;i++){
+          const normalized=await modelCopy(buffers[i],budget);modelInputBytes+=normalized.length;
+          references.push({...await save(job,`ref-${i}.png`,normalized),uploadedHash:sha256(buffers[i]),uploadedBytes:buffers[i].length,
+            uploadedWidth:metadata[i].width,uploadedHeight:metadata[i].height,angle:input.references[i-1].angle});
+        }
+        return {source,references,...(inferenceSource?{inferenceSource}:{}),modelInputBytes,preprocessingVersion:'bounded-png-v2-gemini'};
+      }catch(e){if(e.status)throw e;throw preparationFailure();}
     },
     read:(job,asset)=>fs.readFile(path.join(directory(job),filename(asset.name))),
     async cloneMaterials(job,fromJob) {
-      const source=await save(job,'source.png',await this.read(fromJob,fromJob.assets.source));
+      const source={...fromJob.assets.source,...await save(job,'source.png',await this.read(fromJob,fromJob.assets.source))};
       const references=[];
-      for(let i=0;i<fromJob.assets.references.length;i++)references.push({...await save(job,`ref-${i+1}.png`,await this.read(fromJob,fromJob.assets.references[i])),angle:fromJob.assets.references[i].angle});
-      return {source,references};
+      for(let i=0;i<fromJob.assets.references.length;i++)references.push({...fromJob.assets.references[i],...await save(job,`ref-${i+1}.png`,await this.read(fromJob,fromJob.assets.references[i]))});
+      const inferenceSource=fromJob.assets.inferenceSource?await save(job,'model-source.png',await this.read(fromJob,fromJob.assets.inferenceSource)):null;
+      return {source,references,...(inferenceSource?{inferenceSource}:{}),modelInputBytes:fromJob.assets.modelInputBytes,preprocessingVersion:fromJob.assets.preprocessingVersion};
     },
     async dataUri(job,asset){return 'data:image/png;base64,'+(await this.read(job,asset)).toString('base64');},
     async saveRaw(job,index,url){const bytes=await download(url);const png=await sharp(bytes,{limitInputPixels:64*1024*1024}).rotate().toColourspace('srgb').ensureAlpha().png().toBuffer();return save(job,`raw-${index}.png`,png);},

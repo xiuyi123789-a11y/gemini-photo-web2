@@ -10,7 +10,7 @@ import sharp from 'sharp';
 import {newDb} from 'pg-mem';
 import {createStore} from '../server/database.js';
 import {createPgReplicationStore,createFileReplicationStore} from '../server/replication-store.js';
-import {createReplicationAssets,sha256} from '../server/replication-assets.js';
+import {createReplicationAssets,MODEL_IMAGE_LIMITS,sha256} from '../server/replication-assets.js';
 import {createReplicationRouter} from '../server/replication.js';
 import {createReplicationProvider} from '../server/replication-provider.js';
 import {parseProductAnalysis,generationPrompt,GENERATION_PROMPT_TEMPLATE} from '../server/replication-prompts.js';
@@ -41,7 +41,7 @@ async function harness(options={}) {
   const provider={accountRef:'fake-account',connectivity:async()=>Object.values(REPLICATION_MODELS).map(model=>({model,accessible:true})),
     create:async(model,input)=>{
       created.push({model,input});const id='prediction-'+(++serial);
-      const p={id,model,input,status:options.pending||(options.pendingGeneration&&model===REPLICATION_MODELS.generation)?'processing':'succeeded',created_at:new Date().toISOString(),output:model===REPLICATION_MODELS.analysis?(options.analysisOutput===undefined?JSON.stringify(fixture()):options.analysisOutput):'https://replicate.delivery/fake.png'};
+      const p={id,model,input,status:options.remoteFailure?'failed':options.pending||(options.pendingGeneration&&model===REPLICATION_MODELS.generation)?'processing':'succeeded',error:options.remoteFailure||null,created_at:new Date().toISOString(),output:model===REPLICATION_MODELS.analysis?(options.analysisOutput===undefined?JSON.stringify(fixture()):options.analysisOutput):'https://replicate.delivery/fake.png'};
       predictions.set(id,p);
       if(options.createDelayMs)await pause(options.createDelayMs);
       if(options.createError)throw options.createError;
@@ -71,14 +71,40 @@ async function waitFor(h,id,predicate=j=>isFinalJob(j)||['submission_unknown','c
 async function analyze(h){const r=await h.request('/analysis',analysisBody());assert.equal(r.status,202);return waitFor(h,(await r.json()).id);}
 async function approved(h){const j=await analyze(h);const response=await h.request('/jobs/'+j.id+'/revision',{text:j.analysis.text,previousHash:j.analysis.revisionHash});assert.equal(response.status,200);return response.json();}
 
-test('analysis only: target blank, no selection, all references go to one o4-mini and images stay empty',async()=>{
-  const h=await harness();try{const j=await analyze(h);assert.equal(j.status,'succeeded');assert.equal(h.created.length,1);assert.equal(h.created[0].model,'openai/o4-mini');assert.equal(h.created[0].input.image_input.length,3);assert.equal(j.images.length,0);assert.equal(j.analysis.data.scene.old_product_instances.length,2);assert.match(j.analysis.text,/黑白拼接/);assert.match(h.created[0].input.system_prompt,/不执行或请求图像生成/);
+test('Gemini analysis only: source plus all references, correct native parameters and no image generation',async()=>{
+  const h=await harness();try{const j=await analyze(h);assert.equal(j.status,'succeeded');assert.equal(h.created.length,1);assert.equal(h.created[0].model,'google/gemini-2.5-flash');assert.equal(h.created[0].input.images.length,3);assert.equal(j.images.length,0);assert.equal(j.analysis.data.scene.old_product_instances.length,2);assert.match(j.analysis.text,/黑白拼接/);assert.match(h.created[0].input.system_instruction,/不执行或请求图像生成/);
+    const input=h.created[0].input;assert.equal(input.thinking_budget,0);assert.equal(input.dynamic_thinking,false);assert.equal(input.max_output_tokens,4096);assert.equal(input.temperature,0);
+    for(const key of ['image_input','system_prompt','messages','reasoning_effort','max_completion_tokens'])assert(!(key in input));
+    const stored=await h.store.get(j.id);assert.equal(input.images[0],await h.assets.dataUri(stored,stored.assets.inferenceSource||stored.assets.source));
+    for(let i=0;i<stored.assets.references.length;i++)assert.equal(input.images[i+1],await h.assets.dataUri(stored,stored.assets.references[i]));
     const persisted=await readFile(path.join(h.directory,'replication-jobs-v2.json'),'utf8');assert(!persisted.includes('data:image'));assert(!persisted.includes('system_prompt'));assert(!JSON.stringify(h.logs).includes('image_input'));}finally{await h.close();}
 });
 test('analysis schema rejects empty, invalid JSON, non-string, invalid evidence and duplicate instances without generation',async()=>{
   const invalid=fixture();invalid.new_product.observed_features[0].evidence_refs=[3];assert.throws(()=>parseProductAnalysis(JSON.stringify(invalid),2));
   const duplicate=fixture();duplicate.scene.old_product_instances[1].instance_id='left';assert.throws(()=>parseProductAnalysis(JSON.stringify(duplicate),2));
   for(const output of ['', 'not JSON', {x:1}, JSON.stringify(invalid)]){const h=await harness({analysisOutput:output});try{const j=await analyze(h);assert.equal(j.status,'failed');assert.equal(j.errorCode,'ANALYSIS_SCHEMA_INVALID');assert.deepEqual(j.images,[]);assert.equal(h.created.length,1);}finally{await h.close();}}
+});
+test('provider model_not_found is a terminal model-availability error; reads, resume and restart never create a replacement prediction',async()=>{
+  const h=await harness({remoteFailure:"Error code: 404 - model `o4-mini` has been deprecated; code: model_not_found; PRIVATE_PROVIDER_SENTINEL"});
+  try{
+    const body=analysisBody(),r=await h.request('/analysis',body),id=(await r.json()).id;
+    const failed=await waitFor(h,id);assert.equal(failed.status,'failed');assert.equal(failed.errorCode,'MODEL_UNAVAILABLE');
+    assert.match(failed.error,/模型不存在或已停用/);assert(!JSON.stringify(failed).includes('PRIVATE_PROVIDER_SENTINEL'));
+    await h.restart();await h.request('/jobs/'+id);await h.request('/jobs/'+id+'/resume',{});await h.request('/analysis',body);await pause(20);
+    assert.equal(h.created.length,1);assert.equal(h.created[0].model,REPLICATION_MODELS.analysis);
+    assert.equal((await h.store.attempts(id)).length,1);
+  }finally{await h.close();}
+});
+test('Gemini provider success with truncated JSON fails business validation, preserves evidence and blocks paid generation',async()=>{
+  const output=['```json\n{"schema_version":"1.0","new_product":{"category":"运动鞋",','"observed_features":[{"name":"低帮设计","evidence_refs":[1],"certainty":"observed"},{'];
+  const h=await harness({analysisOutput:output});try{
+    const response=await h.request('/analysis',analysisBody()),id=(await response.json()).id,job=await waitFor(h,id);
+    assert.equal(job.status,'failed');assert.equal(job.errorCode,'ANALYSIS_SCHEMA_INVALID');assert.match(job.error,/返回不完整/);
+    assert.equal(job.analysis.rawText,output.join(''));assert.equal(job.analysis.data,null);assert.deepEqual(job.images,[]);
+    assert.equal(job.predictions[0].remoteStatus,'succeeded');assert.equal((await h.request('/generation',generationBody(job))).status,409);
+    await h.restart();await h.request('/jobs/'+id);await h.request('/jobs/'+id+'/resume',{});
+    assert.equal(h.created.length,1);assert.equal(h.created[0].model,'google/gemini-2.5-flash');
+  }finally{await h.close();}
 });
 test('analysis rejects image-generation parameters and bad fingerprints before provider create',async()=>{
   const h=await harness();try{for(const patch of [{count:1},{resolution:'2K'},{model:'google/nano-banana-2'},{sourceImage:'https://evil.example/image.png'},{inputFingerprint:'f'.repeat(64)}])assert((await h.request('/analysis',analysisBody(patch))).status>=400);assert.equal(h.created.length,0);}finally{await h.close();}
@@ -130,6 +156,18 @@ test('acknowledged prediction stays unchanged on GET after restart; explicit res
     const before=await h.store.get(id),reads=h.queried.length;await h.request('/jobs/'+id);await h.request('/request/'+before.requestId);await h.request('/active?kind=analysis');await pause(20);assert.equal((await h.store.get(id)).revision,before.revision);assert.equal(h.queried.length,reads);assert.equal(h.created.length,1);
     await h.request('/jobs/'+id+'/resume',{});const j=await waitFor(h,id);assert.equal(j.status,'succeeded');assert.equal(h.created.length,1);}finally{await h.close();}
 });
+test('migration preserves an acknowledged legacy o4-mini prediction and only queries its existing ID',async()=>{
+  const h=await harness({pending:true});try{
+    const r=await h.request('/analysis',analysisBody()),id=(await r.json()).id;
+    await waitFor(h,id,j=>j.predictions[0]?.predictionId);await h.restart();
+    const [attempt]=await h.store.attempts(id);await h.store.updateAttempt({...attempt,model:'openai/o4-mini'});
+    const remote=h.predictions.get(attempt.predictionId);remote.model='openai/o4-mini';remote.status='succeeded';
+    await h.request('/jobs/'+id);assert.equal(h.created.length,1);
+    await h.request('/jobs/'+id+'/resume',{});const done=await waitFor(h,id);
+    assert.equal(done.status,'succeeded');assert.equal(done.predictions[0].model,'openai/o4-mini');
+    assert.equal(done.predictions[0].predictionId,attempt.predictionId);assert.equal(h.created.length,1);
+  }finally{await h.close();}
+});
 test('cancel is confirmed with a GET; timeout or cancellation failure is never labeled canceled',async()=>{
   const h=await harness({pending:true,cancelError:true});try{const r=await h.request('/analysis',analysisBody()),id=(await r.json()).id;await waitFor(h,id,j=>j.predictions[0]?.predictionId);await h.request('/jobs/'+id+'/cancel',{});const j=await waitFor(h,id);assert.equal(j.status,'cancel_unknown');assert.equal(j.errorCode,'CANCEL_UNKNOWN');assert.equal(h.created.length,1);}finally{await h.close();}
   const ok=await harness({pending:true,budgetMs:15});try{const r=await ok.request('/analysis',analysisBody()),j=await waitFor(ok,(await r.json()).id);assert.equal(j.status,'canceled');assert(ok.canceled.length>0);assert.equal(ok.created.length,1);}finally{await ok.close();}
@@ -167,6 +205,39 @@ test('two masks protect foreground and every outside pixel, with no fill stretch
 test('orientation normalization is persisted before mask coordinates, and expires cleanup preserves unresolved jobs',async()=>{
   const h=await harness();try{const j=await analyze(h);const job=await h.store.get(j.id);await h.store.update(j.id,x=>({...x,expiresAt:Date.now()-1}));await h.cleanup();assert.equal(await h.store.get(j.id),null);
     const image=await sharp({create:{width:40,height:24,channels:3,background:'red'}}).jpeg().withMetadata({orientation:6}).toBuffer();const assets=await h.assets.prepare({...job,id:randomUUID()},{sourceImage:'data:image/jpeg;base64,'+image.toString('base64'),references:[{image:dataUri,angle:'front'}]});assert.equal(assets.source.width,24);assert.equal(assets.source.height,40);
+  }finally{await h.close();}
+});
+test('valid high-resolution JPEGs remain accepted when lossless PNG expands beyond upload limits; model copies are bounded and canonical scene stays intact',async()=>{
+  const width=4800,height=2400,pixels=Buffer.alloc(width*height*3);let seed=123456789;
+  for(let i=0;i<pixels.length;i++){seed^=seed<<13;seed^=seed>>>17;seed^=seed<<5;pixels[i]=seed&255;}
+  const jpeg=await sharp(pixels,{raw:{width,height,channels:3}}).jpeg({quality:85}).toBuffer();
+  const canonical=await sharp(jpeg).rotate().toColourspace('srgb').png().toBuffer();
+  assert(jpeg.length*3<MODEL_IMAGE_LIMITS.totalBytes,'fixture must obey original upload budget');
+  assert(canonical.length>20*1024*1024,'fixture must reproduce the former 20 MiB PNG expansion rejection');
+  assert(canonical.length*3>MODEL_IMAGE_LIMITS.totalBytes);
+  const image='data:image/jpeg;base64,'+jpeg.toString('base64'),hash=sha256(jpeg);
+  const body=analysisBody({sourceImage:image,references:[{image,angle:'front'},{image,angle:'side'}],
+    inputFingerprint:sha256(canonicalJson(materialIdentity(hash,[{hash,angle:'front'},{hash,angle:'side'}],'')))});
+  const h=await harness();try{
+    const response=await h.request('/analysis',body);assert.equal(response.status,202);
+    const job=await waitFor(h,(await response.json()).id);assert.equal(job.status,'succeeded');
+    assert.equal(h.created.length,1);assert.equal(h.created[0].model,REPLICATION_MODELS.analysis);
+    const persisted=await h.store.get(job.id),a=persisted.assets;
+    assert.equal(a.preprocessingVersion,'bounded-png-v2-gemini');assert.equal(a.source.width,width);assert.equal(a.source.height,height);
+    assert.equal(a.source.uploadedHash,hash);assert.equal(a.source.uploadedBytes,jpeg.length);
+    assert(a.inferenceSource);assert.equal(a.inferenceSource.name,'model-source.png');
+    assert.deepEqual(await h.assets.read(persisted,a.source),canonical);
+    const inputs=h.created[0].input.images.map(uri=>Buffer.from(uri.split(',')[1],'base64'));
+    assert.equal(inputs.length,3);assert(inputs.every(b=>b.length<=MODEL_IMAGE_LIMITS.imageBytes));
+    assert.equal(inputs.reduce((n,b)=>n+b.length,0),a.modelInputBytes);assert(a.modelInputBytes<=MODEL_IMAGE_LIMITS.totalBytes);
+    assert.equal(sha256(inputs[0]),a.inferenceSource.sha256);assert.notEqual(sha256(inputs[0]),a.source.sha256);
+    for(const ref of a.references){assert(Math.max(ref.width,ref.height)<=3072);assert.equal(ref.uploadedWidth,width);assert.equal(ref.uploadedHash,hash);}
+    const clone={...persisted,id:randomUUID()},materials=await h.assets.cloneMaterials(clone,persisted);
+    assert.equal(materials.modelInputBytes,a.modelInputBytes);assert.equal(materials.preprocessingVersion,a.preprocessingVersion);
+    assert.equal(materials.source.uploadedHash,hash);assert.equal(materials.references[0].uploadedHash,hash);
+    assert.deepEqual(await h.assets.read(clone,materials.inferenceSource),inputs[0]);
+    assert.equal((await h.request('/assets/'+job.id+'/model-source.png')).status,200);
+    assert.equal((await h.request('/assets/'+job.id+'/model-source.png',undefined,'bob')).status,404);
   }finally{await h.close();}
 });
 test('PostgreSQL store has additive tables, unique request/active user/attempt constraints, CAS and durable rereads',async()=>{
@@ -208,8 +279,9 @@ test('legacy development image previews load without a custom header; ordinary r
 test('native provider sends exactly one official-model POST with Cancel-After, even on network errors or 429',async()=>{
   for(const behavior of ['network',429,201]){const calls=[];const provider=createReplicationProvider('fake-unit-test-token',{fetchImpl:async(url,options)=>{calls.push({url,options});if(behavior==='network')throw new TypeError('fetch failed with secret');return new Response(JSON.stringify({id:'prediction-native',model:REPLICATION_MODELS.analysis,status:'starting'}),{status:behavior});}});
     if(behavior===201)await provider.create(REPLICATION_MODELS.analysis,{prompt:'safe fixture'});else await assert.rejects(provider.create(REPLICATION_MODELS.analysis,{prompt:'safe fixture'}),e=>e.code==='SUBMISSION_UNKNOWN');
-    assert.equal(calls.length,1);assert.equal(calls[0].url,'https://api.replicate.com/v1/models/openai/o4-mini/predictions');assert.equal(calls[0].options.headers['Cancel-After'],'300s');assert(!calls[0].options.headers.Prefer);
+    assert.equal(calls.length,1);assert.equal(calls[0].url,'https://api.replicate.com/v1/models/google/gemini-2.5-flash/predictions');assert.equal(calls[0].options.headers['Cancel-After'],'300s');assert(!calls[0].options.headers.Prefer);
     await assert.rejects(provider.create('unapproved/model',{}));assert.equal(calls.length,1);
+    await assert.rejects(provider.create('openai/o4-mini',{}));assert.equal(calls.length,1);
   }
 });
 
@@ -232,7 +304,7 @@ test('array text chunks parse and refill as one analysis, without invoking gener
   const h=await harness({analysisOutput:[text.slice(0,40),text.slice(40)]});
   try{const r=await h.request('/analysis',analysisBody());const j=await waitFor(h,(await r.json()).id);
     assert.equal(j.status,'succeeded');assert.equal(j.analysis.rawText,text);assert(j.analysis.text.length>0);
-    assert.equal(h.created.length,1);assert.equal(h.created[0].model,'openai/o4-mini');
+    assert.equal(h.created.length,1);assert.equal(h.created[0].model,REPLICATION_MODELS.analysis);
   }finally{await h.close();}
 });
 
@@ -312,6 +384,20 @@ test('actual Express intake: expanded body over 50 MiB returns 413 with a safe r
 });
 
 const requestIdentity=body=>({requestId:body.requestId,kind:'analysis',inputFingerprint:body.inputFingerprint});
+test('asset preparation failure is explicit, safely closes intake and logs no image or secret; explicit retry can succeed',async()=>{
+  const h=await harness(),prepare=h.assets.prepare.bind(h.assets);
+  h.assets.prepare=async()=>{throw Object.assign(new Error('PRIVATE_IMAGE_TOKEN_SENTINEL'),{code:'ASSET_PREPARATION_FAILED',status:500});};
+  try{
+    const body=analysisBody(),response=await h.request('/analysis',body);
+    assert.equal(response.status,500);assert.equal((await response.json()).errorCode,'ASSET_PREPARATION_FAILED');
+    assert.equal((await h.store.getRequest('alice',body.requestId)).state,'closed');
+    assert.equal((await h.store.list()).length,0);assert.equal(h.created.length,0);
+    assert(h.logs.some(e=>e.event==='request.preparation_failed'&&e.request_id===body.requestId&&e.http_status===500));
+    assert(!JSON.stringify(h.logs).includes('PRIVATE_IMAGE_TOKEN_SENTINEL'));assert(!JSON.stringify(h.logs).includes('data:image'));
+    assert.equal((await h.request('/analysis',body)).status,410);assert.equal(h.created.length,0);
+    h.assets.prepare=prepare;assert.equal((await analyze(h)).status,'succeeded');assert.equal(h.created.length,1);
+  }finally{await h.close();}
+});
 test('intake survives restart; GET is read-only; sealing a 404 request fences all delayed submissions',async()=>{
   const h=await harness();try{
     const body=analysisBody(),identity=requestIdentity(body);
@@ -419,7 +505,7 @@ test('analysis localizes corresponding categories independently of old/new color
 test('brush generation supplies untouched source, all product references and a final guide; only the painted subject changes',async()=>{
   const h=await harness();try{const a=await approved(h),body=brushBody(a),r=await h.request('/generation',body);assert.equal(r.status,202);const g=await waitFor(h,(await r.json()).id);
     assert.equal(g.status,'completed_needs_review');assert.equal(h.created.length,2);assert.equal(h.created[1].input.image_input.length,4);
-    assert.equal(h.created[1].input.image_input[0],h.created[0].input.image_input[0]);assert.deepEqual(h.created[1].input.image_input.slice(1,3),h.created[0].input.image_input.slice(1));
+    assert.equal(h.created[1].input.image_input[0],h.created[0].input.images[0]);assert.deepEqual(h.created[1].input.image_input.slice(1,3),h.created[0].input.images.slice(1));
     assert.notEqual(h.created[1].input.image_input[3],h.created[1].input.image_input[0]);assert.match(h.created[1].input.prompt,/画面左侧鞋/);assert(!h.created[1].input.prompt.includes('"instance_id":"right"'));
     const stored=await h.store.get(g.id),coverage=await prepareMasks(96,64,[],[],{brush:body.brush,subjects:a.analysis.data.scene.old_product_instances});
     const out=await sharp(await h.assets.read(stored,stored.results[0].composite)).raw().toBuffer(),original=await sharp(source).raw().toBuffer();

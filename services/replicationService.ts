@@ -118,15 +118,17 @@ async function submit(kind:ReplicationKind,payload:any):Promise<ReplicationJob> 
     assertOperation(operation,job);saveOperation({...operation,jobId:job.id});return job;
   } catch(error) {
     const status=(error as any).status;
+    const closedFailure=()=>Number.isInteger(status)&&status>=400&&status<600?error:
+      Object.assign(new Error(ERROR_MESSAGES.REQUEST_CLOSED),{code:'REQUEST_CLOSED'});
     if(!reserved&&[401,403,413,422].includes(status)){forgetOperation(kind);throw error;}
     // GET cannot dispatch work. A 404 alone is never permission to forget or retry.
     let recovered;
     try{recovered=await lookupOperation(operation);}catch{}
     if(recovered?.job)return recovered.job;
-    if(recovered?.closed){forgetOperation(kind);throw Object.assign(new Error(ERROR_MESSAGES.REQUEST_CLOSED),{code:'REQUEST_CLOSED'});}
+    if(recovered?.closed){forgetOperation(kind);throw closedFailure();}
     let sealed;
     try{sealed=await closeOperation(operation);}catch{}
-    if(sealed?.closed)throw status&&status<500?error:Object.assign(new Error(ERROR_MESSAGES.REQUEST_CLOSED),{code:'REQUEST_CLOSED'});
+    if(sealed?.closed)throw closedFailure();
     if(sealed?.job)return sealed.job;
     throw Object.assign(new Error('提交结果尚未确认。已停止页面等待；请查询原请求或安全结束本次提交，勿重复提交。'),{code:'SUBMISSION_UNKNOWN'});
   }

@@ -89,8 +89,8 @@ test('images require the owning account', async () => {
 test('replication jobs use the signed-in owner even when x-user-id is forged', async () => {
   let canceled=false;
   const provider = {accountRef:'fake-account',
-    create: async () => ({ id:'test-replication-provider', model:'openai/o4-mini', status:'processing' }),
-    get: async () => ({ id:'test-replication-provider', model:'openai/o4-mini', status:canceled?'canceled':'processing' }),
+    create: async () => ({ id:'test-replication-provider', model:'google/gemini-2.5-flash', status:'processing' }),
+    get: async () => ({ id:'test-replication-provider', model:'google/gemini-2.5-flash', status:canceled?'canceled':'processing' }),
     cancel: async () => {canceled=true;return {status:'canceled'};}
   };
   const app = createApp({ database: store, dataDir: directory, replicationProviderFactory: () => provider,replicationOptions:{pollMs:2,logger:()=>{}} });

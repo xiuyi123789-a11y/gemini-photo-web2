@@ -49,11 +49,17 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
       return receipt?response(200,receipt):response(404,{errorCode:'JOB_NOT_FOUND'});
     }
     if(method==='POST'&&url.endsWith('/analysis')){
+      if(mode==='preparation-failure'){
+        receipt={...receipt,state:'closed',revision:receipt.revision+1};
+        return response(500,{errorCode:'ASSET_PREPARATION_FAILED'});
+      }
       if(mode==='503')return response(503,{errorCode:'QUEUE_BUSY'});
       if(['401','403','413','422'].includes(mode))return response(Number(mode),{errorCode:'INPUT_INVALID'});
       if(['timeout-before-accept','cannot-seal'].includes(mode))return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(options.signal.reason),{once:true}));
       accepted++;remoteCreates++;
       currentJob=makeJob(body,mode==='unknown'?'submission_unknown':'succeeded');
+      if(mode==='truncated-analysis')currentJob={...currentJob,status:'failed',stage:'failed',errorCode:'ANALYSIS_SCHEMA_INVALID',error:contract.ERROR_MESSAGES.ANALYSIS_SCHEMA_INVALID,
+        analysis:{data:null,text:'',rawText:'{"schema_version":"1.0","new_product":{',revision:0,revisionHash:null,confirmedAt:null}};
       receipt={...receipt,state:'accepted',jobId:currentJob.id};
       if(mode==='lost-ack')throw new TypeError('MOCK response lost');
       return response(202,currentJob);
@@ -126,7 +132,19 @@ test('interrupted upload: durable seal ends loading, clears the orphan only afte
 });
 test('503 without a job is safely sealed; no permanent busy state and no paid retry',async()=>{
   const h=harness('503');await h.upload();await h.click('识别产品与替换位置');assert.equal(h.counts().accepted,0);
-  assert(!h.button('识别产品与替换位置').props.disabled);assert(!h.storage.has('replication_v2_analysis'));assert(h.label().includes('已安全结束'));
+  assert(!h.button('识别产品与替换位置').props.disabled);assert(!h.storage.has('replication_v2_analysis'));assert(h.label().includes('任务队列繁忙'));
+});
+test('server-closed preparation failure keeps its real error and selected files; no automatic or generation retry',async()=>{
+  const h=harness('preparation-failure');await h.upload();await h.click('识别产品与替换位置');
+  assert(h.label().includes('素材已收到，但服务器处理失败'));assert(!h.label().includes('本次请求已安全结束'));
+  assert(!h.button('识别产品与替换位置').props.disabled);assert(!h.storage.has('replication_v2_analysis'));
+  assert.equal(h.counts().remoteCreates,0);assert(!h.calls.some(c=>c.url.endsWith('/generation')));
+  const first=h.calls.find(c=>c.url.endsWith('/analysis'));
+  assert(!h.calls.some(c=>c.url.endsWith('/close')),'already-closed receipt needs no second seal');
+  await h.click('识别产品与替换位置');
+  const posts=h.calls.filter(c=>c.url.endsWith('/analysis'));assert.equal(posts.length,2);
+  assert.notEqual(posts[1].requestId,first.requestId);assert.equal(posts[1].body.sourceImage,first.body.sourceImage);
+  assert.deepEqual(posts[1].body.references,first.body.references);assert.equal(h.counts().remoteCreates,0);
 });
 test('404 alone keeps fee protection, but refresh always exposes reconnect and safe-end; a seal acknowledgment releases it',async()=>{
   const h=harness('cannot-seal');await h.upload();await h.click('识别产品与替换位置');
@@ -147,6 +165,15 @@ test('lost POST acknowledgment recovers the durable completed job with GET and f
   const h=harness('lost-ack');await h.upload();await h.click('识别产品与替换位置');
   assert(!h.button('识别产品与替换位置').props.disabled);assert(h.label().includes('识别完成'));
   assert.equal(h.counts().remoteCreates,1);assert.equal(h.calls.filter(c=>c.method==='POST'&&c.url.endsWith('/analysis')).length,1);
+});
+test('truncated analysis unlocks the page, exposes incomplete raw text for audit, and cannot enable generation after refresh',async()=>{
+  const h=harness('truncated-analysis');await h.upload();await h.click('识别产品与替换位置');
+  assert(h.label().includes('分析返回不完整'));assert(h.label().includes('查看未完成的分析返回（未启动生图）'));
+  assert(h.label().includes('schema_version'));assert(!h.button('识别产品与替换位置').props.disabled);assert(h.button('开始替换').props.disabled);
+  assert.equal(h.counts().remoteCreates,1);assert(!h.calls.some(c=>c.url.endsWith('/generation')));
+  const refreshed=harness('normal',h.storage,h.snapshot());await refreshed.mountEffects();
+  assert(refreshed.label().includes('查看未完成的分析返回（未启动生图）'));assert(refreshed.button('开始替换').props.disabled);
+  assert.equal(refreshed.counts().remoteCreates,0);assert(!refreshed.calls.some(c=>c.url.endsWith('/analysis')||c.url.endsWith('/generation')));
 });
 test('REAL UI/service: definitive 401/403/413/422 rejection clears pending state and does not create a prediction',async()=>{
   for(const status of ['401','403','413','422']){const h=harness(status);await h.upload();await h.click('识别产品与替换位置');

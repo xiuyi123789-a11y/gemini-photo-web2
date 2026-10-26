@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ArrowLeftRight, Check, Download, Expand, ImagePlus, Layers, LoaderCircle, Plus, RefreshCw, ScanEye, Settings2, ShieldCheck, Sparkles, Trash2, X, PlugZap } from 'lucide-react';
 import { ImageModal } from './ImageModal';
 import { userStorage } from '../services/browserStorage';
-import { MAX_REFERENCES, isFinalJob } from '../shared/replication-contract.js';
+import { MAX_REFERENCES, isFinalJob, REPLICATION_MODEL_NAMES } from '../shared/replication-contract.js';
 import { BRUSH_LIMITS, matchBrushSubjects, validSubjectBox } from '../shared/replication-brush.js';
 import { startAnalysis,startGeneration,listActiveJobs,cancelReplicationJob,checkReplicationConnection,getReplicationCapabilities,
   reviseAnalysis,reviewReplication,reconcileReplication,readOperation,saveOperation,forgetOperation,assertOperation,ownerId,
@@ -146,7 +146,7 @@ export const ImageReplicationView:React.FC=()=>{
   async function analyze(){
     if(locked||operationBusy.current)return;
     if(!source?.file||!references.length||references.some(r=>!r.file)){setError('请上传场景原图和产品参考。已恢复的分析可直接确认并复刻；重新分析需重新上传素材。');return;}
-    operationBusy.current=true;setPendingKind('analysis');setError('');setNotice('仅执行 o4-mini 产品文字分析，不会生成图片。');
+    operationBusy.current=true;setPendingKind('analysis');setError('');setNotice(`仅执行 ${REPLICATION_MODEL_NAMES.analysis} 产品文字分析，不会生成图片。`);
     try{
       setMasks([]);setProtectMasks([]);setSelectedIds([]);setStrokes([]);setMode('original');
       const next=await startAnalysis(source.file,references.map(r=>({file:r.file!,angle:r.angle})), '');
@@ -244,6 +244,7 @@ export const ImageReplicationView:React.FC=()=>{
       <p className="rp-hint">自动理解产品并寻找场景中的同类物品，无需填写产品名称。识别不会生成图片。</p>
       {validAnalysis&&<div className="rp-recognition" role="status"><b>识别到：{analysisJob!.analysis!.data.new_product.category}</b><p>{instances.length?`场景中找到 ${instances.length} 个对应物品。请在右侧涂抹想替换的部分。`:'场景中没有找到对应物品，请更换场景照片后识别。'}</p>{instances.map((i:any)=><span key={i.instance_id}>{i.location}</span>)}</div>}
       {validAnalysis&&<details className="rp-advanced"><summary>查看 / 调整产品特征（可选）</summary><textarea className="rp-analysis" aria-label="产品分析摘要" value={analysisText} disabled={locked} maxLength={16000} onChange={e=>{setAnalysisText(e.target.value);setCostConfirmed(false);}}/>{!!analysisJob?.analysis?.rawText&&<details><summary>原始分析返回</summary><pre className="rp-json">{analysisJob.analysis.rawText}</pre></details>}</details>}
+      {analysisJob?.status==='failed'&&!!analysisJob.analysis?.rawText&&<details className="rp-advanced"><summary>查看未完成的分析返回（未启动生图）</summary><pre className="rp-json">{analysisJob.analysis.rawText}</pre></details>}
     </section><div className="rp-right">
       <section className="rp-card rp-preview"><div className="rp-preview-head"><div className="rp-tabs" role="tablist" aria-label="预览模式">
         {([['original','原图'],['raw','模型原始结果'],['result','最终合成候选'],['compare','滑动对比']] as const).map(([key,label])=><button role="tab" aria-selected={mode===key} key={key} disabled={key!=='original'&&(!candidate||(key!=='raw'&&!candidate.result.composite))} className={mode===key?'rp-tab-active':''} onClick={()=>setMode(key)}>{label}</button>)}
@@ -282,7 +283,7 @@ export const ImageReplicationView:React.FC=()=>{
         <div className="rp-card-title"><h2>独立任务状态</h2><button className="rp-button" onClick={reconnect}><RefreshCw/>重新连接查询</button></div>
         {pendingKind&&<p>{pendingKind==='analysis'?'分析':'生图'}请求尚在提交或接收待确认；请勿重复提交。</p>}
         {unresolved.map(op=><div className="rp-task" key={op.requestId}><b>{op.kind==='analysis'?'分析':'生图'}请求 · 原请求保留</b><small>请求：{op.requestId}</small><button className="rp-button" disabled={!!pendingKind} onClick={()=>safelyEnd(op)}>安全结束本次提交</button><small>仅当服务端确认没有预测提交记录时解除费用保护；不取消、不重建预测。</small></div>)}
-        {[analysisJob,generationJob].filter(Boolean).map(j=><div className="rp-task" key={j!.id}><b>{j!.kind==='analysis'?'o4-mini 产品分析':'Nano Banana 2 图像生成'} · {stages[j!.status]||j!.status}</b><small>任务：{j!.id}<br/>请求：{j!.requestId}</small>{j!.predictions.map((p,i)=><small key={i}>{p.model} · {p.predictionId||'预测ID尚未确认'} · {p.remoteStatus||p.reconciliationState}</small>)}</div>)}
+        {[analysisJob,generationJob].filter(Boolean).map(j=><div className="rp-task" key={j!.id}><b>{j!.kind==='analysis'?`${j!.predictions[0]?.model==='openai/o4-mini'?'o4-mini':REPLICATION_MODEL_NAMES.analysis} 产品分析`:'Nano Banana 2 图像生成'} · {stages[j!.status]||j!.status}</b><small>任务：{j!.id}<br/>请求：{j!.requestId}</small>{j!.predictions.map((p,i)=><small key={i}>{p.model} · {p.predictionId||'预测ID尚未确认'} · {p.remoteStatus||p.reconciliationState}</small>)}</div>)}
         {activeJob&&<><button className="rp-button" onClick={cancel}>请求取消远端任务</button><p className="rp-hint">远端终态确认后才标记取消；中断浏览器不会自动停止收费。</p>{['submission_unknown','cancel_unknown'].includes(activeJob.status)&&<label className="rp-label">手动核对供应商预测ID（会验证模型、时间和输入摘要）<input value={reconcileId} onChange={e=>setReconcileId(e.target.value)}/><button className="rp-button" onClick={reconcile}>关联并查询原预测</button></label>}</>}
       </section>}
       {candidate&&<section className="rp-card rp-settings" aria-label="候选质量审核"><h2>结果审核 · {stages[candidate.job.status]||candidate.job.status}</h2>
