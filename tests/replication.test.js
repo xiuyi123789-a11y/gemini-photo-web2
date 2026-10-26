@@ -13,7 +13,8 @@ import {createPgReplicationStore,createFileReplicationStore} from '../server/rep
 import {createReplicationAssets,sha256} from '../server/replication-assets.js';
 import {createReplicationRouter} from '../server/replication.js';
 import {createReplicationProvider} from '../server/replication-provider.js';
-import {parseProductAnalysis,generationPrompt} from '../server/replication-prompts.js';
+import {parseProductAnalysis,generationPrompt,GENERATION_PROMPT_TEMPLATE} from '../server/replication-prompts.js';
+import {matchBrushSubjects,validBrush} from '../shared/replication-brush.js';
 import {compositeReplicationImage,prepareMasks} from '../server/replication-composite.js';
 import {canonicalJson,materialIdentity,REPLICATION_MODELS,isFinalJob,matchesOperation,recoveryKey} from '../shared/replication-contract.js';
 import {createApp} from '../server/app.js';
@@ -24,7 +25,7 @@ import { createGzip } from 'node:zlib';
 const testRoot=fileURLToPath(new URL('../.local/migration-archive/test-data/',import.meta.url));
 const source=await sharp({create:{width:96,height:64,channels:4,background:'#777777'}}).png().toBuffer();
 const dataUri='data:image/png;base64,'+source.toString('base64');
-const fixture=()=>({schema_version:'1.0',new_product:{category:'鞋',brand:null,colors:['黑','白'],observed_features:[{name:'黑白拼接鞋面',evidence_refs:[1,2],certainty:'observed'}],uncertainties:['背面不可见']},reference_views:[{ref_index:1,view:'front',visible_features:['鞋头']},{ref_index:2,view:'side',visible_features:['鞋底']}],scene:{old_product_instances:[{instance_id:'left',location:'画面左侧鞋',visible_view:'side',occluders:['裤脚'],selection_required:true},{instance_id:'right',location:'画面右侧鞋',visible_view:'side',occluders:['袜子'],selection_required:true}],lighting:{direction:'unknown',temperature:'unknown'}},old_new_differences:[{attribute:'配色',observation:'新参考黑白'}],warnings:['确认两只鞋的范围']});
+const fixture=()=>({schema_version:'1.0',new_product:{category:'鞋',brand:null,colors:['黑','白'],observed_features:[{name:'黑白拼接鞋面',evidence_refs:[1,2],certainty:'observed'}],uncertainties:['背面不可见']},reference_views:[{ref_index:1,view:'front',visible_features:['鞋头']},{ref_index:2,view:'side',visible_features:['鞋底']}],scene:{old_product_instances:[{instance_id:'left',location:'画面左侧鞋',visible_view:'side',occluders:['裤脚'],bbox:[.1,.3,.3,.45],selection_required:true},{instance_id:'right',location:'画面右侧鞋',visible_view:'side',occluders:['袜子'],bbox:[.55,.3,.3,.45],selection_required:true}],lighting:{direction:'unknown',temperature:'unknown'}},old_new_differences:[{attribute:'配色',observation:'新参考黑白'}],warnings:['确认两只鞋的范围']});
 const rect=(x,y,w,h)=>[{x,y},{x:x+w,y},{x:x+w,y:y+h},{x,y:y+h}];
 const editMasks=[{instanceId:'left',points:rect(.1,.3,.3,.45)},{instanceId:'right',points:rect(.55,.3,.3,.45)}];
 const fingerprint=sha256(canonicalJson(materialIdentity(sha256(source),[{hash:sha256(source),angle:'front'},{hash:sha256(source),angle:'side'}],'')));
@@ -103,7 +104,7 @@ test('analysis revisions are hashed and stale generation is blocked; explicit ge
   const h=await harness();try{const j=await analyze(h),body=generationBody(j);const revised=await (await h.request('/jobs/'+j.id+'/revision',{text:j.analysis.text+' 用户确认黑白配色',previousHash:j.analysis.revisionHash})).json();
     assert.notEqual(revised.analysis.revisionHash,j.analysis.revisionHash);assert.equal((await h.request('/generation',body)).status,409);
     const started=await h.request('/generation',generationBody(revised));assert.equal(started.status,202);const g=await waitFor(h,(await started.json()).id);
-    assert.equal(g.status,'completed_needs_review');assert.equal(h.created.length,2);assert.equal(h.created[1].model,'google/nano-banana-2');assert.equal(h.created[1].input.image_input.length,3);assert.equal(g.results.length,1);assert(g.results[0].raw.url);assert(g.results[0].composite.url);assert.notEqual(g.source.url,j.source.url);assert.equal(g.results[0].quality.identityVerified,false);
+    assert.equal(g.status,'completed_needs_review');assert.equal(h.created.length,2);assert.equal(h.created[1].model,'google/nano-banana-2');assert.equal(h.created[1].input.image_input.length,4);assert.equal(g.results.length,1);assert(g.results[0].raw.url);assert(g.results[0].composite.url);assert.notEqual(g.source.url,j.source.url);assert.equal(g.results[0].quality.identityVerified,false);
     assert.equal((await h.request('/jobs/'+g.id+'/review',{decision:'accept',checks:{identity:true}})).status,422);
     const reviewed=await (await h.request('/jobs/'+g.id+'/review',{decision:'accept',checks:{identity:true,allInstances:true,occlusion:true,scene:true}})).json();assert.equal(reviewed.status,'succeeded');assert.equal(reviewed.quality.status,'passed');
   }finally{await h.close();}
@@ -191,7 +192,7 @@ test('complete analysis-confirm-generation-review flow also persists through the
   }finally{await h.close();await pool.end();}
 });
 test('generation prompt uses new identity and per-instance geometry; ordinary retouch models unchanged',async()=>{
-  const text=generationPrompt({selectedInstances:['left','right'],masks:editMasks,preserve:[],notes:''},'new product identity');assert.match(text,/NEW silhouette may legitimately differ/);assert.match(text,/left/);assert.match(text,/right/);
+  const text=generationPrompt({selectedInstances:['left','right'],masks:editMasks,preserve:[],notes:''},'new product identity');assert.match(text,/不要强行套用旧产品外形/);assert.match(text,/left/);assert.match(text,/right/);
   const appSource=await readFile(new URL('../server/app.js',import.meta.url),'utf8');assert.match(appSource,/model = "google\/nano-banana"/);assert.match(appSource,/model = "black-forest-labs\/flux-fill-dev"/);
 });
 test('legacy development image previews load without a custom header; ordinary retouch still uses its existing models',async()=>{
@@ -394,4 +395,55 @@ test('resuming an interrupted batch keeps its existing candidate and cannot crea
     await h.request('/jobs/'+job.id+'/resume',{});const done=await waitFor(h,job.id);
     assert.equal(done.status,'failed');assert.equal(done.errorCode,'PRE_SUBMISSION_INTERRUPTED');assert.equal(done.results.length,1);assert.equal(h.created.length,2);
   }finally{release();await h.close();}
+});
+
+const brushSelection=(strokes)=>({version:1,strokes});
+const paintStroke=(x=.2,y=.5)=>({tool:'paint',size:.15,points:[{x,y},{x:x+.08,y}]});
+function brushBody(a,brush=brushSelection([paintStroke()])){return generationBody(a,{selectedInstances:matchBrushSubjects(brush,a.analysis.data.scene.old_product_instances,a.source.width,a.source.height).selectedInstances,masks:[],protectMasks:[],brush});}
+
+test('formal prompt keeps the supplied requirements; placeholders are filled once and input image roles are explicit',()=>{
+  const text=generationPrompt({selectedInstances:['left'],notes:'保留 {{产品特征分析}} 字样'},'MOCK 新产品',{referenceCount:2,subjects:fixture().scene.old_product_instances});
+  assert.match(GENERATION_PROMPT_TEMPLATE,/不得删除、移动、重画或重新设计这些遮挡物/);
+  assert.match(text,/最后第4张为区域指引图/);assert.match(text,/画面左侧鞋/);assert(!text.includes('画面右侧鞋'));assert.match(text,/保留 \{\{产品特征分析\}\} 字样/);
+  assert(text.startsWith('**任务：**'));assert.match(text,/只输出\*\*一张\*\*/);
+});
+
+test('analysis localizes corresponding categories independently of old/new color and can explicitly report no target',async()=>{
+  const noTarget=fixture();noTarget.scene.old_product_instances=[];noTarget.warnings=['原图没有对应产品'];
+  const h=await harness({analysisOutput:JSON.stringify(noTarget)});try{const a=await analyze(h);assert.equal(a.status,'succeeded');assert.equal(a.analysis.data.scene.old_product_instances.length,0);assert.equal(h.created.length,1);
+    const bad=fixture();bad.scene.old_product_instances[0].bbox=[.9,.2,.5,.3];assert.throws(()=>parseProductAnalysis(JSON.stringify(bad),2));
+    assert.match(h.created[0].input.prompt,/不要求新旧产品颜色、品牌或外形相似/);assert.match(h.created[0].input.prompt,/归一化坐标/);
+  }finally{await h.close();}
+});
+
+test('brush generation supplies untouched source, all product references and a final guide; only the painted subject changes',async()=>{
+  const h=await harness();try{const a=await approved(h),body=brushBody(a),r=await h.request('/generation',body);assert.equal(r.status,202);const g=await waitFor(h,(await r.json()).id);
+    assert.equal(g.status,'completed_needs_review');assert.equal(h.created.length,2);assert.equal(h.created[1].input.image_input.length,4);
+    assert.equal(h.created[1].input.image_input[0],h.created[0].input.image_input[0]);assert.deepEqual(h.created[1].input.image_input.slice(1,3),h.created[0].input.image_input.slice(1));
+    assert.notEqual(h.created[1].input.image_input[3],h.created[1].input.image_input[0]);assert.match(h.created[1].input.prompt,/画面左侧鞋/);assert(!h.created[1].input.prompt.includes('"instance_id":"right"'));
+    const stored=await h.store.get(g.id),coverage=await prepareMasks(96,64,[],[],{brush:body.brush,subjects:a.analysis.data.scene.old_product_instances});
+    const out=await sharp(await h.assets.read(stored,stored.results[0].composite)).raw().toBuffer(),original=await sharp(source).raw().toBuffer();
+    let changed=0;for(let i=0;i<96*64;i++){const before=original.subarray(i*4,i*4+4),after=out.subarray(i*4,i*4+4);if(!coverage.edit[i]||coverage.protect[i])assert.deepEqual(after,before);else if(!after.equals(before))changed++;}assert(changed>0);
+    assert.deepEqual(stored.input.brush,body.brush);assert.equal(stored.assets.guide.name,'guide.png');
+    await h.restart();assert.equal((await (await h.request('/jobs/'+g.id)).json()).input.brush.strokes.length,1);assert.equal(h.created.length,2);
+  }finally{await h.close();}
+});
+
+test('eraser cuts real pixel holes, undo restores them, and separate strokes select both subjects',async()=>{
+  const subjects=fixture().scene.old_product_instances,first=paintStroke(),second=paintStroke(.65,.5),erase={tool:'erase',size:.2,points:[{x:.2,y:.5},{x:.28,y:.5}]};
+  const both=brushSelection([first,second]),one=brushSelection([first,second,erase]);
+  assert.deepEqual(matchBrushSubjects(both,subjects,96,64).selectedInstances,['left','right']);assert.deepEqual(matchBrushSubjects(one,subjects,96,64).selectedInstances,['right']);
+  const all=await prepareMasks(96,64,[],[],{brush:both,subjects}),cut=await prepareMasks(96,64,[],[],{brush:one,subjects});assert(all.edit[32*96+23]>128);assert.equal(cut.edit[32*96+23],0);
+  assert.equal(matchBrushSubjects(brushSelection([first,erase]),subjects,96,64).valid,false);
+});
+
+test('server rejects wrong subject IDs, background strokes, all-erased strokes and malformed brush data before generation',async()=>{
+  const h=await harness();try{const a=await approved(h),valid=brushBody(a);
+    const cases=[{...valid,selectedInstances:['right']},{...valid,brush:brushSelection([{...paintStroke(.1,.02),size:.02}])},
+      {...valid,brush:brushSelection([paintStroke(),{tool:'erase',size:.25,points:[{x:.2,y:.5},{x:.28,y:.5}]}])},
+      {...valid,brush:brushSelection([{...paintStroke(),size:1}])},{...valid,brush:brushSelection([{...paintStroke(),points:[{x:-.1,y:.5}]}])},
+      {...valid,brush:brushSelection(Array.from({length:301},()=>paintStroke()))}];
+    for(const body of cases)assert.equal((await h.request('/generation',{...body,requestId:randomUUID()})).status,422);
+    assert.equal(h.created.length,1);assert(!validBrush({version:1,strokes:[]}));
+  }finally{await h.close();}
 });

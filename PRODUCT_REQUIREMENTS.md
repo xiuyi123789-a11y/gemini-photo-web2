@@ -2,6 +2,8 @@
 
 > 2026-10-19 迁移说明：下文保留历史产品需求。当前模型通过 Replicate 调用；生产环境使用账号认证和 PostgreSQL，部署改为腾讯云 Docker Compose。以 README 和 docs/TENCENT_DEPLOYMENT.md 为当前运行说明，原 Gemini API Key / JSON 存储描述不再适用于生产环境。
 
+> 2026-10-26 图像复刻增量需求：上传场景和新产品参考后，由 o4-mini 按类别、用途及场景关系识别可替换主体；用户以画笔涂满要替换的产品，橡皮擦修正，系统按位置复核主体。无需手写目标、勾选实例或画多边形。仅点击“开始替换”才调用 Nano Banana 2，使用用户确认的正式 Prompt 和区域指引图。完整实现与验收边界见 [涂抹流程验收](docs/REPLICATION_BRUSH_FLOW.md)。
+
 ## 1. 产品概述 (Product Overview)
 
 **产品名称**: 量子跃迁 AI 修图工作室 (QuantumLeap AI Studio)  

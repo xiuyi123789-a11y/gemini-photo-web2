@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { REPLICATION_MODELS, MAX_REFERENCES, isFinalJob, ERROR_MESSAGES, canonicalJson } from '../shared/replication-contract.js';
 import { sha256 } from './replication-assets.js';
 import { createReplicationWorker } from './replication-worker.js';
-import { prepareMasks } from './replication-composite.js';
+import { prepareMasks, createRegionGuide } from './replication-composite.js';
+import { matchBrushSubjects } from '../shared/replication-brush.js';
 import { validateAnalysisInput, validateGenerationInput, validateRequestIdentity, payloadHash, fail, UUID } from './replication-validation.js';
 export { REPLICATION_MODELS };
 
@@ -58,7 +59,12 @@ export function createReplicationRouter({store,assets,getProvider,pollMs,budgetM
       if(input.selectedInstances.some(i=>!ids.includes(i)))throw fail('TARGET_SELECTION_REQUIRED',422);
       const s=analysisJob.assets.source;
       if(input.maskSpace.width!==s.width||input.maskSpace.height!==s.height||input.maskSpace.sourceHash!==s.sha256)throw fail('TARGET_SELECTION_REQUIRED',422);
-      await prepareMasks(s.width,s.height,input.masks,input.protectMasks);
+      const subjects=analysisJob.analysis.data.scene.old_product_instances;
+      if(input.brush){
+        const match=matchBrushSubjects(input.brush,subjects,s.width,s.height);
+        if(!match.valid||canonicalJson([...match.selectedInstances].sort())!==canonicalJson([...input.selectedInstances].sort()))throw fail('TARGET_SELECTION_REQUIRED',422);
+      }
+      await prepareMasks(s.width,s.height,input.masks,input.protectMasks,{brush:input.brush,subjects});
     }
     const provider=getProvider(req);
     const active=(await store.list()).filter(j=>!isFinalJob(j));
@@ -76,9 +82,10 @@ export function createReplicationRouter({store,assets,getProvider,pollMs,budgetM
       target:kind==='analysis'?input.target:analysisJob.target,providerAccountRef:provider.accountRef,status:'queued',stage:'queued',revision:0,
       createdAt:Date.now(),updatedAt:Date.now(),expiresAt:Date.now()+retentionDays*86400000,results:[],images:[],analysis:null,
       total:kind==='analysis'?1:input.count,errorCode:null,workerLease:null,cancelRequested:false,
-      ...(kind==='generation'?{analysisJobId:analysisJob.id,approvedAnalysis:{text:analysisJob.analysis.text,revisionHash:analysisJob.analysis.revisionHash,revision:analysisJob.analysis.revision},input}:{}),assets:null};
+      ...(kind==='generation'?{analysisJobId:analysisJob.id,approvedAnalysis:{text:analysisJob.analysis.text,revisionHash:analysisJob.analysis.revisionHash,revision:analysisJob.analysis.revision,subjects:analysisJob.analysis.data.scene.old_product_instances},input}:{}),assets:null};
     try {
       job.assets=kind==='analysis'?await assets.prepare(job,input):await assets.cloneMaterials(job,analysisJob);
+      if(kind==='generation')job.assets.guide=await assets.saveGuide(job,await createRegionGuide(await assets.read(job,job.assets.source),input,job.approvedAnalysis.subjects));
       const stored=await store.create(job);
       if(stored.id!==job.id){await assets.remove(job);same(stored,kind,hash);return res.status(202).json(await view(stored));}
       const accepted=await store.updateRequest(req.userId,input.requestId,r=>r.state==='preparing'&&r.intakeId===intakeId?{...r,state:'accepted',jobId:job.id}:null);
@@ -172,7 +179,7 @@ export function createReplicationRouter({store,assets,getProvider,pollMs,budgetM
   }));
   router.get('/assets/:id/:name',route(async(req,res)=>{
     const job=await own(req,req.params.id);
-    const list=[job.assets.source,...job.assets.references,...job.results.flatMap(r=>[r.raw,r.composite]),job.pendingRaw].filter(Boolean);
+    const list=[job.assets.source,job.assets.guide,...job.assets.references,...job.results.flatMap(r=>[r.raw,r.composite]),job.pendingRaw].filter(Boolean);
     const asset=list.find(a=>a.name===req.params.name);if(!asset)throw fail('JOB_NOT_FOUND',404);
     res.type('png').send(await assets.read(job,asset));
   }));

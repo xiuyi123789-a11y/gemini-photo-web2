@@ -8,6 +8,8 @@ export type PreserveKey = 'background'|'composition'|'lighting'|'perspective';
 export type ReplicationKind = 'analysis'|'generation';
 export type Point = {x:number;y:number};
 export type EditMask = {instanceId:string;points:Point[]};
+export type BrushStroke = {tool:'paint'|'erase';size:number;points:Point[]};
+export type BrushSelection = {version:1;strokes:BrushStroke[]};
 export type Asset = {name:string;url:string;width:number;height:number;sha256:string;angle?:ReferenceAngle};
 export type Analysis = {data:any;text:string;rawText:string;revision:number;revisionHash:string;confirmedAt:number|null};
 export type Quality = {status:string;reasons?:string[];instances?:Array<{instanceId:string;meanDifference:number;changedFraction:number}>};
@@ -21,7 +23,7 @@ export type ReplicationJob = {
   errorCode:string|null;error:string|null;quality:Quality|null;pendingRaw:Asset|null;
   recoveryErrorCode?:string|null;
   recoveryNeeded?:boolean;
-  input?:{masks:EditMask[];protectMasks:Point[][];selectedInstances:string[];resolution:string};
+  input?:{masks:EditMask[];protectMasks:Point[][];brush?:BrushSelection;selectedInstances:string[];resolution:string};
   predictions:Array<{model:string;predictionId:string|null;remoteStatus:string;reconciliationState:string}>;
 };
 export type Operation = {jobId?:string;requestId:string;kind:ReplicationKind;inputFingerprint:string;ownerId:string};
@@ -29,6 +31,7 @@ export type RequestReceipt = {ownerId:string;requestId:string;kind:ReplicationKi
 export type GenerationInput = {
   inputFingerprint:string;analysisJobId:string;analysisRevisionHash:string;
   selectedInstances:string[];masks:EditMask[];protectMasks:Point[][];
+  brush?:BrushSelection;
   maskSpace:{width:number;height:number;sourceHash:string};resolution:string;count:number;
   preserve:PreserveKey[];notes:string;confirmedPredictions:number;
 };

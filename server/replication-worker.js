@@ -24,8 +24,12 @@ export function createReplicationWorker({store,assets,pollMs=1500,budgetMs=30000
   async function inputFor(job) {
     const images=[await assets.dataUri(job,job.assets.source)];
     for(const ref of job.assets.references)images.push(await assets.dataUri(job,ref));
+    if(job.kind==='generation'){
+      if(!job.assets.guide)throw new Error('INPUT_PREPARATION_FAILED');
+      images.push(await assets.dataUri(job,job.assets.guide));
+    }
     return job.kind==='analysis'?{system_prompt:ANALYSIS_SYSTEM,prompt:analysisPrompt({target:job.target,references:job.assets.references}),image_input:images,reasoning_effort:'low',max_completion_tokens:4096}:
-      {prompt:generationPrompt(job.input,job.approvedAnalysis.text),image_input:images,aspect_ratio:'match_input_image',resolution:job.input.resolution,output_format:'png',image_search:false,google_search:false};
+      {prompt:generationPrompt(job.input,job.approvedAnalysis.text,{referenceCount:job.assets.references.length,subjects:job.approvedAnalysis.subjects}),image_input:images,aspect_ratio:'match_input_image',resolution:job.input.resolution,output_format:'png',image_search:false,google_search:false};
   }
   async function saveRemote(attempt,prediction) {
     if(!prediction||typeof prediction.id!=='string'||!/^[a-zA-Z0-9_-]{6,100}$/.test(prediction.id))throw Object.assign(new Error('SUBMISSION_UNKNOWN'),{code:'SUBMISSION_UNKNOWN',uncertain:true});
@@ -124,7 +128,7 @@ export function createReplicationWorker({store,assets,pollMs=1500,budgetMs=30000
         const live=await store.update(id,j=>!isFinalJob(j)&&j.workerLease?.id===lease?{...j,pendingRaw:rawAsset}:null);
         if(isFinalJob(live)||live.workerLease?.id!==lease)return;
         const source=await assets.read(job,job.assets.source),generated=await assets.read(job,rawAsset);
-        const composed=await compositeReplicationImage(source,generated,job.input);
+        const composed=await compositeReplicationImage(source,generated,job.input,job.approvedAnalysis.subjects);
         const composite=composed.buffer?await assets.saveComposite(job,index,composed.buffer):null;
         const result={raw:rawAsset,composite,quality:composed.quality,predictionId:attempt.predictionId};
         await store.update(id,j=>!isFinalJob(j)&&j.workerLease?.id===lease?{...j,results:[...j.results,result],images:[...j.images,...(composite?[composite.url]:[])],pendingRaw:null}:null);

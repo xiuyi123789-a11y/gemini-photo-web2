@@ -102,7 +102,7 @@ async function checkBundles(publicOrigin) {
       check(response.status === 200 && hash(Buffer.from(await response.arrayBuffer())) === hash(bytes), 'PUBLIC_BUNDLE_MISMATCH');
     }
   }
-  for (const marker of ['v1.4.1', 'replication_v2_', '确认分析内容', '开始复刻（仅生图）', '安全结束本次提交']) check(text.includes(marker), 'V2_UI_MARKER_MISSING_' + marker);
+  for (const marker of ['v1.5.0', 'replication_v2_', '识别产品与替换位置', '开始替换', '安全结束本次提交']) check(text.includes(marker), 'V2_UI_MARKER_MISSING_' + marker);
   if (publicOrigin) {
     const response = await get(publicOrigin);
     const publicHtml = await response.text();
