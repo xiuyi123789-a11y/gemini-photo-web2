@@ -1,5 +1,16 @@
 [
   {
+    "version": "v1.5.2",
+    "date": "2026-10-27",
+    "type": "Update",
+    "changes": [
+      {
+        "summary": "四个板块的非生图分析统一使用 Gemini 2.5 Flash",
+        "details": "首页需求对话、智能解析、创意参考理解与融合、图像处理建议及 SD 提示词提取统一适配 Gemini 原生参数。保留原分析指令与结果格式，图片按模型预算准备副本；文字分析失败不再自动重复提交收费预测。Nano Banana、Nano Banana 2 和现有图像处理模型保持不变。"
+      }
+    ]
+  },
+  {
     "version": "v1.5.1",
     "date": "2026-10-26",
     "type": "Fix",

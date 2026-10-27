@@ -1,7 +1,7 @@
 import { userStorage } from '../services/browserStorage';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CheckIcon, ChevronDownIcon, CursorIcon, DownloadIcon, EyeIcon, EyeSlashIcon, FitViewIcon, HandIcon, HomeIcon, LayersIcon, PlusIcon, RedoIcon, TextIcon, TrashIcon, UndoIcon, UploadIcon, XIcon, ZoomInIcon, ZoomOutIcon } from './IconComponents';
-import { DEFAULT_REAL_ESRGAN_PARAMS, generateWorkbenchImage, removeWatermark, retouchImageFromBase64, retouchImageFromUrl, taskChatWithGpt5, upscaleImage } from '../services/replicateService';
+import { DEFAULT_REAL_ESRGAN_PARAMS, generateWorkbenchImage, removeWatermark, retouchImageFromBase64, retouchImageFromUrl, taskChatWithGemini, upscaleImage } from '../services/replicateService';
 
 type ChatMessage = {
   id: string;
@@ -814,9 +814,7 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
           .map((m) => ({ role: m.role, content: m.content }));
         taskMessages.push({ role: 'user', content: fullPrompt });
 
-        const modelText = await taskChatWithGpt5(taskMessages, {
-          reasoningEffort: 'minimal',
-          verbosity: 'low',
+        const modelText = await taskChatWithGemini(taskMessages, {
           retry: { signal: abortController.signal }
         });
         const parsed = tryParseJsonFromText(modelText);

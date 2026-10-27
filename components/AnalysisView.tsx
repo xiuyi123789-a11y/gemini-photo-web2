@@ -169,7 +169,7 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({ onAnalysisComplete }
     try {
       const results = await analyzeImages(imageFiles.map(f => f.file), {
         onProgress: setProgress,
-        retry: { retries: 3, minDelayMs: 800, maxDelayMs: 8000, timeoutMs: 180000 }
+        retry: { retries: 0, timeoutMs: 330000 }
       });
       setAnalysisResults(results);
       logOperation('analysis_run_success', { count: results.length, elapsedMs: Math.round(performance.now() - start) });
@@ -214,7 +214,7 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({ onAnalysisComplete }
         <div>
             <div className="text-center mb-8">
                 <h2 className="text-3xl font-extrabold text-slate-900 mb-2">智能解析</h2>
-                <p className="text-slate-600">上传图片，利用 OpenAI GPT-4o-mini 模型进行深度视觉分析。</p>
+                <p className="text-slate-600">上传图片，利用 Gemini 2.5 Flash 进行深度视觉分析。</p>
             </div>
 
             {imageFiles.length > 0 && (

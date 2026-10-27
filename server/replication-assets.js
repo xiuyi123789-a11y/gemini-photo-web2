@@ -20,6 +20,13 @@ async function modelCopy(bytes,budget){
     edge=Math.max(512,Math.floor(edge*Math.min(.8,Math.sqrt(budget/copy.length)*.95)));
   }
 }
+export async function prepareAnalysisImage(bytes){
+  try{
+    const meta=await sharp(bytes,{limitInputPixels:32*1024*1024}).metadata();
+    if((meta.pages||1)>1)throw invalid();
+    return 'data:image/png;base64,'+(await modelCopy(bytes,MODEL_IMAGE_LIMITS.imageBytes)).toString('base64');
+  }catch{throw Object.assign(new Error('INPUT_INVALID'),{code:'INPUT_INVALID',status:422});}
+}
 export function decodeImage(value) {
   if(typeof value!=='string')throw invalid();
   const match=value.match(/^data:image\/(png|jpeg|webp);base64,([a-zA-Z0-9+/]+={0,2})$/);

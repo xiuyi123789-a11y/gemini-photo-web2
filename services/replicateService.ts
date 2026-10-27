@@ -274,6 +274,10 @@ export const urlToBase64 = async (url: string): Promise<string> => {
 };
 
 const callApi = async (endpoint: string, body: any, stream: boolean = false, retryOptions?: RetryOptions) => {
+    // Text predictions are paid POSTs too. A lost response must not create a
+    // second Gemini prediction; image-generation retry policies stay unchanged.
+    const textOnly=['/task-chat','/merge-generation-understanding'].includes(endpoint);
+    const requestOptions=textOnly?{...retryOptions,retries:0,timeoutMs:retryOptions?.timeoutMs??330000}:retryOptions;
     const userId = getUserId();
     const apiKey = getReplicateApiKey();
     const headers: any = {
@@ -302,11 +306,11 @@ const callApi = async (endpoint: string, body: any, stream: boolean = false, ret
                     headers,
                     body: JSON.stringify(body)
                 },
-                retryOptions?.timeoutMs ?? 120000,
-                retryOptions?.signal
+                requestOptions?.timeoutMs ?? 120000,
+                requestOptions?.signal
             );
         },
-        retryOptions
+        requestOptions
     );
 
     if (stream) {
@@ -333,18 +337,14 @@ type TaskChatMessage = {
 };
 
 type TaskChatOptions = {
-    reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
-    verbosity?: 'low' | 'medium' | 'high';
-    maxCompletionTokens?: number;
+    maxOutputTokens?: number;
     retry?: RetryOptions;
 };
 
-export const taskChatWithGpt5 = async (messages: TaskChatMessage[], options?: TaskChatOptions): Promise<string> => {
+export const taskChatWithGemini = async (messages: TaskChatMessage[], options?: TaskChatOptions): Promise<string> => {
     const payload = {
         messages,
-        reasoning_effort: options?.reasoningEffort ?? 'minimal',
-        verbosity: options?.verbosity ?? 'medium',
-        max_completion_tokens: options?.maxCompletionTokens ?? 1200
+        max_output_tokens: options?.maxOutputTokens ?? 1200
     };
 
     const result = await callApi('/task-chat', payload, false, options?.retry);
@@ -377,11 +377,11 @@ export const runVisionAnalysis = async (imageFile: File, prompt?: string, retryO
                     headers,
                     body: formData
                 },
-                retryOptions?.timeoutMs ?? 180000,
+                retryOptions?.timeoutMs ?? 330000,
                 retryOptions?.signal
             );
         },
-        retryOptions
+        {...retryOptions,retries:0}
     );
 
     const data = await response.json().catch(() => ({} as any));
@@ -415,11 +415,11 @@ export const extractSdPromptsFromImage = async (
                     headers,
                     body: formData
                 },
-                retryOptions?.timeoutMs ?? 180000,
+                retryOptions?.timeoutMs ?? 330000,
                 retryOptions?.signal
             );
         },
-        retryOptions
+        {...retryOptions,retries:0}
     );
 
     const data = await response.json().catch(() => ({} as any));
@@ -708,7 +708,7 @@ const GENERATION_REFERENCE_IMAGE_MERGE_PROMPT = `
 `.trim();
 
 const tryParseJsonObject = (text: string): any | null => {
-    const raw = (text || '').trim();
+    const raw = (text || '').trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'');
     if (!raw) return null;
     try {
         return JSON.parse(raw);

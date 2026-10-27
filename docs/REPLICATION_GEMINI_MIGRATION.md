@@ -1,4 +1,51 @@
-# Gemini 2.5 Flash 产品分析替换验收（v1.5.1 候选）
+# Gemini 2.5 Flash 迁移与实测记录
+
+## v1.5.2：四个板块非生图调用迁移（2026-10-27）
+
+此次范围为首页、智能解析、创意生成、图像处理的文字与视觉理解，原有指令及结果契约保留。图像复刻此前已使用 Gemini，本轮不改它的模型或提示词。
+
+| 接口 | 业务用途 | 当前模型 |
+| --- | --- | --- |
+| `POST /api/task-chat` | 首页多轮需求补全、生成提示词整理 | `google/gemini-2.5-flash` |
+| `POST /api/analyze-image` | 智能解析、知识库参考理解、创意参考结构化、修图建议与修改指令融合 | 同上 |
+| `POST /api/merge-generation-understanding` | 创意参考信息融合 | 同上 |
+| `POST /api/sd-prompt-from-image` | 图像处理的 SD 正负提示词提取 | 同上 |
+
+共用 `server/text-analysis.js`，原生输入为 `prompt`、`system_instruction`、`images`、`temperature:0.2`、`thinking_budget:128`、`dynamic_thinking:false`；输出上限：视觉/融合8192、SD4096、首页默认1200（范围256–4000）。兼容返回字符串或字符串数组，JSON解析支持 Markdown 围栏。参数依据：[Replicate Gemini API](https://replicate.com/google/gemini-2.5-flash/api)。
+
+图片先生成旋转校正、最长边3072、每张不超过7,000,000字节的 PNG 分析副本，不修改用户原图。已使用原始6150×4101、8,585,809字节的产品图实测，模型收到5,251,688字节副本。用户网页 Token 优先，服务端环境 Token 兜底，不写入日志或提交源码。
+
+移除这四个文字接口的流式失败后重新创建预测、服务端重提及前端 POST 自动重试。一次业务步骤只创建一次对应预测，之后仅轮询同一个 ID；失败不切换模型或自动补交。预测已确认后发生错误，错误响应保留 predictionId。其他生图接口的行为未改。
+
+### 真实验证结果
+
+通过实际前端服务函数、Express接口、相同供应商适配器执行本地实测，使用真实产品素材。独立QA入口禁止任何图像模型调用，记录提交前意图和预测确认ID，整轮有独占执行标记及9次上限，无自动重试。以下均为 Replicate `succeeded`，不是模型元数据连通性检查：
+
+| 验证步骤 | predictionId | 返回校验 |
+| --- | --- | --- |
+| 首页缺信息追问 | `vmrkdbzcedrmt0d1fgpbr44p9w` | clarify JSON，追问比例和风格 |
+| 首页多轮提示词整理 | `ve63w77kkdrmr0d1fgpbpn694c` | generate JSON，保留3:4、极简、浅灰背景和鞋款要求 |
+| 智能解析 | `hdnrz6ratnrmr0d1fgptn72w24` | 正确识别鞋类、Kappa/ITALIA；七段内容可解析到原有分类 |
+| 创意单图理解 | `3z6cyk9g89rmw0d1fgpry9b344` | 完整合法JSON、product类别与商品字段 |
+| 创意理解融合 | `678nx8jv01rmw0d1fgpvqqbb2r` | 五段中文可用提示词 |
+| 修图理解 | `s1t0t63sr1rmt0d1fgpvrd9zz0` | 七段理解可解析 |
+| 修图建议 | `86vyy8d6cdrmy0d1fgpte9410r` | 参数/给用户看的/给AI看的完整，0.65幅度及至少五处英文权重 |
+| 修图指令融合 | `7879ye6mj1rmt0d1fgpt274c9c` | 更新浅灰背景，保留主体；非失败兜底拼接 |
+| SD提示词提取 | `msby1gfmhxrmw0d1fgps6mq7jr` | 正负提示词JSON完整，权重语法可用 |
+
+本轮真实新增：Gemini **9** 条、生图模型 **0** 条。私有原始结果、输入哈希、图片大小、供应商指标和逐项断言在 `.local/migration-archive/all-sections-gemini-2026-10-27/`，不进入 GitHub 或镜像。
+
+本地自动回归：121/121 Mock通过；类型检查、生产构建通过。新增测试覆盖四个板块真实前端服务接入、原生字段、BYOK传递、JSON围栏、分片输出、无效输入不收费、429/提交响应丢失/轮询中断不重复创建、空输出、错误模型、SD错误保留预测ID，以及生图模型保持原值。
+
+### 保持不变、能力限制与回滚
+
+- 文生图仍是 `google/nano-banana-2`；无蒙版修图仍是 `google/nano-banana`；图像复刻仍是 Nano Banana 2。原有带蒙版 Flux 修图与超分模型也保持原状，不把图像任务迁到文字模型。原生图 Prompt 不改。
+- 本次验证真实分析API及应用解析链路，没有重新生成图片，不能据此声称生成质量也重新验收。单张鞋类样例不代表所有素材细节均准确；例如材质和数量描述仍可能有误。保留的原分析 Prompt 含人物默认设定，本轮不调整业务指令。
+- 本轮未部署腾讯云。生产使用者的网页Token权限及云端实际推理需在该版本部署后确认；本地服务端Token真实调用通过不等于云端BYOK已实测。
+- 四个旧文字接口仍为同步请求，没有新增持久任务表；断线后未知提交不自动重试，已确认错误可凭predictionId查询。完整持久恢复仍属于图像复刻独立任务架构。本轮不扩展重构。
+- 无数据库结构变更，不删除图片、任务或预测记录。回滚使用 `git revert <本次迁移提交SHA>` 生成新的回退提交并按固定SHA更新流程发布；本次前一版本为 `f85de7d16c48d8917707e85f0afb0233ee8f93da`。不要对已有收费任务执行重提来验证回滚。
+
+## v1.5.1 图像复刻迁移历史验收
 
 2026-10-26，用户选定 `google/gemini-2.5-flash`，要求先真实实测再部署。生成继续使用 `google/nano-banana-2`。
 
