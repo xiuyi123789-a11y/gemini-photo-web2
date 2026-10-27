@@ -29,7 +29,7 @@ export function createReplicationWorker({store,assets,pollMs=1500,budgetMs=30000
       images.push(await assets.dataUri(job,job.assets.guide));
     }
     return job.kind==='analysis'?{system_instruction:ANALYSIS_SYSTEM,prompt:analysisPrompt({target:job.target,references:job.assets.references}),images,
-      thinking_budget:0,dynamic_thinking:false,temperature:0,max_output_tokens:4096}:
+      thinking_budget:128,dynamic_thinking:false,temperature:0,max_output_tokens:8192}:
       {prompt:generationPrompt(job.input,job.approvedAnalysis.text,{referenceCount:job.assets.references.length,subjects:job.approvedAnalysis.subjects}),image_input:images,aspect_ratio:'match_input_image',resolution:job.input.resolution,output_format:'png',image_search:false,google_search:false};
   }
   async function saveRemote(attempt,prediction) {

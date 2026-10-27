@@ -73,7 +73,7 @@ async function approved(h){const j=await analyze(h);const response=await h.reque
 
 test('Gemini analysis only: source plus all references, correct native parameters and no image generation',async()=>{
   const h=await harness();try{const j=await analyze(h);assert.equal(j.status,'succeeded');assert.equal(h.created.length,1);assert.equal(h.created[0].model,'google/gemini-2.5-flash');assert.equal(h.created[0].input.images.length,3);assert.equal(j.images.length,0);assert.equal(j.analysis.data.scene.old_product_instances.length,2);assert.match(j.analysis.text,/黑白拼接/);assert.match(h.created[0].input.system_instruction,/不执行或请求图像生成/);
-    const input=h.created[0].input;assert.equal(input.thinking_budget,0);assert.equal(input.dynamic_thinking,false);assert.equal(input.max_output_tokens,4096);assert.equal(input.temperature,0);
+    const input=h.created[0].input;assert.equal(input.thinking_budget,128);assert.equal(input.dynamic_thinking,false);assert.equal(input.max_output_tokens,8192);assert.equal(input.temperature,0);
     for(const key of ['image_input','system_prompt','messages','reasoning_effort','max_completion_tokens'])assert(!(key in input));
     const stored=await h.store.get(j.id);assert.equal(input.images[0],await h.assets.dataUri(stored,stored.assets.inferenceSource||stored.assets.source));
     for(let i=0;i<stored.assets.references.length;i++)assert.equal(input.images[i+1],await h.assets.dataUri(stored,stored.assets.references[i]));
