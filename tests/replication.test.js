@@ -263,7 +263,7 @@ test('complete analysis-confirm-generation-review flow also persists through the
   }finally{await h.close();await pool.end();}
 });
 test('generation prompt uses new identity and per-instance geometry; ordinary retouch models unchanged',async()=>{
-  const text=generationPrompt({selectedInstances:['left','right'],masks:editMasks,preserve:[],notes:''},'new product identity');assert.match(text,/不要强行套用旧产品外形/);assert.match(text,/left/);assert.match(text,/right/);
+  const text=generationPrompt({selectedInstances:['left','right'],masks:editMasks,preserve:[],notes:''},'new product identity');assert.match(text,/原图旧产品的外轮廓不是新产品的形状模板/);assert.match(text,/left/);assert.match(text,/right/);
   const appSource=await readFile(new URL('../server/app.js',import.meta.url),'utf8');assert.match(appSource,/model = "google\/nano-banana"/);assert.match(appSource,/model = "black-forest-labs\/flux-fill-dev"/);
 });
 test('legacy development image previews load without a custom header; ordinary retouch still uses its existing models',async()=>{
@@ -489,9 +489,12 @@ function brushBody(a,brush=brushSelection([paintStroke()])){return generationBod
 
 test('formal prompt keeps the supplied requirements; placeholders are filled once and input image roles are explicit',()=>{
   const text=generationPrompt({selectedInstances:['left'],notes:'保留 {{产品特征分析}} 字样'},'MOCK 新产品',{referenceCount:2,subjects:fixture().scene.old_product_instances});
-  assert.match(GENERATION_PROMPT_TEMPLATE,/不得删除、移动、重画或重新设计这些遮挡物/);
+  assert.match(GENERATION_PROMPT_TEMPLATE,/原图中遮挡产品的物体必须继续保留原来的位置和形态/);
+  assert.match(text,/涂抹范围用于确定对象，不代表必须保留旧产品的外轮廓/);
+  assert.match(text,/当文字分析与参考图中清晰可见的产品事实冲突时，以新产品参考图为准/);
+  assert.match(text,/Logo 的数量、位置、方向及相对尺寸/);
   assert.match(text,/最后第4张为区域指引图/);assert.match(text,/画面左侧鞋/);assert(!text.includes('画面右侧鞋'));assert.match(text,/保留 \{\{产品特征分析\}\} 字样/);
-  assert(text.startsWith('**任务：**'));assert.match(text,/只输出\*\*一张\*\*/);
+  assert(text.startsWith('# 高精度产品替换与场景保真 Prompt V2.0'));assert.match(text,/仅输出一张完成产品替换的真实场景图片/);
 });
 
 test('analysis localizes corresponding categories independently of old/new color and can explicitly report no target',async()=>{
