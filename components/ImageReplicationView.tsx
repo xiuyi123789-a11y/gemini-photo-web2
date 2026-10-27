@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ArrowLeftRight, Download, Expand, ImagePlus, Layers, Plus, RefreshCw, ScanEye, Sparkles, Trash2, X } from 'lucide-react';
 import { ReplicationImageViewer } from './ReplicationImageViewer';
 import { userStorage } from '../services/browserStorage';
+import {saveReplicationDraft,loadReplicationDraft,clearReplicationDraft} from '../services/replicationDraft';
 import { MAX_REFERENCES, isFinalJob, REPLICATION_MODEL_NAMES } from '../shared/replication-contract.js';
 import { BRUSH_LIMITS, matchBrushSubjects, validSubjectBox } from '../shared/replication-brush.js';
 import { startAnalysis,startGeneration,listActiveJobs,cancelReplicationJob,getReplicationCapabilities,
@@ -105,19 +106,36 @@ export const ImageReplicationView:React.FC=()=>{
     }
     await track(op,true);
   }
+  const refreshCapabilities=()=>getReplicationCapabilities().then(c=>{if(mounted.current)setCaps(c);}).catch(()=>{});
   useEffect(()=>{
     mounted.current=true;
-    void getReplicationCapabilities().then(c=>mounted.current&&setCaps(c)).catch(()=>{});
-    void Promise.all([restore('analysis'),restore('generation')]).catch(e=>{if(mounted.current)setError(issue(e));});
+    void refreshCapabilities();
+    const initialize=async()=>{
+      const draft=await loadReplicationDraft(ownerId());
+      if(!mounted.current)return;
+      if(draft&&!source&&!references.length&&urls.current.size===0&&!readOperation('analysis')&&!readOperation('generation')){
+        const material=(image:{file:File;width:number;height:number;angle?:string}):Material=>{
+          const url=URL.createObjectURL(image.file);urls.current.add(url);
+          return {id:crypto.randomUUID(),file:image.file,preview:url,width:image.width,height:image.height,angle:(image.angle||'other') as ReferenceAngle};
+        };
+        setSource(material(draft.source));setReferences(draft.references.map(material));setNotice('已恢复未提交的素材，请点击识别产品与替换位置。');
+      }
+      await Promise.all([restore('analysis'),restore('generation')]);
+    };
+    void initialize().catch(e=>{if(mounted.current)setError(issue(e));});
+    window.addEventListener?.('focus',refreshCapabilities);
     if(userStorage.getItem('replication_active_job'))setNotice('检测到旧版任务标识，未自动关联到新版分析；历史费用与任务需单独核对。');
-    return()=>{mounted.current=false;loops.current.analysis++;loops.current.generation++;urls.current.forEach(u=>URL.revokeObjectURL(u));};
+    return()=>{mounted.current=false;loops.current.analysis++;loops.current.generation++;window.removeEventListener?.('focus',refreshCapabilities);window.setTimeout(()=>{if(!mounted.current)urls.current.forEach(u=>URL.revokeObjectURL(u));},0);};
   },[]);
   useEffect(()=>{
+    if(source?.file&&references.every(r=>r.file))void saveReplicationDraft(ownerId(),{version:1,source:{file:source.file,width:source.width,height:source.height},references:references.map(r=>({file:r.file!,width:r.width,height:r.height,angle:r.angle})),savedAt:Date.now()}).then(saved=>{
+      if(saved&&mounted.current&&!currentFingerprint.current&&!operationBusy.current&&!readOperation('analysis')&&!readOperation('generation'))setNotice('素材已在本机保存，请点击识别产品与替换位置。');
+    });
     const element=viewport.current;if(!element||!source)return;
     const fit=()=>setCanvasWidth(Math.max(1,Math.min(element.clientWidth,element.clientHeight*source.width/source.height)));
     fit();if(typeof ResizeObserver==='undefined')return;
     const observer=new ResizeObserver(fit);observer.observe(element);return()=>observer.disconnect();
-  },[source?.width,source?.height]);
+  },[source?.width,source?.height,source?.file,references]);
   function stale(){
     if(feeLocked)return;
     setAnalysisJob(null);setGenerationJob(null);setAnalysisText('');setFingerprint('');currentFingerprint.current='';
@@ -219,9 +237,10 @@ export const ImageReplicationView:React.FC=()=>{
   const polygonPoints=(p:Point[])=>p.map(v=>`${v.x*(source?.width||1)},${v.y*(source?.height||1)}`).join(' ');
   const generationReady=validAnalysis&&brushReady&&selection.valid&&!locked&&caps.enabled&&caps.submission?.generation!==false;
   const generatingAgain=!!generationJob?.results.length;
+  const unavailable=!caps.enabled||!validAnalysis&&caps.submission?.analysis===false;
   const statusText=error||(pendingKind?pendingKind==='analysis'?'正在提交分析素材…':'正在提交生图任务…':activeJob?
     `${activeJob.kind==='analysis'?'产品分析':'图片生成'} · ${stages[activeJob.status]||'处理中'}`:unresolved.length?'提交结果待确认，请重新连接查询。':
-    candidate?'图片已生成 · 可预览、对比和下载':notice||(!caps.enabled?'新任务入口已关闭':validAnalysis?'识别完成，请涂抹要替换的物品。':'上传场景与产品图片，识别后涂抹替换。'));
+    candidate?'图片已生成 · 可预览、对比和下载':unavailable?`产品分析入口暂未开放 · ${notice||'已保留上传素材。'}`:notice||(validAnalysis?'识别完成，请涂抹要替换的物品。':'上传场景与产品图片，识别后涂抹替换。'));
   const enlarge=(src:string|undefined,label:string)=>{if(src)setEnlarged({src,label});};
   return <section className="rp-view" aria-label="图像复刻工作台">
     <header className="rp-heading"><h1>图像复刻</h1><div className={'rp-status-line '+(error?'rp-status-error':'')} role={error?'alert':'status'} title={statusText}>{statusText}</div>
@@ -230,7 +249,7 @@ export const ImageReplicationView:React.FC=()=>{
         {activeJob&&<button className="rp-button" onClick={cancel}>请求取消任务</button>}</div>}
     </header>
     <div className="rp-layout"><aside className="rp-card rp-materials">
-      <div className="rp-card-title"><h2><Layers/>输入素材</h2><button className="rp-text" disabled={locked} onClick={()=>{if(window.confirm('清空本次素材与编辑？已保存的任务不会删除。')){stale();setSource(null);setReferences([]);}}}><Trash2/>清空</button></div>
+      <div className="rp-card-title"><h2><Layers/>输入素材</h2><button className="rp-text" disabled={locked} onClick={()=>{if(window.confirm('清空本次素材与编辑？已保存的任务不会删除。')){stale();setSource(null);setReferences([]);void clearReplicationDraft(ownerId());}}}><Trash2/>清空</button></div>
       <div className="rp-section-label">场景原图{source&&<button className="rp-text" disabled={locked} onClick={()=>sourceInput.current?.click()}>更换</button>}</div>
       <div className="rp-source" onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();void upload(e.dataTransfer.files,'source');}}>
         <button disabled={!source&&locked} onClick={()=>source?enlarge(source.preview,'场景原图'):sourceInput.current?.click()} aria-label={source?'放大场景原图':'上传场景原图'}>{source?<><img src={source.preview} alt="场景原图缩略图"/><span className="rp-upload-overlay"><Expand/>放大查看</span></>:<span className="rp-empty-upload"><ImagePlus/>上传场景原图</span>}</button>

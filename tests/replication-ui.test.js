@@ -103,6 +103,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
       if(name.endsWith('ReplicationContourEditor'))return compile('components/ReplicationContourEditor.tsx');
       if(name.endsWith('.css'))return {};
       if(name.endsWith('browserStorage'))return {userStorage:storageApi,getStorageUser:()=> 'owner-incident'};
+      if(name.endsWith('replicationDraft')){const draft=compile('services/replicationDraft.ts');return serverSnapshot?.draft?{...draft,loadReplicationDraft:async()=>serverSnapshot.draft}:draft;}
       if(name.endsWith('userIdentity'))return {getUserId:()=> 'owner-incident'};
       if(name.endsWith('replicateService'))return {fileToBase64:async file=>'data:image/png;base64,'+Buffer.from(await file.arrayBuffer()).toString('base64')};
       if(name.endsWith('replication-contract.js'))return contract;
@@ -303,6 +304,29 @@ test('direct model output has no dependency on a configured local segmenter and 
   await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);h.change('确认本次替换费用',true);
   const onClick=h.button('开始替换').props.onClick;await Promise.all([onClick(),onClick()]);h.render();
   const calls=h.calls.filter(c=>c.url.endsWith('/generation'));assert.equal(calls.length,1);assert.equal(calls[0].body.outputMode,'model');
+});
+test('after a completed round, new uploads allow a new analysis and explicit generation without carrying the old lock',async()=>{
+  const h=harness('normal');await h.mountEffects();
+  for(let round=0;round<2;round++){
+    if(round)await h.click('清空');await h.upload();assert(!h.button('识别产品与替换位置').props.disabled);
+    await h.click('识别产品与替换位置');await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);
+    assert(h.button('开始替换').props.disabled);h.change('确认本次替换费用',true);await h.click('开始替换');
+  }
+  const analyses=h.calls.filter(c=>c.method==='POST'&&c.url.endsWith('/analysis')),images=h.calls.filter(c=>c.method==='POST'&&c.url.endsWith('/generation'));
+  assert.equal(analyses.length,2);assert.equal(images.length,2);assert.equal(h.counts().remoteCreates,4);
+  assert.notEqual(analyses[0].requestId,analyses[1].requestId);assert.notEqual(images[0].requestId,images[1].requestId);
+});
+test('closed analysis capabilities explain the disabled button rather than telling the user to upload again',async()=>{
+  const h=harness('retry-normal');await h.mountEffects();await h.upload();assert(h.button('识别产品与替换位置').props.disabled);
+  assert(h.label().includes('产品分析入口暂未开放'));assert(!h.calls.some(c=>c.method==='POST'));
+});
+test('a reloaded unsubmitted draft restores usable files and all four references; analysis runs only after an explicit click',async()=>{
+  const image={file:new File([new Uint8Array([1,2,3])],'scene.png',{type:'image/png'}),width:96,height:64};
+  const draft={version:1,source:image,references:[1,2,3,4].map(n=>({...image,file:new File([new Uint8Array([n])],n+'.png',{type:'image/png'}),angle:'other'})),savedAt:1};
+  const h=harness('normal',new Map(),{draft});await h.mountEffects();
+  assert(!h.button('识别产品与替换位置').props.disabled);assert(h.button('放大产品参考4'));assert(!h.calls.some(c=>c.method==='POST'));
+  await h.click('识别产品与替换位置');const calls=h.calls.filter(c=>c.url.endsWith('/analysis'));assert.equal(calls.length,1);assert.equal(calls[0].body.references.length,4);
+  assert(h.label().includes('识别到：鞋'));assert(!h.calls.some(c=>c.url.endsWith('/generation')));
 });
 test('local-only resume and cancel ignore an invalid stored model token',async()=>{
   const {job,h}=retryFixture('retry-normal');h.storage.set('replicate_api_token','不能作为请求头的凭据');

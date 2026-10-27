@@ -260,6 +260,18 @@ test('direct model delivery works without local segmentation configuration; unkn
     assert.equal(g.status,'completed_needs_review');assert(g.results[0].raw);assert.equal(g.results[0].composite,null);assert.equal(h.created.length,2);
   }finally{await h.close();}
 });
+test('manual workbench accepts another new-material round after completion and still deduplicates each paid intent',async()=>{
+  const h=await harness({canSubmit:(kind,req)=>req.userId==='alice'});
+  try{
+    for(let round=0;round<2;round++){
+      const a=await approved(h),body=generationBody(a,{outputMode:'model'}),r=await h.request('/generation',body);
+      assert.equal(r.status,202);const g=await waitFor(h,(await r.json()).id);assert.equal(g.status,'completed_needs_review');
+      assert.equal((await h.request('/generation',body).then(r=>r.json())).id,g.id);
+    }
+    assert.equal(h.created.filter(p=>p.model===REPLICATION_MODELS.analysis).length,2);
+    assert.equal(h.created.filter(p=>p.model===REPLICATION_MODELS.generation).length,2);
+  }finally{await h.close();}
+});
 test('local recompose is idempotent, works with paid entry disabled, never accesses provider and leaves original job/assets unchanged',async()=>{
   const options={},h=await harness(options);try{
     const a=await approved(h),r=await h.request('/generation',generationBody(a)),g=await waitFor(h,(await r.json()).id),before=await h.store.get(g.id),rawBefore=await h.assets.read(before,before.results[0].raw);
