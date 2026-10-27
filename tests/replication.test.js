@@ -233,6 +233,33 @@ test('unconfigured local segmenter blocks generation before a paid prediction',a
   const h=await harness({vision:null});try{const a=await approved(h),r=await h.request('/generation',generationBody(a));assert.equal(r.status,503);assert.equal((await r.json()).errorCode,'SEGMENTATION_UNAVAILABLE');assert.equal(h.created.length,1);assert(h.created.every(p=>p.model===REPLICATION_MODELS.analysis));}
   finally{await h.close();if(previous!==undefined)process.env.REPLICATION_VISION_PYTHON=previous;}
 });
+test('model-output mode retains the complete image without vision or brush clipping; refresh and restart cannot create again',async()=>{
+  let visionCalls=0;
+  const h=await harness({vision:async()=>{visionCalls++;throw new Error('Vision must not run in model-output mode');}});
+  try{
+    const a=await approved(h),body=generationBody(a,{outputMode:'model'}),response=await h.request('/generation',body);assert.equal(response.status,202);
+    const g=await waitFor(h,(await response.json()).id);assert.equal(g.status,'completed_needs_review');assert.equal(visionCalls,0);
+    assert.equal(g.results[0].composite,null);assert.deepEqual(g.results[0].quality,{status:'needs_review',mechanism:'model-output',identityVerified:false,reasons:['HUMAN_PRODUCT_IDENTITY_REVIEW_REQUIRED']});
+    assert.deepEqual(g.images,[g.results[0].raw.url]);assert.equal(h.created.length,2);
+    const stored=await h.store.get(g.id),bytes=await h.assets.read(stored,g.results[0].raw);
+    assert.deepEqual(await sharp(bytes).ensureAlpha().raw().toBuffer(),await sharp(generated).ensureAlpha().raw().toBuffer());
+    assert.equal((await h.request('/generation',body).then(r=>r.json())).id,g.id);
+    await h.restart();await h.request('/jobs/'+g.id);await h.request('/jobs/'+g.id+'/resume',{});assert.equal(h.created.length,2);
+    // A process restart after raw storage resumes the acknowledged prediction,
+    // rather than creating another prediction or falling into adaptive logic.
+    await h.store.update(g.id,j=>({...j,status:'postprocessing',stage:'postprocessing',results:[],images:[],pendingRaw:g.results[0].raw,workerLease:null}));
+    await h.request('/jobs/'+g.id+'/resume',{});const recovered=await waitFor(h,g.id);
+    assert.equal(recovered.results[0].raw.sha256,g.results[0].raw.sha256);assert.equal(visionCalls,0);assert.equal(h.created.length,2);
+  }finally{await h.close();}
+});
+test('direct model delivery works without local segmentation configuration; unknown output modes cannot incur a model call',async()=>{
+  const h=await harness({vision:null});try{
+    const a=await approved(h);
+    assert.equal((await h.request('/generation',generationBody(a,{outputMode:'arbitrary'}))).status,400);assert.equal(h.created.length,1);
+    const r=await h.request('/generation',generationBody(a,{outputMode:'model'}));assert.equal(r.status,202);const g=await waitFor(h,(await r.json()).id);
+    assert.equal(g.status,'completed_needs_review');assert(g.results[0].raw);assert.equal(g.results[0].composite,null);assert.equal(h.created.length,2);
+  }finally{await h.close();}
+});
 test('local recompose is idempotent, works with paid entry disabled, never accesses provider and leaves original job/assets unchanged',async()=>{
   const options={},h=await harness(options);try{
     const a=await approved(h),r=await h.request('/generation',generationBody(a)),g=await waitFor(h,(await r.json()).id),before=await h.store.get(g.id),rawBefore=await h.assets.read(before,before.results[0].raw);

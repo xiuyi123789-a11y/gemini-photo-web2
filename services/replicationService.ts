@@ -36,6 +36,7 @@ export type GenerationInput = {
   brush?:BrushSelection;
   maskSpace:{width:number;height:number;sourceHash:string};resolution:string;count:number;
   preserve:PreserveKey[];notes:string;confirmedPredictions:number;
+  outputMode?:'model'|'adaptive';
 };
 export const ownerId = () => getStorageUser() || getUserId();
 export async function digest(value:BufferSource|string):Promise<string> {

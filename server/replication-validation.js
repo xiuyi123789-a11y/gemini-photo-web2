@@ -49,7 +49,8 @@ function polygon(p) {
   return points;
 }
 export function validateGenerationInput(body,{advancedOutputs=false}={}) {
-  only(body,['requestId','inputFingerprint','analysisJobId','analysisRevisionHash','selectedInstances','masks','protectMasks','brush','maskSpace','resolution','count','preserve','notes','confirmedPredictions']);
+  only(body,['requestId','inputFingerprint','analysisJobId','analysisRevisionHash','selectedInstances','masks','protectMasks','brush','maskSpace','resolution','count','preserve','notes','confirmedPredictions','outputMode']);
+  if(body.outputMode!==undefined&&!['model','adaptive'].includes(body.outputMode))throw fail('INPUT_INVALID');
   if(!UUID.test(body.requestId||'')||!HASH.test(body.inputFingerprint||''))throw fail('INPUT_INVALID');
   if(!UUID.test(body.analysisJobId||'')||!HASH.test(body.analysisRevisionHash||''))throw fail('ANALYSIS_REQUIRED',409);
   const selected=body.selectedInstances;

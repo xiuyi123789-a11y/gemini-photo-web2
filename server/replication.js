@@ -61,7 +61,7 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
     if(old){same(old,kind,hash);return res.status(202).json(await view(old));}
     let analysisJob;
     if(kind==='generation') {
-      await requireVision(); // Refuse BEFORE any paid model call if local composition is unavailable.
+      if(input.outputMode!=='model')await requireVision(); // Historical adaptive requests still require reliable local composition.
       analysisJob=await own(req,input.analysisJobId);
       if(analysisJob.kind!=='analysis'||analysisJob.status!=='succeeded'||!analysisJob.analysis?.data||!analysisJob.analysis.confirmedAt)throw fail('ANALYSIS_REQUIRED',409);
       if(analysisJob.inputFingerprint!==input.inputFingerprint||analysisJob.analysis.revisionHash!==input.analysisRevisionHash)throw fail('ANALYSIS_STALE',409);

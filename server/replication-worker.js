@@ -142,6 +142,18 @@ export function createReplicationWorker({store,assets,vision,pollMs=1500,budgetM
         try {rawAsset=job.pendingRaw||await assets.saveRaw(job,index,url);}catch{await state(id,'quality_failed',{errorCode:'OUTPUT_INVALID',quality:{status:'failed',reasons:['OUTPUT_INVALID']}});return;}
         const live=await store.update(id,j=>!isFinalJob(j)&&j.workerLease?.id===lease?{...j,pendingRaw:rawAsset}:null);
         if(isFinalJob(live)||live.workerLease?.id!==lease)return;
+        if(job.input.outputMode==='model'){
+          // The simplified workbench delivers the full model image. No brush
+          // clipping, segmentation or local quality approval is implied.
+          const quality={status:'needs_review',mechanism:'model-output',identityVerified:false,reasons:['HUMAN_PRODUCT_IDENTITY_REVIEW_REQUIRED']};
+          await store.update(id,j=>!isFinalJob(j)&&j.workerLease?.id===lease?{...j,results:[...j.results,{raw:rawAsset,composite:null,quality,predictionId:attempt.predictionId}],
+            images:[...j.images,rawAsset.url],pendingRaw:null,quality,errorCode:null}:null);
+          event(job,'image.model_result',{prediction_id:attempt.predictionId});
+          job=await store.get(id);
+          if(job.cancelRequested){await state(id,'canceled');return;}
+          if(index>=job.total){await state(id,'completed_needs_review',{quality,errorCode:null});return;}
+          continue;
+        }
         const source=await assets.read(job,job.assets.source),generated=await assets.read(job,rawAsset);
         const composed=await compositeReplicationImage(source,generated,job.input,job.approvedAnalysis.subjects,{vision});
         const composite=composed.buffer?await assets.saveComposite(job,index,composed.buffer):null;

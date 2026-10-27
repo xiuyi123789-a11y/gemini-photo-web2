@@ -16,7 +16,7 @@ const realSetTimeout=setTimeout;
 
 function harness(mode,storage=new Map(),serverSnapshot=null){
   let cursor=0,values=[],effects=[],effectMounted=false,tree;
-  const calls=[],timeouts=[];let accepted=0,remoteCreates=0,currentJob=serverSnapshot?.currentJob||null,receipt=serverSnapshot?.receipt||null;
+  const calls=[],timeouts=[],downloads=[];let accepted=0,remoteCreates=0,currentJob=serverSnapshot?.currentJob||null,receipt=serverSnapshot?.receipt||null;
   const storageApi={getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)};
   const react={createElement:(type,props,...children)=>({type,props:{...props,children}}),
     useState:initial=>{const i=cursor++;if(!(i in values))values[i]=typeof initial==='function'?initial():initial;return [values[i],value=>{values[i]=typeof value==='function'?value(values[i]):value;}];},
@@ -30,10 +30,11 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
     errorCode:status==='submission_unknown'?'SUBMISSION_UNKNOWN':null,error:status==='submission_unknown'?'提交待核对':null,
     analysis:status==='succeeded'?{data:{new_product:{category:'鞋'},scene:{old_product_instances:[{instance_id:'left',location:'画面左侧鞋',bbox:[.05,.15,.4,.65],occluders:[]},{instance_id:'right',location:'画面右侧鞋',bbox:[.55,.15,.4,.65],occluders:[]}]}},text:'MOCK 产品分析文字',rawText:'MOCK_ONLY',revision:1,revisionHash:'h',confirmedAt:null}:null});
   const fakeFetch=async(url,options={})=>{
-    assert.equal(typeof url,'string');assert(url.startsWith('/api/replication/'),'Non-local fetch blocked');
+    assert.equal(typeof url,'string');assert(url.startsWith('/api/replication/')||url==='/fake-raw.png','Non-local fetch blocked');
     new Headers(options.headers); // Real browser Fetch header validation, before any request can reach a server.
     const method=options.method||'GET',body=options.body?JSON.parse(options.body):null;calls.push({method,url,requestId:body?.requestId,body});
-    if(url.endsWith('/capabilities'))return response(200,{enabled:!mode.startsWith('retry-'),maxReferences:6,counts:[1],resolutions:['1K','2K'],...(mode==='generation-only'?{submission:{analysis:false,generation:true}}:{})});
+    if(url==='/fake-raw.png')return new Response(new Uint8Array([1,2,3]),{headers:{'Content-Type':'image/png'}});
+    if(url.endsWith('/capabilities'))return response(200,{enabled:!mode.startsWith('retry-'),maxReferences:6,counts:[1],resolutions:['1K','2K'],...(mode==='no-segmenter'?{adaptiveComposition:{configured:false}}:{}),...(mode==='generation-only'?{submission:{analysis:false,generation:true}}:{})});
     if(url.includes('/active?'))return response(200,{jobs:[],requests:receipt&&url.endsWith(receipt.kind)&&['reserved','preparing'].includes(receipt.state)?[receipt]:[]});
     if(url.endsWith('/requests')&&method==='POST'){
       if(mode==='offline')throw new TypeError('MOCK disconnected');
@@ -89,7 +90,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
   class FakePoint{constructor(x,y){this.x=x;this.y=y;}matrixTransform(){return this;}}
   const context=vm.createContext({crypto:webcrypto,TextEncoder,Uint8Array,ArrayBuffer,URL,File,Blob,DOMPoint:FakePoint,
     fetch:fakeFetch,AbortSignal:{timeout:ms=>{timeouts.push(ms);return AbortSignal.timeout(['timeout-before-accept','cannot-seal'].includes(mode)?15:ms);}},
-    window:{setTimeout:(fn)=>realSetTimeout(fn,1),confirm:()=>true},setTimeout:realSetTimeout,Image:FakeImage,console});
+    window:{setTimeout:(fn)=>realSetTimeout(fn,1),confirm:()=>true},document:{createElement:()=>({href:'',download:'',click(){downloads.push({href:this.href,download:this.download});}})},setTimeout:realSetTimeout,Image:FakeImage,console});
   function compile(relative){
     if(moduleCache.has(relative))return moduleCache.get(relative);
     const source=fs.readFileSync(path.join(root,relative),'utf8');
@@ -98,7 +99,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
     const requireFake=name=>{
       if(name==='react')return {__esModule:true,default:react,...react};
       if(name==='lucide-react')return new Proxy({},{get:(_,key)=>String(key)});
-      if(name.endsWith('ImageModal'))return {ImageModal:'ImageModal'};
+      if(name.endsWith('ReplicationImageViewer'))return {ReplicationImageViewer:'ReplicationImageViewer'};
       if(name.endsWith('ReplicationContourEditor'))return compile('components/ReplicationContourEditor.tsx');
       if(name.endsWith('.css'))return {};
       if(name.endsWith('browserStorage'))return {userStorage:storageApi,getStorageUser:()=> 'owner-incident'};
@@ -116,7 +117,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
   function render(){cursor=0;tree=Component();return tree;}
   function nodes(value){if(!value)return [];if(Array.isArray(value))return value.flatMap(nodes);if(typeof value!=='object')return [];return [value,...nodes(value.props?.children)];}
   function label(value){if(Array.isArray(value))return value.map(label).join('');if(typeof value==='string'||typeof value==='number')return String(value);return value?.props?label(value.props.children):'';}
-  function button(text){return nodes(tree).find(node=>node.type==='button'&&label(node).includes(text));}
+  function button(text){return nodes(tree).find(node=>node.type==='button'&&(label(node).includes(text)||node.props['aria-label']?.includes(text)));}
   async function click(text){render();const node=button(text);assert(node,'Button missing: '+text);assert(!node.props.disabled,'Button disabled: '+text);await node.props.onClick();render();}
   async function upload(){
     for(const refs of [false,true]){render();const input=nodes(tree).find(node=>node.type==='input'&&node.props.type==='file'&&!!node.props.multiple===refs);
@@ -134,7 +135,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
     render();nodes(tree).find(node=>node.props?.['aria-label']==='涂抹替换范围画布').props.onPointerUp({pointerId:1,currentTarget:element});render();
   }
   render();
-  return {storage,calls,timeouts,render,button,click,upload,mountEffects,change,paint,snapshot:()=>({receipt,currentJob}),label:()=>label(tree),counts:()=>({accepted,remoteCreates}),service:compile('services/replicationService.ts')};
+  return {storage,calls,timeouts,downloads,render,button,click,upload,mountEffects,change,paint,nodes:()=>nodes(tree),snapshot:()=>({receipt,currentJob}),label:()=>label(tree),counts:()=>({accepted,remoteCreates}),service:compile('services/replicationService.ts')};
 }
 
 test('interrupted upload: durable seal ends loading, clears the orphan only after acknowledgment, and permits a new submit',async()=>{
@@ -163,7 +164,7 @@ test('server-closed preparation failure keeps its real error and selected files;
 test('404 alone keeps fee protection, but refresh always exposes reconnect and safe-end; a seal acknowledgment releases it',async()=>{
   const h=harness('cannot-seal');await h.upload();await h.click('识别产品与替换位置');
   assert(h.storage.has('replication_v2_analysis'));assert(h.button('分析提交待核对').props.disabled);
-  assert(!h.button('检查连接').props.disabled);assert(!h.button('重新连接查询').props.disabled);assert(!h.label().includes('正在提交分析素材'));
+  assert(!h.button('检查连接'));assert(!h.button('重新连接查询').props.disabled);assert(!h.label().includes('正在提交分析素材'));
   const refreshed=harness('legacy-orphan',h.storage);await refreshed.mountEffects();
   assert(refreshed.button('重新连接查询'));assert(refreshed.button('安全结束本次提交'));assert(refreshed.button('分析提交待核对').props.disabled);
   await refreshed.click('重新连接查询');assert(refreshed.storage.has('replication_v2_analysis'));
@@ -254,7 +255,7 @@ test('restored images and analysis permit an explicit new generation under a gen
   const generation={...original.snapshot().currentJob,results:[{raw:{url:'/fake-raw.png'},composite:null,quality:{status:'failed',reasons:['CONTOUR_UNCERTAIN']}}]};
   const h=harness('generation-only',new Map(original.storage),{currentJob:generation,jobs:{[analysis.id]:analysis,[generation.id]:generation}});
   await h.mountEffects();assert(h.button('识别产品与替换位置').props.disabled);
-  assert(h.label().includes('已开放重新生图'));assert(h.label().includes('请先勾选上方费用确认'));
+  assert(h.label().includes('勾选费用确认后即可生成'));
   assert(h.button('重新生成一张').props.disabled);assert.equal(h.counts().remoteCreates,0);
   assert(!h.calls.some(c=>c.method==='POST'),'restoring the screen must be read-only');
   h.change('确认本次替换费用',true);assert(!h.button('重新生成一张').props.disabled);
@@ -273,37 +274,35 @@ function retryFixture(mode){
   const storage=new Map([['replication_v2_generation',JSON.stringify({kind:'generation',ownerId:job.ownerId,requestId:job.requestId,inputFingerprint:job.inputFingerprint,jobId:job.id})]]);
   return {job,h:harness(mode,storage,{currentJob:job})};
 }
-test('retry is prominent with paid entry closed; history rejection has an actionable message and one local POST',async()=>{
+test('compact workbench drops correction, adaptive candidates and audit panels; status is one line without task identifiers',async()=>{
   const {job,h}=retryFixture('retry-normal');await h.mountEffects();
-  assert(!h.button('重新测试智能合成').props.disabled);assert(h.label().includes('上次结果经审核未通过'));assert(!h.label().includes('[QUALITY_FAILED]'));
-  await h.click('修正识别范围');await h.click('重新测试智能合成');
-  const posts=h.calls.filter(c=>c.method==='POST');assert.equal(posts.length,1);assert(posts[0].url.endsWith('/recompose'));assert.deepEqual(posts[0].body.hints,job.input.contourHints);
-  assert.equal(h.counts().remoteCreates,0);assert(!h.label().includes('上次结果经审核未通过'));assert(!h.button('重新测试智能合成').props.disabled);
+  for(const label of ['修正识别范围','重新测试智能合成','智能合成候选','结果审核','显示 AI 识别位置','查看自动范围','QUALITY_FAILED'])assert(!h.label().includes(label));
+  assert(h.label().includes('图片已生成'));assert(!h.label().includes(job.id));assert(!h.label().includes(job.requestId));
+  assert.equal(h.nodes().filter(n=>n.props.role==='status').length,1);
+  assert(!h.button('下载图片').props.disabled);assert(!h.calls.some(c=>c.method==='POST'));
 });
-test('retry releases loading and restores the old operation after a definitive rejection without a new job',async()=>{
-  const {job,h}=retryFixture('retry-rejected');await h.mountEffects();await h.click('重新测试智能合成');
-  assert.equal(JSON.parse(h.storage.get('replication_v2_generation')).jobId,job.id);assert(!h.button('重新测试智能合成').props.disabled);
-  assert(h.label().includes('素材或参数无效'));assert.equal(h.counts().remoteCreates,0);
+test('slider compares the original with full model output even when adaptive composition failed',async()=>{
+  const {h}=retryFixture('retry-normal');await h.mountEffects();
+  const tab=h.nodes().find(n=>n.props.role==='tab'&&n.props.children.includes('滑动对比'));assert(!tab.props.disabled);tab.props.onClick();h.render();
+  const slider=h.nodes().find(n=>n.props['aria-label']==='原图与生成结果滑动对比');assert(slider);slider.props.onChange({target:{value:'72'}});h.render();
+  const compared=h.nodes().find(n=>n.type==='img'&&n.props.alt==='生成结果对比');assert.equal(compared.props.src,'/fake-raw.png');assert.equal(compared.props.style.clipPath,'inset(0 0 0 72%)');
+  assert(!h.nodes().some(n=>n.props.src==='/old-composite.png'));assert(!h.calls.some(c=>c.method==='POST'));
 });
-test('retry double click submits once; original history warning clears while processing',async()=>{
-  const {h}=retryFixture('retry-normal');await h.mountEffects();const onClick=h.button('重新测试智能合成').props.onClick;
-  const first=onClick(),second=onClick();h.render();assert(h.button('正在重新测试').props.disabled);assert(!h.label().includes('上次结果经审核未通过'));
-  assert(h.label().includes('本地测试请求'));assert(!h.label().includes('生图请求'));
-  await Promise.all([first,second]);h.render();assert.equal(h.calls.filter(c=>c.url.endsWith('/recompose')).length,1);assert.equal(h.counts().remoteCreates,0);
+test('all inputs and output can open the image viewer without model calls; download uses the full model image',async()=>{
+  const h=harness('normal');await h.upload();await h.click('放大场景原图');
+  let viewer=h.nodes().find(n=>n.type==='ReplicationImageViewer');assert(viewer.props.src);assert.equal(viewer.props.label,'场景原图');viewer.props.onClose();h.render();
+  await h.click('放大产品参考1');viewer=h.nodes().find(n=>n.type==='ReplicationImageViewer');assert.equal(viewer.props.label,'产品参考1');
+  assert.equal(h.counts().remoteCreates,0);
+  const restored=retryFixture('retry-normal').h;await restored.mountEffects();await restored.click('放大当前预览');
+  viewer=restored.nodes().find(n=>n.type==='ReplicationImageViewer');assert.equal(viewer.props.src,'/fake-raw.png');
+  await restored.click('下载图片');assert.equal(restored.downloads.length,1);assert.match(restored.downloads[0].download,/生成结果/);
+  assert(restored.calls.some(c=>c.url==='/fake-raw.png'));assert(!restored.calls.some(c=>c.method==='POST'));
 });
-test('lost local retry acknowledgment recovers through GET, refresh never resubmits or creates a prediction',async()=>{
-  const {h}=retryFixture('retry-lost-ack');await h.mountEffects();await h.click('重新测试智能合成');
-  assert.equal(h.calls.filter(c=>c.url.endsWith('/recompose')).length,1);assert(!h.button('重新测试智能合成').props.disabled);
-  const refreshed=harness('retry-normal',h.storage,h.snapshot());await refreshed.mountEffects();assert(!refreshed.calls.some(c=>c.method==='POST'));assert.equal(refreshed.counts().remoteCreates,0);
-});
-test('local contour failure reports its exact cause, keeps raw output and exposes retry plus correction',async()=>{
-  const {h}=retryFixture('retry-contour');await h.mountEffects();await h.click('重新测试智能合成');
-  assert(h.label().includes(contract.ERROR_MESSAGES.CONTOUR_UNCERTAIN));assert(!h.label().includes('[QUALITY_FAILED]'));assert(!h.button('重新测试智能合成').props.disabled);
-  assert(h.button('修正识别范围'));assert(!h.button('确认替换合格'));assert.equal(h.counts().remoteCreates,0);
-});
-test('unknown local retry exposes reconnect instead of another POST',async()=>{
-  const {h}=retryFixture('retry-offline');await h.mountEffects();await h.click('重新测试智能合成');assert(h.button('重新连接本地测试'));
-  await h.click('重新连接本地测试');assert.equal(h.calls.filter(c=>c.url.endsWith('/recompose')).length,1);assert.equal(h.counts().remoteCreates,0);
+test('direct model output has no dependency on a configured local segmenter and generation double clicks submit once',async()=>{
+  const h=harness('no-segmenter');await h.mountEffects();await h.upload();await h.click('识别产品与替换位置');
+  await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);h.change('确认本次替换费用',true);
+  const onClick=h.button('开始替换').props.onClick;await Promise.all([onClick(),onClick()]);h.render();
+  const calls=h.calls.filter(c=>c.url.endsWith('/generation'));assert.equal(calls.length,1);assert.equal(calls[0].body.outputMode,'model');
 });
 test('local-only resume and cancel ignore an invalid stored model token',async()=>{
   const {job,h}=retryFixture('retry-normal');h.storage.set('replicate_api_token','不能作为请求头的凭据');
