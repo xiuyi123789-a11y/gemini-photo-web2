@@ -55,7 +55,7 @@ async function harness(options={}) {
   const routers=[];let server,base;
   const start=async()=>{
     const app=express();app.use(express.json({limit:'50mb'}));app.use((req,res,next)=>{req.userId=req.get('x-user-id')||'alice';next();});
-    const router=createReplicationRouter({store,assets,vision:options.vision===null?undefined:options.vision||fixtureVision,getProvider:req=>{if(options.noProvider)throw new Error('Provider forbidden during local recompose');return req.get('x-replicate-token')==='wrong'?{...provider,accountRef:'other-account'}:provider;},pollMs:2,budgetMs:options.budgetMs||5000,leaseMs:200,logger:e=>logs.push(e),advancedOutputs:!!options.advanced,enabled:()=>!options.disabled});
+    const router=createReplicationRouter({store,assets,vision:options.vision===null?undefined:options.vision||fixtureVision,getProvider:req=>{if(options.noProvider)throw new Error('Provider forbidden during local recompose');return req.get('x-replicate-token')==='wrong'?{...provider,accountRef:'other-account'}:provider;},pollMs:2,budgetMs:options.budgetMs||5000,leaseMs:200,logger:e=>logs.push(e),advancedOutputs:!!options.advanced,enabled:()=>!options.disabled,canSubmit:options.canSubmit});
     routers.push(router);app.use('/replication',router);server=await new Promise(r=>{const s=app.listen(0,'127.0.0.1',()=>r(s));});base='http://127.0.0.1:'+server.address().port+'/replication';
   };
   await start();
@@ -71,6 +71,22 @@ async function waitFor(h,id,predicate=j=>isFinalJob(j)||['submission_unknown','c
 }
 async function analyze(h){const r=await h.request('/analysis',analysisBody());assert.equal(r.status,202);return waitFor(h,(await r.json()).id);}
 async function approved(h){const j=await analyze(h);const response=await h.request('/jobs/'+j.id+'/revision',{text:j.analysis.text,previousHash:j.analysis.revisionHash});assert.equal(response.status,200);return response.json();}
+
+test('generation-only admission preserves existing analysis, denies new analysis receipts and accepts one explicit new image task',async()=>{
+  let generationOnly=false;
+  const h=await harness({canSubmit:(kind,req)=>!generationOnly||kind==='generation'&&req.userId==='alice'});
+  try{
+    const a=await approved(h);generationOnly=true;
+    const caps=await(await h.request('/capabilities')).json();assert.deepEqual(caps.submission,{analysis:false,generation:true});
+    const b=analysisBody();
+    assert.equal((await h.request('/requests',{requestId:b.requestId,inputFingerprint:b.inputFingerprint,kind:'analysis'})).status,503);
+    assert.equal((await h.request('/analysis',b)).status,503);assert.equal(h.created.length,1);
+    assert.equal((await h.request('/jobs/'+a.id)).status,200);
+    const g=await h.request('/generation',generationBody(a));assert.equal(g.status,202);const job=await waitFor(h,(await g.json()).id);
+    assert.equal(h.created.length,2);assert.equal(h.created[1].model,REPLICATION_MODELS.generation);assert.equal(job.analysisJobId,a.id);
+    assert.equal((await h.request('/generation',generationBody(a),'bob')).status,503);
+  }finally{await h.close();}
+});
 
 test('Gemini analysis only: source plus all references, correct native parameters and no image generation',async()=>{
   const h=await harness();try{const j=await analyze(h);assert.equal(j.status,'succeeded');assert.equal(h.created.length,1);assert.equal(h.created[0].model,'google/gemini-2.5-flash');assert.equal(h.created[0].input.images.length,3);assert.equal(j.images.length,0);assert.equal(j.analysis.data.scene.old_product_instances.length,2);assert.match(j.analysis.text,/黑白拼接/);assert.match(h.created[0].input.system_instruction,/不执行或请求图像生成/);

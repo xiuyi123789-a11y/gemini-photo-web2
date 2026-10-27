@@ -69,7 +69,7 @@ export const listActiveJobs=(kind:ReplicationKind):Promise<{jobs:ReplicationJob[
 export const resumeReplicationJob=(id:string,localOnly=false):Promise<ReplicationJob>=>request('/jobs/'+encodeURIComponent(id)+'/resume',{},localOnly);
 export const cancelReplicationJob=(id:string,localOnly=false):Promise<ReplicationJob>=>request('/jobs/'+encodeURIComponent(id)+'/cancel',{},localOnly);
 export const checkReplicationConnection=():Promise<any>=>request('/connectivity',{});
-export const getReplicationCapabilities=():Promise<{enabled:boolean;maxReferences:number;counts:number[];resolutions:string[];adaptiveComposition?:{configured:boolean}}>=>request('/capabilities');
+export const getReplicationCapabilities=():Promise<{enabled:boolean;maxReferences:number;counts:number[];resolutions:string[];submission?:{analysis:boolean;generation:boolean};adaptiveComposition?:{configured:boolean}}>=>request('/capabilities');
 export const reviseAnalysis=(job:ReplicationJob,text:string):Promise<ReplicationJob>=>request('/jobs/'+job.id+'/revision',{text,previousHash:job.analysis?.revisionHash});
 export const reviewReplication=(id:string,decision:'accept'|'reject',checks?:Record<string,boolean>):Promise<ReplicationJob>=>request('/jobs/'+id+'/review',{decision,checks});
 export const recomposeReplication=(id:string,requestId:string,hints:ContourHint[]):Promise<ReplicationJob>=>request('/jobs/'+id+'/recompose',{requestId,hints});

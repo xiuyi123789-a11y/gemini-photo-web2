@@ -28,7 +28,7 @@ export const ImageReplicationView:React.FC=()=>{
   const [painting,setPainting]=useState(false);
   const preserve=Object.keys(locks) as PreserveKey[];
   const [notes,setNotes]=useState(''),[count,setCount]=useState(1),[resolution,setResolution]=useState('2K');
-  const [caps,setCaps]=useState<{enabled:boolean;maxReferences:number;counts:number[];resolutions:string[];adaptiveComposition?:{configured:boolean}}>({enabled:true,maxReferences:MAX_REFERENCES,counts:[1],resolutions:['1K','2K']});
+  const [caps,setCaps]=useState<{enabled:boolean;maxReferences:number;counts:number[];resolutions:string[];submission?:{analysis:boolean;generation:boolean};adaptiveComposition?:{configured:boolean}}>({enabled:true,maxReferences:MAX_REFERENCES,counts:[1],resolutions:['1K','2K']});
   const [pendingKind,setPendingKind]=useState<'analysis'|'generation'|null>(null),[reading,setReading]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
   const [operations,setOperations]=useState<{analysis:Operation|null;generation:Operation|null}>(()=>({analysis:readOperation('analysis'),generation:readOperation('generation')}));
   const [mode,setMode]=useState<'original'|'raw'|'result'|'compare'>('original'),[candidate,setCandidate]=useState<Candidate|null>(null),[split,setSplit]=useState(50),[enlarged,setEnlarged]=useState<string|null>(null);
@@ -247,7 +247,8 @@ export const ImageReplicationView:React.FC=()=>{
   const originalUrl=candidate&&mode!=='original'?candidate.job.source.url:source?.preview;
   const preview=mode==='raw'?candidate?.result.raw.url:mode==='result'?candidate?.result.composite?.url:originalUrl;
   const polygonPoints=(p:Point[])=>p.map(v=>`${v.x*(source?.width||1)},${v.y*(source?.height||1)}`).join(' ');
-  const generationReady=validAnalysis&&brushReady&&selection.valid&&!locked&&caps.enabled&&caps.adaptiveComposition?.configured!==false;
+  const generationReady=validAnalysis&&brushReady&&selection.valid&&!locked&&caps.enabled&&caps.submission?.generation!==false&&caps.adaptiveComposition?.configured!==false;
+  const generatingAgain=!!generationJob?.results.length;
   const compositionProblem=!composing&&candidate?.job.id===generationJob?.id?compositionFailure(candidate?.job):null;
   const displayError=error||compositionProblem?.message;
   const localPending=unresolved.some(op=>op.localOnly);
@@ -259,6 +260,7 @@ export const ImageReplicationView:React.FC=()=>{
       <button className="rp-button" disabled={reading||!!pendingKind} onClick={async()=>{try{await checkReplicationConnection();setNotice('两模型元数据可访问，未创建预测任务。');}catch(e){setError(issue(e));}}}><PlugZap/>检查连接</button></div>
     <div className="rp-workflow"><span>01 上传场景与产品</span><span>02 AI 识别对应物品</span><span>03 涂抹确认</span><span>04 开始替换</span></div>
     {!caps.enabled&&<div className="rp-message">新生图入口已关闭；已有模型原图仍可重新测试智能合成，无需重新上传。</div>}
+    {caps.enabled&&caps.submission?.analysis===false&&caps.submission.generation&&<div className="rp-message">已开放重新生图，沿用当前产品分析和涂抹。请在下方勾选费用确认，再点击“重新生成一张”。</div>}
     {(displayError||notice)&&<div className={'rp-message '+(displayError?(displayError===compositionProblem?.message?'rp-warning':'rp-error'):'')} role={displayError?'alert':'status'}>{displayError||notice}</div>}
     {canRetest&&<div className="rp-retest-bar" aria-label="重新测试智能合成"><div><b>{composing?'正在重新测试智能合成…':'重新测试已有图片'}</b><p>复用当前模型原图和 {contourHints.length} 个修正点；只做本地识别与合成，不重新分析或生图。</p></div><div className="rp-mask-tools"><button className="rp-button rp-primary" disabled={retestDisabled} onClick={retryComposition}><RefreshCw/>{composing?'正在重新测试…':localPending?'重新连接本地测试':'重新测试智能合成'}</button><button className="rp-button" disabled={composing||!!activeJob} onClick={openContourEditor}>修正识别范围</button></div></div>}
     <div className="rp-layout"><section className="rp-card rp-materials">
@@ -274,7 +276,7 @@ export const ImageReplicationView:React.FC=()=>{
         {references.length<caps.maxReferences&&<button disabled={locked} className="rp-add-ref" onClick={()=>refsInput.current?.click()}><Plus/>添加参考</button>}
         <input ref={refsInput} type="file" hidden multiple accept="image/jpeg,image/png,image/webp" onChange={e=>{if(e.target.files)void upload(e.target.files,'refs');e.target.value='';}}/></div>
       <p className="rp-hint">同一新产品；JPG/PNG/WEBP；单张20 MB，合计32 MB。</p>
-      <button className="rp-button rp-primary rp-wide" disabled={locked||!caps.enabled} onClick={analyze}><ScanEye/>{pendingKind==='analysis'?'正在提交分析素材…':analysisJob&&!isFinalJob(analysisJob)?(['submission_unknown','cancel_unknown'].includes(analysisJob.status)?'分析任务待核对':stages[analysisJob.status]||'分析任务待恢复'):unresolved.some(op=>op.kind==='analysis')?'分析提交待核对':'识别产品与替换位置'}</button>
+      <button className="rp-button rp-primary rp-wide" disabled={locked||!caps.enabled||caps.submission?.analysis===false} onClick={analyze}><ScanEye/>{pendingKind==='analysis'?'正在提交分析素材…':analysisJob&&!isFinalJob(analysisJob)?(['submission_unknown','cancel_unknown'].includes(analysisJob.status)?'分析任务待核对':stages[analysisJob.status]||'分析任务待恢复'):unresolved.some(op=>op.kind==='analysis')?'分析提交待核对':'识别产品与替换位置'}</button>
       <p className="rp-hint">自动理解产品并寻找场景中的同类物品，无需填写产品名称。识别不会生成图片。</p>
       {validAnalysis&&<div className="rp-recognition" role="status"><b>识别到：{analysisJob!.analysis!.data.new_product.category}</b><p>{instances.length?`场景中找到 ${instances.length} 个对应物品。请在右侧涂抹确认要替换的产品，无需描出新产品的最终轮廓。`:'场景中没有找到对应物品，请更换场景照片后识别。'}</p>{instances.map((i:any)=><span key={i.instance_id}>{i.location}</span>)}</div>}
       {validAnalysis&&<details className="rp-advanced"><summary>查看 / 调整产品特征（可选）</summary><textarea className="rp-analysis" aria-label="产品分析摘要" value={analysisText} disabled={locked} maxLength={16000} onChange={e=>{setAnalysisText(e.target.value);setCostConfirmed(false);}}/>{!!analysisJob?.analysis?.rawText&&<details><summary>原始分析返回</summary><pre className="rp-json">{analysisJob.analysis.rawText}</pre></details>}</details>}
@@ -314,7 +316,8 @@ export const ImageReplicationView:React.FC=()=>{
           <div><span className="rp-field-label">输出设置</span><div className="rp-output"><select aria-label="模型分辨率" disabled={locked} value={resolution} onChange={e=>{setResolution(e.target.value);setCostConfirmed(false);}}>{caps.resolutions.map(v=><option key={v}>{v}</option>)}</select><select aria-label="候选数量" disabled={locked} value={count} onChange={e=>{setCount(Number(e.target.value));setCostConfirmed(false);}}>{caps.counts.map(v=><option key={v} value={v}>{v} 张</option>)}</select></div><p className="rp-hint">首版默认单张，4K/批量需验证后由维护者开放。合成输出保持原图像素尺寸。</p></div></div>
         </details>
         <label className="rp-cost"><input aria-label="确认本次替换费用" type="checkbox" disabled={locked||!generationReady} checked={costConfirmed} onChange={e=>setCostConfirmed(e.target.checked)}/>本次请求 {count} 个 Nano Banana 2 图像预测；金额以供应商实际记录为准，失败或取消也可能计费。</label>
-        <button className="rp-button rp-primary" disabled={!generationReady||!costConfirmed||painting} onClick={generate}><Sparkles/>开始替换</button>
+        <button className="rp-button rp-primary" disabled={!generationReady||!costConfirmed||painting} onClick={generate}><Sparkles/>{generatingAgain?'重新生成一张':'开始替换'}</button>
+        {generationReady&&!costConfirmed&&<p className="rp-hint">请先勾选上方费用确认，{generatingAgain?'重新生成一张':'开始替换'}按钮即可使用。重新生成会创建新的模型任务；智能合成重测只处理已有图片。</p>}
       </section>
       {(analysisJob||generationJob||pendingKind||unresolved.length>0)&&<section className="rp-card rp-settings" aria-label="任务状态">
         <div className="rp-card-title"><h2>独立任务状态</h2><button className="rp-button" onClick={reconnect}><RefreshCw/>重新连接查询</button></div>

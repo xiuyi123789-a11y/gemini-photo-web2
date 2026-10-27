@@ -10,7 +10,7 @@ import { validateAnalysisInput, validateGenerationInput, validateRequestIdentity
 export { REPLICATION_MODELS };
 
 export function createReplicationRouter({store,assets,getProvider,vision,pollMs,budgetMs,leaseMs,logger,
-  enabled=()=>process.env.REPLICATION_ENABLED!=='false',advancedOutputs=process.env.REPLICATION_ADVANCED_OUTPUTS==='true',retentionDays=30,maxReferences=MAX_REFERENCES}) {
+  enabled=()=>process.env.REPLICATION_ENABLED!=='false',canSubmit=()=>true,advancedOutputs=process.env.REPLICATION_ADVANCED_OUTPUTS==='true',retentionDays=30,maxReferences=MAX_REFERENCES}) {
   const router=Router(),worker=createReplicationWorker({store,assets,vision,pollMs,budgetMs,leaseMs,logger});
   let visionProbe;
   const requireVision=async()=>{
@@ -54,7 +54,7 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
     if(old.kind!==kind||old.payloadHash!==hash)throw fail('IDEMPOTENCY_CONFLICT',409);return old;
   }
   async function create(req,res,kind) {
-    if(!enabled())throw fail('FEATURE_DISABLED',503);
+    if(!enabled()||!canSubmit(kind,req))throw fail('FEATURE_DISABLED',503);
     const input=kind==='analysis'?validateAnalysisInput(req.body,{maxReferences}):validateGenerationInput(req.body,{advancedOutputs});
     const identity={ownerId:req.userId,requestId:input.requestId,kind,inputFingerprint:input.inputFingerprint};
     const hash=payloadHash(input),old=await store.byRequest(req.userId,input.requestId);
@@ -110,11 +110,14 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
     }
   }
   router.get('/capabilities',route(async(req,res)=>res.json({version:2,enabled:enabled(),maxReferences,
+    submission:{analysis:enabled()&&canSubmit('analysis',req),generation:enabled()&&canSubmit('generation',req)},
     counts:advancedOutputs?[1,2,4]:[1],resolutions:advancedOutputs?['1K','2K','4K']:['1K','2K'],models:REPLICATION_MODELS,retentionDays,adaptiveComposition:{configured:!!vision||localVisionConfigured()}})));
   router.post('/connectivity',route(async(req,res)=>res.json({success:true,models:await getProvider(req).connectivity()})));
   router.post('/requests',route(async(req,res)=>{
     if(!enabled())throw fail('FEATURE_DISABLED',503);
-    const identity={...validateRequestIdentity(req.body),ownerId:req.userId};const r=await reserve(identity);
+    const identity={...validateRequestIdentity(req.body),ownerId:req.userId};
+    if(!canSubmit(identity.kind,req))throw fail('FEATURE_DISABLED',503);
+    const r=await reserve(identity);
     if(r.state==='closed')throw fail('REQUEST_CLOSED',410);res.status(202).json(receiptView(r));
   }));
   router.get('/requests/:requestId',route(async(req,res)=>{

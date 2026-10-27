@@ -33,7 +33,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
     assert.equal(typeof url,'string');assert(url.startsWith('/api/replication/'),'Non-local fetch blocked');
     new Headers(options.headers); // Real browser Fetch header validation, before any request can reach a server.
     const method=options.method||'GET',body=options.body?JSON.parse(options.body):null;calls.push({method,url,requestId:body?.requestId,body});
-    if(url.endsWith('/capabilities'))return response(200,{enabled:!mode.startsWith('retry-'),maxReferences:6,counts:[1],resolutions:['1K','2K']});
+    if(url.endsWith('/capabilities'))return response(200,{enabled:!mode.startsWith('retry-'),maxReferences:6,counts:[1],resolutions:['1K','2K'],...(mode==='generation-only'?{submission:{analysis:false,generation:true}}:{})});
     if(url.includes('/active?'))return response(200,{jobs:[],requests:receipt&&url.endsWith(receipt.kind)&&['reserved','preparing'].includes(receipt.state)?[receipt]:[]});
     if(url.endsWith('/requests')&&method==='POST'){
       if(mode==='offline')throw new TypeError('MOCK disconnected');
@@ -81,7 +81,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
       return response(202,currentJob);
     }
     if(url.includes('/request/'))return currentJob&&url.endsWith(currentJob.requestId)?response(200,currentJob):response(404,{errorCode:'JOB_NOT_FOUND'});
-    if(url.includes('/jobs/'))return currentJob?response(200,currentJob):response(404,{errorCode:'JOB_NOT_FOUND'});
+    if(url.includes('/jobs/')){const job=serverSnapshot?.jobs?.[url.split('/jobs/')[1]]||currentJob;return job?response(200,job):response(404,{errorCode:'JOB_NOT_FOUND'});}
     throw new Error('Unexpected mock route '+method+' '+url);
   };
   class FakeImage{naturalWidth=96;naturalHeight=64;set src(v){queueMicrotask(()=>this.onload());}}
@@ -245,6 +245,22 @@ test('background painting cannot enable generation; zoom does not change normali
   await h.paint([{x:.5,y:.02},{x:.9,y:.02}]);assert(h.button('开始替换').props.disabled);assert(h.label().includes('不匹配'));
   await h.click('清空涂抹');await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);h.change('确认本次替换费用',true);await h.click('开始替换');
   const body=h.calls.find(c=>c.url.endsWith('/generation')).body;assert(Math.abs(body.brush.strokes[0].points[0].x-.2)<1e-6);assert(Math.abs(body.brush.strokes[0].points[0].y-.4)<1e-6);
+});
+
+test('restored images and analysis permit an explicit new generation under a generation-only grant, with a fresh fee confirmation',async()=>{
+  const original=harness('normal');await original.upload();await original.click('识别产品与替换位置');
+  const analysis=structuredClone(original.snapshot().currentJob);analysis.analysis.confirmedAt=Date.now();analysis.analysis.revisionHash='confirmed-h';
+  await original.paint([{x:.2,y:.4},{x:.3,y:.5}]);original.change('确认本次替换费用',true);await original.click('开始替换');
+  const generation={...original.snapshot().currentJob,results:[{raw:{url:'/fake-raw.png'},composite:null,quality:{status:'failed',reasons:['CONTOUR_UNCERTAIN']}}]};
+  const h=harness('generation-only',new Map(original.storage),{currentJob:generation,jobs:{[analysis.id]:analysis,[generation.id]:generation}});
+  await h.mountEffects();assert(h.button('识别产品与替换位置').props.disabled);
+  assert(h.label().includes('已开放重新生图'));assert(h.label().includes('请先勾选上方费用确认'));
+  assert(h.button('重新生成一张').props.disabled);assert.equal(h.counts().remoteCreates,0);
+  assert(!h.calls.some(c=>c.method==='POST'),'restoring the screen must be read-only');
+  h.change('确认本次替换费用',true);assert(!h.button('重新生成一张').props.disabled);
+  await h.click('重新生成一张');
+  assert.equal(h.calls.filter(c=>c.method==='POST'&&c.url.endsWith('/generation')).length,1);
+  assert(!h.calls.some(c=>c.url.endsWith('/analysis')));assert.equal(h.counts().remoteCreates,1);
 });
 
 function retryFixture(mode){
