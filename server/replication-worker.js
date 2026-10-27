@@ -6,7 +6,7 @@ import { analysisPrompt, ANALYSIS_SYSTEM, generationPrompt, parseProductAnalysis
 import { compositeReplicationImage } from './replication-composite.js';
 
 const remoteFinal=new Set(['succeeded','failed','canceled']);
-export function createReplicationWorker({store,assets,pollMs=1500,budgetMs=300000,leaseMs=90000,logger=event=>console.info(JSON.stringify(event))}) {
+export function createReplicationWorker({store,assets,vision,pollMs=1500,budgetMs=300000,leaseMs=90000,logger=event=>console.info(JSON.stringify(event))}) {
   const running=new Map();let stopping=false;
   const event=(job,name,fields={})=>logger({event:name,timestamp:new Date().toISOString(),user_id_hash:sha256(job.ownerId).slice(0,16),
     ui_intent:job.kind,job_kind:job.kind,request_id:job.requestId,job_id:job.id,model:REPLICATION_MODELS[job.kind],
@@ -59,6 +59,17 @@ export function createReplicationWorker({store,assets,pollMs=1500,budgetMs=30000
         if(job.workerLease?.id!==lease)return;
         await store.update(id,j=>j.workerLease?.id===lease?{...j,workerLease:{id:lease,until:Date.now()+leaseMs}}:null);
         if(isFinalJob(job))return;
+        if(job.origin==='local_recomposition'){
+          await state(id,'postprocessing');
+          const raw=job.assets.raw;
+          const composed=await compositeReplicationImage(await assets.read(job,job.assets.source),await assets.read(job,raw),job.input,job.approvedAnalysis.subjects,{vision});
+          const composite=composed.buffer?await assets.saveComposite(job,1,composed.buffer):null;
+          const compositeMasks=await assets.saveCompositeMasks(job,1,composed.maskBuffers);
+          const quality=composed.quality;
+          await state(id,composite?'completed_needs_review':'quality_failed',{results:[{raw,composite,compositeMasks,quality,predictionId:job.sourcePredictionId}],
+            images:composite?[composite.url]:[],quality,errorCode:composite?null:'QUALITY_FAILED'});
+          return;
+        }
         if(job.results.some(r=>r.quality.status==='failed')){await state(id,'quality_failed',{errorCode:'QUALITY_FAILED'});return;}
         const index=job.kind==='analysis'?1:job.results.length+1;
         if(job.kind==='generation'&&index>job.total){await state(id,'completed_needs_review',{quality:{status:'needs_review'}});return;}
@@ -132,9 +143,10 @@ export function createReplicationWorker({store,assets,pollMs=1500,budgetMs=30000
         const live=await store.update(id,j=>!isFinalJob(j)&&j.workerLease?.id===lease?{...j,pendingRaw:rawAsset}:null);
         if(isFinalJob(live)||live.workerLease?.id!==lease)return;
         const source=await assets.read(job,job.assets.source),generated=await assets.read(job,rawAsset);
-        const composed=await compositeReplicationImage(source,generated,job.input,job.approvedAnalysis.subjects);
+        const composed=await compositeReplicationImage(source,generated,job.input,job.approvedAnalysis.subjects,{vision});
         const composite=composed.buffer?await assets.saveComposite(job,index,composed.buffer):null;
-        const result={raw:rawAsset,composite,quality:composed.quality,predictionId:attempt.predictionId};
+        const compositeMasks=await assets.saveCompositeMasks(job,index,composed.maskBuffers);
+        const result={raw:rawAsset,composite,compositeMasks,quality:composed.quality,predictionId:attempt.predictionId};
         await store.update(id,j=>!isFinalJob(j)&&j.workerLease?.id===lease?{...j,results:[...j.results,result],images:[...j.images,...(composite?[composite.url]:[])],pendingRaw:null}:null);
         event(job,'image.quality_result',{prediction_id:attempt.predictionId,quality_status:composed.quality.status});
         if(composed.quality.status==='failed'){await state(id,'quality_failed',{errorCode:'QUALITY_FAILED',quality:composed.quality});return;}
@@ -147,6 +159,12 @@ export function createReplicationWorker({store,assets,pollMs=1500,budgetMs=30000
       // queryable by GET and recoverable only by an explicit non-creating POST.
       const job=await store.get(id).catch(()=>null);
       if(job&&!isFinalJob(job)) {
+        if(job.origin==='local_recomposition'){
+          const raw=job.assets.raw;
+          const quality={status:'failed',reasons:['SEGMENTATION_FAILED']};
+          await state(id,'quality_failed',{quality,errorCode:'QUALITY_FAILED',results:raw?[{raw,composite:null,compositeMasks:{},quality,predictionId:job.sourcePredictionId}]:[]}).catch(()=>{});
+          return;
+        }
         let attempts;try{attempts=await store.attempts(id);}catch{return;}
         if(!attempts.length){await state(id,'failed',{errorCode:'INPUT_PREPARATION_FAILED'}).catch(()=>{});return;}
         const uncertain=attempts.some(a=>!a.predictionId);

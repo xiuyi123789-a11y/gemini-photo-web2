@@ -5,17 +5,25 @@ import { sha256 } from './replication-assets.js';
 import { createReplicationWorker } from './replication-worker.js';
 import { prepareMasks, createRegionGuide } from './replication-composite.js';
 import { matchBrushSubjects } from '../shared/replication-brush.js';
-import { validateAnalysisInput, validateGenerationInput, validateRequestIdentity, payloadHash, fail, UUID } from './replication-validation.js';
+import {createLocalVision,localVisionConfigured} from './replication-vision.js';
+import { validateAnalysisInput, validateGenerationInput, validateRequestIdentity, validateContourHints, payloadHash, fail, UUID } from './replication-validation.js';
 export { REPLICATION_MODELS };
 
-export function createReplicationRouter({store,assets,getProvider,pollMs,budgetMs,leaseMs,logger,
+export function createReplicationRouter({store,assets,getProvider,vision,pollMs,budgetMs,leaseMs,logger,
   enabled=()=>process.env.REPLICATION_ENABLED!=='false',advancedOutputs=process.env.REPLICATION_ADVANCED_OUTPUTS==='true',retentionDays=30,maxReferences=MAX_REFERENCES}) {
-  const router=Router(),worker=createReplicationWorker({store,assets,pollMs,budgetMs,leaseMs,logger});
+  const router=Router(),worker=createReplicationWorker({store,assets,vision,pollMs,budgetMs,leaseMs,logger});
+  let visionProbe;
+  const requireVision=async()=>{
+    if(vision)return; // Dependency injection is restricted to application composition/tests.
+    if(!localVisionConfigured())throw fail('SEGMENTATION_UNAVAILABLE',503);
+    visionProbe ||= createLocalVision()({probe:true}).then(v=>v.ready===true).catch(()=>false);
+    if(!await visionProbe){visionProbe=null;throw fail('SEGMENTATION_UNAVAILABLE',503);}
+  };
   const view=async job=>({id:job.id,jobId:job.id,ownerId:job.ownerId,requestId:job.requestId,kind:job.kind,status:job.status,stage:job.stage,
     inputFingerprint:job.inputFingerprint,sourceHash:job.sourceHash,createdAt:job.createdAt,updatedAt:job.updatedAt,revision:job.revision,
     recoveryNeeded:!isFinalJob(job)&&(!job.workerLease||job.workerLease.until<=Date.now()),
     completed:job.kind==='analysis'?(job.status==='succeeded'?1:0):job.results.length,total:job.total,
-    analysis:job.analysis||null,analysisJobId:job.analysisJobId||null,approvedAnalysis:job.approvedAnalysis||null,
+    analysis:job.analysis||null,analysisJobId:job.analysisJobId||null,approvedAnalysis:job.approvedAnalysis||null,origin:job.origin||null,derivedFrom:job.derivedFrom||null,
     source:job.assets.source,references:job.assets.references,target:job.target||'',input:job.kind==='generation'?job.input:null,
     results:job.results,images:job.kind==='analysis'?[]:job.images,pendingRaw:job.pendingRaw||null,quality:job.quality||null,
     errorCode:job.errorCode||null,error:job.errorCode?(ERROR_MESSAGES[job.errorCode]||'任务尚未完成，请查看阶段与任务标识。'):null,
@@ -25,12 +33,13 @@ export function createReplicationRouter({store,assets,getProvider,pollMs,budgetM
   async function own(req,id) {
     if(!UUID.test(id||''))throw fail('JOB_NOT_FOUND',404);
     const j=await store.get(id);if(!j||j.ownerId!==req.userId)throw fail('JOB_NOT_FOUND',404);
-    if(j.expiresAt<Date.now()&&isFinalJob(j))throw fail('JOB_EXPIRED',410);return j;
+    if(!j.retainOriginals&&j.expiresAt<Date.now()&&isFinalJob(j))throw fail('JOB_EXPIRED',410);return j;
   }
   const error=(res,e)=>res.status(e.status&&e.status<600?e.status:500).json({errorCode:e.code||'INTERNAL_ERROR',error:ERROR_MESSAGES[e.code]||'请求未完成，请核对任务状态。'});
   const route=handler=>async(req,res)=>{try{await handler(req,res);}catch(e){error(res,e);}};
   const resume=(req,job)=>{
     if(isFinalJob(job))return null;
+    if(job.origin==='local_recomposition'){worker.wake(job,{accountRef:'local'},{resumeOnly:true});return null;}
     try{const provider=getProvider(req);if(provider.accountRef!==job.providerAccountRef)return 'PROVIDER_ACCOUNT_MISMATCH';worker.wake(job,provider,{resumeOnly:true});return null;}
     catch{return 'CREDENTIAL_REQUIRED';}
   };
@@ -52,6 +61,7 @@ export function createReplicationRouter({store,assets,getProvider,pollMs,budgetM
     if(old){same(old,kind,hash);return res.status(202).json(await view(old));}
     let analysisJob;
     if(kind==='generation') {
+      await requireVision(); // Refuse BEFORE any paid model call if local composition is unavailable.
       analysisJob=await own(req,input.analysisJobId);
       if(analysisJob.kind!=='analysis'||analysisJob.status!=='succeeded'||!analysisJob.analysis?.data||!analysisJob.analysis.confirmedAt)throw fail('ANALYSIS_REQUIRED',409);
       if(analysisJob.inputFingerprint!==input.inputFingerprint||analysisJob.analysis.revisionHash!==input.analysisRevisionHash)throw fail('ANALYSIS_STALE',409);
@@ -82,7 +92,7 @@ export function createReplicationRouter({store,assets,getProvider,pollMs,budgetM
       target:kind==='analysis'?input.target:analysisJob.target,providerAccountRef:provider.accountRef,status:'queued',stage:'queued',revision:0,
       createdAt:Date.now(),updatedAt:Date.now(),expiresAt:Date.now()+retentionDays*86400000,results:[],images:[],analysis:null,
       total:kind==='analysis'?1:input.count,errorCode:null,workerLease:null,cancelRequested:false,
-      ...(kind==='generation'?{analysisJobId:analysisJob.id,approvedAnalysis:{text:analysisJob.analysis.text,revisionHash:analysisJob.analysis.revisionHash,revision:analysisJob.analysis.revision,subjects:analysisJob.analysis.data.scene.old_product_instances},input}:{}),assets:null};
+      ...(kind==='generation'?{retainOriginals:true,analysisJobId:analysisJob.id,approvedAnalysis:{text:analysisJob.analysis.text,revisionHash:analysisJob.analysis.revisionHash,revision:analysisJob.analysis.revision,subjects:analysisJob.analysis.data.scene.old_product_instances},input}:{}),assets:null};
     try {
       job.assets=kind==='analysis'?await assets.prepare(job,input):await assets.cloneMaterials(job,analysisJob);
       if(kind==='generation')job.assets.guide=await assets.saveGuide(job,await createRegionGuide(await assets.read(job,job.assets.source),input,job.approvedAnalysis.subjects));
@@ -100,7 +110,7 @@ export function createReplicationRouter({store,assets,getProvider,pollMs,budgetM
     }
   }
   router.get('/capabilities',route(async(req,res)=>res.json({version:2,enabled:enabled(),maxReferences,
-    counts:advancedOutputs?[1,2,4]:[1],resolutions:advancedOutputs?['1K','2K','4K']:['1K','2K'],models:REPLICATION_MODELS,retentionDays})));
+    counts:advancedOutputs?[1,2,4]:[1],resolutions:advancedOutputs?['1K','2K','4K']:['1K','2K'],models:REPLICATION_MODELS,retentionDays,adaptiveComposition:{configured:!!vision||localVisionConfigured()}})));
   router.post('/connectivity',route(async(req,res)=>res.json({success:true,models:await getProvider(req).connectivity()})));
   router.post('/requests',route(async(req,res)=>{
     if(!enabled())throw fail('FEATURE_DISABLED',503);
@@ -131,6 +141,7 @@ export function createReplicationRouter({store,assets,getProvider,pollMs,budgetM
   router.get('/jobs/:id',read);router.get('/:id',read);
   router.post('/jobs/:id/resume',route(async(req,res)=>{
     const job=await own(req,req.params.id);
+    if(job.origin==='local_recomposition'){resume(req,job);return res.json(await view(job));}
     if(!isFinalJob(job)&&!(await store.attempts(job.id)).length){
       if(job.workerLease?.until>Date.now())return res.json(await view(job));
       const result=await store.closeRequest({ownerId:job.ownerId,requestId:job.requestId,kind:job.kind,inputFingerprint:job.inputFingerprint});
@@ -141,7 +152,7 @@ export function createReplicationRouter({store,assets,getProvider,pollMs,budgetM
   }));
   const cancel=route(async(req,res)=>{
     const job=await own(req,req.params.id);if(isFinalJob(job))return res.status(202).json(await view(job));
-    const provider=getProvider(req);if(provider.accountRef!==job.providerAccountRef)throw fail('PROVIDER_ACCOUNT_MISMATCH',409);
+    const provider=job.origin==='local_recomposition'?{accountRef:'local'}:getProvider(req);if(provider.accountRef!==job.providerAccountRef)throw fail('PROVIDER_ACCOUNT_MISMATCH',409);
     const next=await store.update(job.id,j=>isFinalJob(j)?null:{...j,cancelRequested:true,status:'cancel_requested',stage:'cancel_requested'});
     worker.wake(next,provider,{resumeOnly:true});res.status(202).json(await view(next));
   });
@@ -158,10 +169,32 @@ export function createReplicationRouter({store,assets,getProvider,pollMs,budgetM
     const job=await own(req,req.params.id),{decision,checks}=req.body||{};
     if(job.kind!=='generation'||job.status!=='completed_needs_review')throw fail('REVIEW_NOT_AVAILABLE',409);
     if(!['accept','reject'].includes(decision))throw fail('INPUT_INVALID');
+    if(decision==='accept'&&job.results.some(r=>!r.composite||r.quality.mechanism!=='adaptive-v1'))throw fail('REVIEW_REQUIRED',422);
     if(decision==='accept'&&(!checks||!['identity','allInstances','occlusion','scene'].every(k=>checks[k]===true)))throw fail('REVIEW_REQUIRED',422);
     const next=await store.update(job.id,j=>j.status!=='completed_needs_review'?null:{...j,status:decision==='accept'?'succeeded':'quality_failed',
       stage:'human_review',quality:{status:decision==='accept'?'passed':'failed',reviewedAt:Date.now(),checks:decision==='accept'?checks:null},errorCode:decision==='accept'?null:'QUALITY_FAILED'});
     res.json(await view(next));
+  }));
+  // Explicit, local-only reprocessing creates a new record; old images and jobs remain immutable.
+  // This endpoint never calls getProvider and works even while paid submissions are disabled.
+  router.post('/jobs/:id/recompose',route(async(req,res)=>{
+    const previous=await own(req,req.params.id);
+    if(previous.kind!=='generation'||!isFinalJob(previous))throw fail('REVIEW_NOT_AVAILABLE',409);
+    const raw=previous.results.at(-1)?.raw||previous.pendingRaw;if(!raw)throw fail('OUTPUT_INVALID',422);
+    const hints=validateContourHints(req.body,previous.input.selectedInstances);
+    const hash=sha256(canonicalJson({derivedFrom:previous.id,raw:raw.sha256,hints}));
+    const existing=await store.byRequest(req.userId,req.body.requestId);
+    if(existing){same(existing,'generation',hash);return res.status(202).json(await view(existing));}
+    if((await store.list()).some(j=>j.ownerId===req.userId&&!isFinalJob(j)))throw fail('TASK_BUSY',409);
+    const job={...previous,id:randomUUID(),requestId:req.body.requestId,origin:'local_recomposition',derivedFrom:previous.id,retainOriginals:true,
+      payloadHash:hash,providerAccountRef:'local',status:'queued',stage:'queued',revision:0,total:1,createdAt:Date.now(),updatedAt:Date.now(),
+      input:{...previous.input,requestId:req.body.requestId,contourHints:hints},results:[],images:[],pendingRaw:null,quality:null,errorCode:null,workerLease:null,cancelRequested:false,
+      expiresAt:Date.now()+retentionDays*86400000,sourcePredictionId:previous.results.at(-1)?.predictionId||previous.sourcePredictionId||null};
+    job.assets=await assets.cloneMaterials(job,previous);
+    job.assets.raw=await assets.saveRawBytes(job,1,await assets.read(previous,raw));
+    const stored=await store.create(job);
+    if(stored.id!==job.id){await assets.remove(job);same(stored,'generation',hash);return res.status(202).json(await view(stored));}
+    res.status(202).json(await view(job));worker.wake(job,{accountRef:'local'});
   }));
   // Manual reconciliation is explicit and evidence-bound. Never guess from neighboring timestamps.
   router.post('/jobs/:id/reconcile',route(async(req,res)=>{
@@ -180,12 +213,12 @@ export function createReplicationRouter({store,assets,getProvider,pollMs,budgetM
   }));
   router.get('/assets/:id/:name',route(async(req,res)=>{
     const job=await own(req,req.params.id);
-    const list=[job.assets.source,job.assets.inferenceSource,job.assets.guide,...job.assets.references,...job.results.flatMap(r=>[r.raw,r.composite]),job.pendingRaw].filter(Boolean);
+    const list=[job.assets.source,job.assets.inferenceSource,job.assets.guide,job.assets.raw,...job.assets.references,...job.results.flatMap(r=>[r.raw,r.composite,...Object.values(r.compositeMasks||{})]),job.pendingRaw].filter(Boolean);
     const asset=list.find(a=>a.name===req.params.name);if(!asset)throw fail('JOB_NOT_FOUND',404);
     res.type('png').send(await assets.read(job,asset));
   }));
   // Cleanup is local-only, explicit, and never removes unresolved remote attempts.
-  router.cleanup=async()=>{for(const job of await store.list())if(isFinalJob(job)&&job.expiresAt<Date.now()){
+  router.cleanup=async()=>{for(const job of await store.list())if(!job.retainOriginals&&isFinalJob(job)&&job.expiresAt<Date.now()){
     const dependents=(await store.list()).some(j=>j.analysisJobId===job.id&&(!isFinalJob(j)||j.expiresAt>Date.now()));
     if(!dependents){await assets.remove(job);await store.remove(job.id);}
   }};

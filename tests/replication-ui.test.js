@@ -86,6 +86,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
       if(name==='react')return {__esModule:true,default:react,...react};
       if(name==='lucide-react')return new Proxy({},{get:(_,key)=>String(key)});
       if(name.endsWith('ImageModal'))return {ImageModal:'ImageModal'};
+      if(name.endsWith('ReplicationContourEditor'))return compile('components/ReplicationContourEditor.tsx');
       if(name.endsWith('.css'))return {};
       if(name.endsWith('browserStorage'))return {userStorage:storageApi,getStorageUser:()=> 'owner-incident'};
       if(name.endsWith('userIdentity'))return {getUserId:()=> 'owner-incident'};

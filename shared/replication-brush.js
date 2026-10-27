@@ -17,7 +17,8 @@ export function brushMarkup(brush,width,height){
 export const brushSvg=(brush,width,height)=>`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="black"/>${brushMarkup(brush,width,height)}</svg>`;
 
 // Small deterministic raster used by both browser and server for subject matching.
-// The final edit mask is rasterized at full resolution by sharp, never this grid.
+// This grid matches selection to instance IDs only. Neither it nor the full-size
+// selection raster is a final composition boundary; vision supplies object contours.
 export function matchBrushSubjects(brush,subjects,sourceWidth,sourceHeight){
   const scale=192/Math.max(sourceWidth,sourceHeight),width=Math.max(1,Math.round(sourceWidth*scale)),height=Math.max(1,Math.round(sourceHeight*scale));
   const pixels=new Uint8Array(width*height),unit=Math.min(width,height);

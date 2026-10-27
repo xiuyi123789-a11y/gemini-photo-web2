@@ -16,6 +16,7 @@ import {createReplicationProvider} from '../server/replication-provider.js';
 import {parseProductAnalysis,generationPrompt,GENERATION_PROMPT_TEMPLATE} from '../server/replication-prompts.js';
 import {matchBrushSubjects,validBrush} from '../shared/replication-brush.js';
 import {compositeReplicationImage,prepareMasks} from '../server/replication-composite.js';
+import {fixtureVision} from './replication-vision-fixture.js';
 import {canonicalJson,materialIdentity,REPLICATION_MODELS,isFinalJob,matchesOperation,recoveryKey} from '../shared/replication-contract.js';
 import {createApp} from '../server/app.js';
 import http from 'node:http';
@@ -54,7 +55,7 @@ async function harness(options={}) {
   const routers=[];let server,base;
   const start=async()=>{
     const app=express();app.use(express.json({limit:'50mb'}));app.use((req,res,next)=>{req.userId=req.get('x-user-id')||'alice';next();});
-    const router=createReplicationRouter({store,assets,getProvider:req=>req.get('x-replicate-token')==='wrong'?{...provider,accountRef:'other-account'}:provider,pollMs:2,budgetMs:options.budgetMs||5000,leaseMs:200,logger:e=>logs.push(e),advancedOutputs:!!options.advanced,enabled:()=>!options.disabled});
+    const router=createReplicationRouter({store,assets,vision:options.vision===null?undefined:options.vision||fixtureVision,getProvider:req=>{if(options.noProvider)throw new Error('Provider forbidden during local recompose');return req.get('x-replicate-token')==='wrong'?{...provider,accountRef:'other-account'}:provider;},pollMs:2,budgetMs:options.budgetMs||5000,leaseMs:200,logger:e=>logs.push(e),advancedOutputs:!!options.advanced,enabled:()=>!options.disabled});
     routers.push(router);app.use('/replication',router);server=await new Promise(r=>{const s=app.listen(0,'127.0.0.1',()=>r(s));});base='http://127.0.0.1:'+server.address().port+'/replication';
   };
   await start();
@@ -199,8 +200,50 @@ test('feature flag blocks new tasks; connectivity does not call predictions; adv
   const a=await harness();try{const j=await analyze(a);for(const patch of [{count:2,confirmedPredictions:2},{resolution:'4K'}])assert.equal((await a.request('/generation',generationBody(j,patch))).status,422);assert.equal(a.created.length,1);}finally{await a.close();}
 });
 test('two masks protect foreground and every outside pixel, with no fill stretching',async()=>{
-  const protect=[rect(.1,.3,.75,.06)];const result=await compositeReplicationImage(source,generated,{masks:editMasks,protectMasks:protect});const decoded=await sharp(result.buffer).raw().toBuffer();const original=await sharp(source).raw().toBuffer();const coverage=await prepareMasks(96,64,editMasks,protect);let changed=0;
-  for(let i=0;i<96*64;i++){const a=decoded.subarray(i*4,i*4+4),b=original.subarray(i*4,i*4+4);if(!coverage.edit[i]||coverage.protect[i])assert.deepEqual(a,b);else if(!a.equals(b))changed++;}assert(changed>100);assert.equal(result.quality.instances.length,2);assert(result.quality.instances.every(i=>i.changedFraction>.02));
+  const protect=[rect(.1,.3,.75,.06)];const result=await compositeReplicationImage(source,generated,{masks:editMasks,protectMasks:protect},fixture().scene.old_product_instances,{vision:fixtureVision});const decoded=await sharp(result.buffer).raw().toBuffer();const original=await sharp(source).raw().toBuffer();const coverage=await prepareMasks(96,64,editMasks,protect),compositeMask=await sharp(result.maskBuffers.compositeMask).greyscale().raw().toBuffer();let changed=0;
+  for(let i=0;i<96*64;i++){const a=decoded.subarray(i*4,i*4+4),b=original.subarray(i*4,i*4+4);if(!compositeMask[i]||coverage.protect[i])assert.deepEqual(a,b);else if(!a.equals(b))changed++;}assert(changed>100);assert.equal(result.quality.instances.length,2);assert(result.quality.instances.every(i=>i.changedFraction>.02));
+});
+test('failed local segmentation preserves full source and raw, exports no composite and cannot be approved',async()=>{
+  const h=await harness({vision:async()=>{throw Object.assign(new Error('not configured'),{code:'SEGMENTATION_UNAVAILABLE'});}});
+  try{const a=await approved(h),r=await h.request('/generation',generationBody(a)),g=await waitFor(h,(await r.json()).id);
+    assert.equal(g.status,'quality_failed');assert.deepEqual(g.images,[]);assert.equal(g.results[0].composite,null);assert.deepEqual(g.results[0].quality.reasons,['SEGMENTATION_UNAVAILABLE']);
+    const raw=await h.request(g.results[0].raw.url.replace('/api/replication',''));assert.equal(raw.status,200);assert.equal((await sharp(Buffer.from(await raw.arrayBuffer())).metadata()).width,96);
+    assert.equal((await h.request('/jobs/'+g.id+'/review',{decision:'accept',checks:{identity:true,allInstances:true,occlusion:true,scene:true}})).status,409);
+    const creates=h.created.length;await h.restart();await h.request('/jobs/'+g.id);await h.request('/jobs/'+g.id+'/resume',{});assert.equal(h.created.length,creates);
+  }finally{await h.close();}
+});
+test('unconfigured local segmenter blocks generation before a paid prediction',async()=>{
+  const previous=process.env.REPLICATION_VISION_PYTHON;delete process.env.REPLICATION_VISION_PYTHON;
+  const h=await harness({vision:null});try{const a=await approved(h),r=await h.request('/generation',generationBody(a));assert.equal(r.status,503);assert.equal((await r.json()).errorCode,'SEGMENTATION_UNAVAILABLE');assert.equal(h.created.length,1);assert(h.created.every(p=>p.model===REPLICATION_MODELS.analysis));}
+  finally{await h.close();if(previous!==undefined)process.env.REPLICATION_VISION_PYTHON=previous;}
+});
+test('local recompose is idempotent, works with paid entry disabled, never accesses provider and leaves original job/assets unchanged',async()=>{
+  const options={},h=await harness(options);try{
+    const a=await approved(h),r=await h.request('/generation',generationBody(a)),g=await waitFor(h,(await r.json()).id),before=await h.store.get(g.id),rawBefore=await h.assets.read(before,before.results[0].raw);
+    options.disabled=true;options.noProvider=true;const payload={requestId:randomUUID(),hints:[]};
+    const res=await h.request('/jobs/'+g.id+'/recompose',payload);assert.equal(res.status,202);const derived=await waitFor(h,(await res.json()).id);
+    assert.equal(derived.status,'completed_needs_review');assert.equal(derived.origin,'local_recomposition');assert.equal(derived.derivedFrom,g.id);assert.equal(derived.predictions.length,0);assert.equal(h.created.length,2);
+    assert.equal((await h.request('/jobs/'+g.id+'/recompose',payload).then(r=>r.json())).id,derived.id);
+    assert.deepEqual(await h.store.get(g.id),before);assert(rawBefore.equals(await h.assets.read(before,before.results[0].raw)));
+    for(const asset of Object.values(derived.results[0].compositeMasks)){assert.equal((await h.request(asset.url.replace('/api/replication',''))).status,200);assert.equal((await h.request(asset.url.replace('/api/replication',''),undefined,'bob')).status,404);}
+    await h.restart();await h.request('/jobs/'+derived.id);await h.request('/jobs/'+derived.id+'/resume',{});assert.equal(h.created.length,2);
+    await h.store.update(derived.id,j=>({...j,status:'postprocessing',stage:'postprocessing',results:[],images:[],workerLease:null}));
+    const interrupted=await h.store.get(derived.id);await h.request('/jobs/'+derived.id);assert.equal((await h.store.get(derived.id)).revision,interrupted.revision);
+    await h.request('/jobs/'+derived.id+'/resume',{});assert.equal((await waitFor(h,derived.id)).status,'completed_needs_review');assert.equal(h.created.length,2);
+    assert.equal((await h.request('/jobs/'+g.id+'/recompose',{...payload,hints:[{image:'source',instanceId:'left',kind:'foreground',x:.2,y:.5}]})).status,409);
+  }finally{await h.close();}
+});
+test('local correction rejects cross-owner, unknown instances and malformed points before segmentation or model access',async()=>{
+  const h=await harness();try{const a=await approved(h),g=await waitFor(h,(await (await h.request('/generation',generationBody(a))).json()).id);
+    for(const hint of [{image:'source',instanceId:'absent',kind:'foreground',x:.2,y:.5},{image:'generated',instanceId:'left',kind:'occlusion',x:.2,y:.5},{image:'source',instanceId:'left',kind:'foreground',x:-1,y:.5}])assert.equal((await h.request('/jobs/'+g.id+'/recompose',{requestId:randomUUID(),hints:[hint]})).status,400);
+    assert.equal((await h.request('/jobs/'+g.id+'/recompose',{requestId:randomUUID(),hints:[]},'bob')).status,404);assert.equal(h.created.length,2);
+  }finally{await h.close();}
+});
+test('new generation keeps canonical scene, raw and masks through expiry cleanup until explicit removal',async()=>{
+  const h=await harness();try{const a=await approved(h),g=await waitFor(h,(await (await h.request('/generation',generationBody(a))).json()).id);
+    await h.store.update(g.id,j=>({...j,expiresAt:Date.now()-1}));await h.cleanup();assert(await h.store.get(g.id));assert.equal((await h.request('/jobs/'+g.id)).status,200);
+    assert.equal((await h.request(g.results[0].raw.url.replace('/api/replication',''))).status,200);
+  }finally{await h.close();}
 });
 test('orientation normalization is persisted before mask coordinates, and expires cleanup preserves unresolved jobs',async()=>{
   const h=await harness();try{const j=await analyze(h);const job=await h.store.get(j.id);await h.store.update(j.id,x=>({...x,expiresAt:Date.now()-1}));await h.cleanup();assert.equal(await h.store.get(j.id),null);
@@ -510,9 +553,9 @@ test('brush generation supplies untouched source, all product references and a f
     assert.equal(g.status,'completed_needs_review');assert.equal(h.created.length,2);assert.equal(h.created[1].input.image_input.length,4);
     assert.equal(h.created[1].input.image_input[0],h.created[0].input.images[0]);assert.deepEqual(h.created[1].input.image_input.slice(1,3),h.created[0].input.images.slice(1));
     assert.notEqual(h.created[1].input.image_input[3],h.created[1].input.image_input[0]);assert.match(h.created[1].input.prompt,/画面左侧鞋/);assert(!h.created[1].input.prompt.includes('"instance_id":"right"'));
-    const stored=await h.store.get(g.id),coverage=await prepareMasks(96,64,[],[],{brush:body.brush,subjects:a.analysis.data.scene.old_product_instances});
+    const stored=await h.store.get(g.id),coverage=await sharp(await h.assets.read(stored,stored.results[0].compositeMasks.compositeMask)).greyscale().raw().toBuffer();
     const out=await sharp(await h.assets.read(stored,stored.results[0].composite)).raw().toBuffer(),original=await sharp(source).raw().toBuffer();
-    let changed=0;for(let i=0;i<96*64;i++){const before=original.subarray(i*4,i*4+4),after=out.subarray(i*4,i*4+4);if(!coverage.edit[i]||coverage.protect[i])assert.deepEqual(after,before);else if(!after.equals(before))changed++;}assert(changed>0);
+    let changed=0;for(let i=0;i<96*64;i++){const before=original.subarray(i*4,i*4+4),after=out.subarray(i*4,i*4+4);if(!coverage[i])assert.deepEqual(after,before);else if(!after.equals(before))changed++;}assert(changed>0);
     assert.deepEqual(stored.input.brush,body.brush);assert.equal(stored.assets.guide.name,'guide.png');
     await h.restart();assert.equal((await (await h.request('/jobs/'+g.id)).json()).input.brush.strokes.length,1);assert.equal(h.created.length,2);
   }finally{await h.close();}

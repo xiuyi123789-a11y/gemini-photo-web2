@@ -3,6 +3,15 @@ import { decodeImage, sha256 } from './replication-assets.js';
 import { validBrush } from '../shared/replication-brush.js';
 export const fail=(code,status=400)=>Object.assign(new Error(code),{code,status});
 export const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export function validateContourHints(body,ids){
+  only(body,['requestId','hints']);
+  if(!UUID.test(body.requestId||'')||!Array.isArray(body.hints)||body.hints.length>64)throw fail('INPUT_INVALID');
+  return body.hints.map(h=>{
+    if(!h||Object.keys(h).some(k=>!['image','instanceId','kind','x','y'].includes(k))||!['source','generated'].includes(h.image)||!ids.includes(h.instanceId)||
+      !['foreground','background','occlusion'].includes(h.kind)||(h.kind==='occlusion'&&h.image!=='source')||![h.x,h.y].every(v=>Number.isFinite(v)&&v>=0&&v<=1))throw fail('INPUT_INVALID');
+    return {image:h.image,instanceId:h.instanceId,kind:h.kind,x:h.x,y:h.y};
+  });
+}
 const HASH=/^[0-9a-f]{64}$/;
 const text=(v,max,empty=true)=>{if(typeof v!=='string'||v.length>max||(!empty&&!v.trim()))throw fail('INPUT_INVALID');return v.trim();};
 const only=(body,keys)=>{if(!body||Array.isArray(body)||Object.keys(body).some(k=>!keys.includes(k)))throw fail('INPUT_INVALID');};

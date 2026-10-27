@@ -39,7 +39,7 @@ export function createReplicationAssets(dataDir,{download=downloadModelImage}={}
     const dir=path.resolve(base,job.ownerId,'replication',job.id);
     if(!dir.startsWith(base+path.sep))throw invalid();return dir;
   };
-  const filename=name=>{if(!/^(?:source|model-source|guide|ref-\d+|raw-\d+|composite-\d+)\.png$/.test(name))throw invalid();return name;};
+  const filename=name=>{if(!/^(?:source|model-source|guide|ref-\d+|raw-\d+|composite-\d+|mask-(?:selection|source-object|generated-object|occlusion|composite)-\d+)\.png$/.test(name))throw invalid();return name;};
   async function save(job,name,bytes) {
     const target=path.join(directory(job),filename(name));await fs.mkdir(path.dirname(target),{recursive:true});
     const metadata=await sharp(bytes,{limitInputPixels:64*1024*1024}).metadata();
@@ -80,6 +80,13 @@ export function createReplicationAssets(dataDir,{download=downloadModelImage}={}
     async dataUri(job,asset){return 'data:image/png;base64,'+(await this.read(job,asset)).toString('base64');},
     async saveRaw(job,index,url){const bytes=await download(url);const png=await sharp(bytes,{limitInputPixels:64*1024*1024}).rotate().toColourspace('srgb').ensureAlpha().png().toBuffer();return save(job,`raw-${index}.png`,png);},
     saveComposite:(job,index,bytes)=>save(job,`composite-${index}.png`,bytes),
+    saveRawBytes:(job,index,bytes)=>save(job,`raw-${index}.png`,bytes),
+    async saveCompositeMasks(job,index,masks={}){
+      const names={selectionMask:'selection',sourceObjectMask:'source-object',generatedObjectMask:'generated-object',occlusionMask:'occlusion',compositeMask:'composite'};
+      return Object.fromEntries(await Promise.all(Object.entries(masks).map(async([key,bytes])=>{
+        if(!names[key])throw invalid();return [key,await save(job,`mask-${names[key]}-${index}.png`,bytes)];
+      })));
+    },
     saveGuide:(job,bytes)=>save(job,'guide.png',bytes),
     async remove(job){const dir=directory(job);if(!dir.startsWith(base+path.sep))throw invalid();await fs.rm(dir,{recursive:true,force:true});}
   };

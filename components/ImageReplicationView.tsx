@@ -1,12 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ArrowLeftRight, Check, Download, Expand, ImagePlus, Layers, LoaderCircle, Plus, RefreshCw, ScanEye, Settings2, ShieldCheck, Sparkles, Trash2, X, PlugZap } from 'lucide-react';
 import { ImageModal } from './ImageModal';
+import { ReplicationContourEditor } from './ReplicationContourEditor';
 import { userStorage } from '../services/browserStorage';
-import { MAX_REFERENCES, isFinalJob, REPLICATION_MODEL_NAMES } from '../shared/replication-contract.js';
+import { MAX_REFERENCES, isFinalJob, REPLICATION_MODEL_NAMES, ERROR_MESSAGES } from '../shared/replication-contract.js';
 import { BRUSH_LIMITS, matchBrushSubjects, validSubjectBox } from '../shared/replication-brush.js';
 import { startAnalysis,startGeneration,listActiveJobs,cancelReplicationJob,checkReplicationConnection,getReplicationCapabilities,
   reviseAnalysis,reviewReplication,reconcileReplication,readOperation,saveOperation,forgetOperation,assertOperation,ownerId,
-  lookupOperation,closeOperation,resumeReplicationJob,
+  lookupOperation,closeOperation,resumeReplicationJob,recomposeReplication,type ContourHint,
   type Operation,type ReplicationJob,type ReferenceAngle,type PreserveKey,type Point,type EditMask,type JobResult,type BrushStroke } from '../services/replicationService';
 import './ImageReplicationView.css';
 
@@ -27,7 +28,7 @@ export const ImageReplicationView:React.FC=()=>{
   const [painting,setPainting]=useState(false);
   const preserve=Object.keys(locks) as PreserveKey[];
   const [notes,setNotes]=useState(''),[count,setCount]=useState(1),[resolution,setResolution]=useState('2K');
-  const [caps,setCaps]=useState({enabled:true,maxReferences:MAX_REFERENCES,counts:[1],resolutions:['1K','2K']});
+  const [caps,setCaps]=useState<{enabled:boolean;maxReferences:number;counts:number[];resolutions:string[];adaptiveComposition?:{configured:boolean}}>({enabled:true,maxReferences:MAX_REFERENCES,counts:[1],resolutions:['1K','2K']});
   const [pendingKind,setPendingKind]=useState<'analysis'|'generation'|null>(null),[reading,setReading]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
   const [operations,setOperations]=useState<{analysis:Operation|null;generation:Operation|null}>(()=>({analysis:readOperation('analysis'),generation:readOperation('generation')}));
   const [mode,setMode]=useState<'original'|'raw'|'result'|'compare'>('original'),[candidate,setCandidate]=useState<Candidate|null>(null),[split,setSplit]=useState(50),[enlarged,setEnlarged]=useState<string|null>(null);
@@ -35,6 +36,7 @@ export const ImageReplicationView:React.FC=()=>{
   const sourceInput=useRef<HTMLInputElement>(null),refsInput=useRef<HTMLInputElement>(null),mounted=useRef(true),urls=useRef(new Set<string>()),operationBusy=useRef(false);
   const viewport=useRef<HTMLDivElement>(null),paintRef=useRef<{pointerId:number;stroke:BrushStroke}|null>(null),panRef=useRef<{x:number;y:number;left:number;top:number}|null>(null);
   const brushMaskId=useRef('brush-'+crypto.randomUUID());
+  const [composing,setComposing]=useState(false),[overlayMask,setOverlayMask]=useState('');
   const currentFingerprint=useRef(''),loops=useRef({analysis:0,generation:0});
   const latestRevisions=useRef(new Map<string,number>());
   const restoredInputs=useRef(new Set<string>());
@@ -215,14 +217,22 @@ export const ImageReplicationView:React.FC=()=>{
   async function review(decision:'accept'|'reject'){
     if(!candidate)return;try{const next=await reviewReplication(candidate.job.id,decision,reviewChecks);apply(next);setCandidate({job:next,result:next.results.at(-1)!});}catch(e){setError(issue(e));}
   }
+  async function recompose(hints:ContourHint[]){
+    if(!candidate||composing)return;
+    setComposing(true);setError('');
+    const operation:Operation={kind:'generation',ownerId:ownerId(),requestId:crypto.randomUUID(),inputFingerprint:candidate.job.inputFingerprint};
+    saveOperation(operation);syncOperations();
+    try{const next=await recomposeReplication(candidate.job.id,operation.requestId,hints);saveOperation({...operation,jobId:next.id});syncOperations();await track({...operation,jobId:next.id});}
+    catch(e){setError(issue(e));}finally{setComposing(false);}
+  }
   async function download(url:string,label:string){try{const response=await fetch(url,{credentials:'same-origin'});if(!response.ok)throw new Error('下载失败。');
     const u=URL.createObjectURL(await response.blob()),a=document.createElement('a');a.href=u;a.download=`图像复刻_${label}_${Date.now()}.png`;a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);}catch(e){setError(issue(e));}}
   const originalUrl=candidate&&mode!=='original'?candidate.job.source.url:source?.preview;
   const preview=mode==='raw'?candidate?.result.raw.url:mode==='result'?candidate?.result.composite?.url:originalUrl;
   const polygonPoints=(p:Point[])=>p.map(v=>`${v.x*(source?.width||1)},${v.y*(source?.height||1)}`).join(' ');
-  const generationReady=validAnalysis&&brushReady&&selection.valid&&!locked&&caps.enabled;
+  const generationReady=validAnalysis&&brushReady&&selection.valid&&!locked&&caps.enabled&&caps.adaptiveComposition?.configured!==false;
   return <section className="rp-view" aria-label="图像复刻工作台">
-    <div className="rp-heading"><div><h1>图像复刻 <span>换产品，保留场景</span></h1><p>上传你的产品，AI 找到场景中的对应物品。涂哪里，就替换哪里。</p></div>
+    <div className="rp-heading"><div><h1>图像复刻 <span>换产品，保留场景</span></h1><p>上传你的产品，AI 找到场景中的对应物品。涂抹确认要替换的产品，系统自动适配新产品轮廓。</p></div>
       <button className="rp-button" disabled={reading||!!pendingKind} onClick={async()=>{try{await checkReplicationConnection();setNotice('两模型元数据可访问，未创建预测任务。');}catch(e){setError(issue(e));}}}><PlugZap/>检查连接</button></div>
     <div className="rp-workflow"><span>01 上传场景与产品</span><span>02 AI 识别对应物品</span><span>03 涂抹确认</span><span>04 开始替换</span></div>
     {!caps.enabled&&<div className="rp-message">新任务入口已关闭，现有任务仍可查询。</div>}
@@ -242,12 +252,12 @@ export const ImageReplicationView:React.FC=()=>{
       <p className="rp-hint">同一新产品；JPG/PNG/WEBP；单张20 MB，合计32 MB。</p>
       <button className="rp-button rp-primary rp-wide" disabled={locked||!caps.enabled} onClick={analyze}><ScanEye/>{pendingKind==='analysis'?'正在提交分析素材…':analysisJob&&!isFinalJob(analysisJob)?(['submission_unknown','cancel_unknown'].includes(analysisJob.status)?'分析任务待核对':stages[analysisJob.status]||'分析任务待恢复'):unresolved.some(op=>op.kind==='analysis')?'分析提交待核对':'识别产品与替换位置'}</button>
       <p className="rp-hint">自动理解产品并寻找场景中的同类物品，无需填写产品名称。识别不会生成图片。</p>
-      {validAnalysis&&<div className="rp-recognition" role="status"><b>识别到：{analysisJob!.analysis!.data.new_product.category}</b><p>{instances.length?`场景中找到 ${instances.length} 个对应物品。请在右侧涂抹想替换的部分。`:'场景中没有找到对应物品，请更换场景照片后识别。'}</p>{instances.map((i:any)=><span key={i.instance_id}>{i.location}</span>)}</div>}
+      {validAnalysis&&<div className="rp-recognition" role="status"><b>识别到：{analysisJob!.analysis!.data.new_product.category}</b><p>{instances.length?`场景中找到 ${instances.length} 个对应物品。请在右侧涂抹确认要替换的产品，无需描出新产品的最终轮廓。`:'场景中没有找到对应物品，请更换场景照片后识别。'}</p>{instances.map((i:any)=><span key={i.instance_id}>{i.location}</span>)}</div>}
       {validAnalysis&&<details className="rp-advanced"><summary>查看 / 调整产品特征（可选）</summary><textarea className="rp-analysis" aria-label="产品分析摘要" value={analysisText} disabled={locked} maxLength={16000} onChange={e=>{setAnalysisText(e.target.value);setCostConfirmed(false);}}/>{!!analysisJob?.analysis?.rawText&&<details><summary>原始分析返回</summary><pre className="rp-json">{analysisJob.analysis.rawText}</pre></details>}</details>}
       {analysisJob?.status==='failed'&&!!analysisJob.analysis?.rawText&&<details className="rp-advanced"><summary>查看未完成的分析返回（未启动生图）</summary><pre className="rp-json">{analysisJob.analysis.rawText}</pre></details>}
     </section><div className="rp-right">
       <section className="rp-card rp-preview"><div className="rp-preview-head"><div className="rp-tabs" role="tablist" aria-label="预览模式">
-        {([['original','原图'],['raw','模型原始结果'],['result','最终合成候选'],['compare','滑动对比']] as const).map(([key,label])=><button role="tab" aria-selected={mode===key} key={key} disabled={key!=='original'&&(!candidate||(key!=='raw'&&!candidate.result.composite))} className={mode===key?'rp-tab-active':''} onClick={()=>setMode(key)}>{label}</button>)}
+        {([['original','场景原图'],['raw','模型原始结果'],['result',candidate?.result.composite&&candidate.result.quality.mechanism!=='adaptive-v1'?'历史合成结果':'智能合成候选'],['compare','滑动对比']] as const).map(([key,label])=><button role="tab" aria-selected={mode===key} key={key} disabled={key!=='original'&&(!candidate||(key!=='raw'&&!candidate.result.composite))} className={mode===key?'rp-tab-active':''} onClick={()=>setMode(key)}>{label}</button>)}
       </div><button className="rp-icon-button" aria-label="放大当前预览" disabled={!preview} onClick={()=>preview&&setEnlarged(preview)}><Expand/></button></div>
       <div className="rp-brush-toolbar" aria-label="涂抹工具">
         <div className="rp-mask-tools">{([['paint','画笔'],['erase','橡皮擦'],['pan','拖动画面']] as const).map(([value,label])=><button className={'rp-button '+(tool===value?'rp-tool-active':'')} key={value} aria-pressed={tool===value} disabled={locked||painting||!validAnalysis||!brushReady} onClick={()=>{setTool(value);setMode('original');}}>{label}</button>)}
@@ -255,6 +265,7 @@ export const ImageReplicationView:React.FC=()=>{
         <label>画笔大小 <span>细</span><input aria-label="画笔大小" type="range" min="0.005" max="0.2" step="0.005" value={brushSize} disabled={locked} onChange={e=>setBrushSize(Number(e.target.value))}/><span>粗</span></label>
         <label>放大 <input aria-label="画布缩放" type="range" min="100" max="400" step="25" value={zoom} onChange={e=>setZoom(Number(e.target.value))}/><span>{zoom}%</span></label>
         {validAnalysis&&brushReady&&<label><input type="checkbox" checked={showLocations} onChange={e=>setShowLocations(e.target.checked)}/>显示 AI 识别位置</label>}
+        {!!candidate?.result.compositeMasks&&<label>查看自动范围 <select aria-label="自动识别范围" value={overlayMask} onChange={e=>{setOverlayMask(e.target.value);setMode('original');}}><option value="">隐藏范围</option>{Object.entries({selectionMask:'用户选择',sourceObjectMask:'原产品轮廓',generatedObjectMask:'新产品轮廓',occlusionMask:'保护遮挡物',compositeMask:'智能合成范围'}).filter(([k])=>candidate.result.compositeMasks?.[k]).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></label>}
       </div>
       <div className="rp-canvas-wrap" ref={viewport}><div className="rp-canvas-center"><div className="rp-canvas" style={{width:source?canvasWidth*zoom/100:'100%',height:source?canvasWidth*zoom/100*source.height/source.width:350}}>
         {preview?<img className="rp-canvas-image" src={preview} alt={mode==='original'?'场景原图':mode==='raw'?'模型原始结果':'待审核合成候选'}/>:<div className="rp-canvas-empty"><ImagePlus/><p>上传场景原图和新产品参考</p></div>}
@@ -267,10 +278,12 @@ export const ImageReplicationView:React.FC=()=>{
           {showLocations&&instances.filter((i:any)=>validSubjectBox(i.bbox)).map((i:any)=><g key={i.instance_id}><rect x={i.bbox[0]*source.width} y={i.bbox[1]*source.height} width={i.bbox[2]*source.width} height={i.bbox[3]*source.height} fill="none" stroke="#3874de" strokeDasharray="6 4" vectorEffect="non-scaling-stroke"/><text x={i.bbox[0]*source.width} y={i.bbox[1]*source.height} fontSize={Math.min(source.width,source.height)*.025} fill="#2454b4">{i.location}</text></g>)}
           {cursor&&tool!=='pan'&&validAnalysis&&brushReady&&!locked&&<circle cx={cursor.x*source.width} cy={cursor.y*source.height} r={brushSize*Math.min(source.width,source.height)/2} fill="none" stroke={tool==='erase'?'#e55353':'#fff'} strokeWidth="1.5" vectorEffect="non-scaling-stroke"/>}
         </svg>}
+        {mode==='original'&&overlayMask&&candidate?.result.compositeMasks?.[overlayMask]&&<div aria-label="自动轮廓叠加" style={{position:'absolute',inset:0,pointerEvents:'none',background:'#14b886',opacity:.45,maskImage:`url("${candidate.result.compositeMasks[overlayMask].url}")`,maskSize:'100% 100%',maskMode:'luminance'}}/>}
         <span className="rp-image-label">{mode==='original'?'原图':mode==='raw'?'模型原始结果':candidate?.job.status==='succeeded'?'人工确认合格':'待审核候选 · 尚未确认替换成功'}</span>
       </div></div></div>
-      <div className="rp-preserve-strip"><ShieldCheck/>请涂满要替换的整个产品，并留出必要的轮廓和阴影空间。未涂抹处保留原图；袜子、裤脚等请留白或擦除。</div></section>
+      <div className="rp-preserve-strip"><ShieldCheck/>涂抹只用于选择旧产品；系统根据新旧产品轮廓计算合成范围。遮挡物与非目标内容需要保留，识别不可靠时不输出合成候选。</div></section>
       <section className="rp-card rp-settings"><div className="rp-card-title"><h2><Sparkles/>确认涂抹并开始替换</h2></div>
+        {caps.adaptiveComposition?.configured===false&&<p role="status">当前无法完成智能合成，已暂停新生图；已有模型结果仍可查看。</p>}
         {!validAnalysis?<p className="rp-hint">上传两类图片后点击“识别产品与替换位置”，再用画笔涂抹产品。</p>:!instances.length?<p className="rp-hint">未找到对应物品，暂不能替换。</p>:!brushReady?<p className="rp-hint">这份历史分析没有主体定位信息。可查看原任务；如需新的替换，请重新上传素材并识别。</p>:<div className="rp-selection-summary" role="status">{selection.selectedInstances.length?<><b>涂抹已对应到 {selection.selectedInstances.length} 个物品：</b>{instances.filter((i:any)=>selection.selectedInstances.includes(i.instance_id)).map((i:any)=><span key={i.instance_id}>{i.location}</span>)}</>:<b>在右侧涂抹你想换掉的物品。</b>}{selection.painted>0&&!selection.valid&&<p>涂抹与识别到的产品位置不匹配，请擦除背景等无关区域后重新确认。</p>}</div>}
         <label className="rp-label">补充要求（可选）<textarea disabled={locked} value={notes} maxLength={4000} onChange={e=>{setNotes(e.target.value);setCostConfirmed(false);}} placeholder="例如：保留鞋带自然垂落的状态"/></label>
         <details className="rp-advanced"><summary>输出设置（默认即可）</summary><div className="rp-settings-grid"><div><span className="rp-field-label">始终保留</span><p className="rp-hint">背景、构图、人物、视角与原场景光线。</p></div>
@@ -283,11 +296,14 @@ export const ImageReplicationView:React.FC=()=>{
         <div className="rp-card-title"><h2>独立任务状态</h2><button className="rp-button" onClick={reconnect}><RefreshCw/>重新连接查询</button></div>
         {pendingKind&&<p>{pendingKind==='analysis'?'分析':'生图'}请求尚在提交或接收待确认；请勿重复提交。</p>}
         {unresolved.map(op=><div className="rp-task" key={op.requestId}><b>{op.kind==='analysis'?'分析':'生图'}请求 · 原请求保留</b><small>请求：{op.requestId}</small><button className="rp-button" disabled={!!pendingKind} onClick={()=>safelyEnd(op)}>安全结束本次提交</button><small>仅当服务端确认没有预测提交记录时解除费用保护；不取消、不重建预测。</small></div>)}
-        {[analysisJob,generationJob].filter(Boolean).map(j=><div className="rp-task" key={j!.id}><b>{j!.kind==='analysis'?`${j!.predictions[0]?.model==='openai/o4-mini'?'o4-mini':REPLICATION_MODEL_NAMES.analysis} 产品分析`:'Nano Banana 2 图像生成'} · {stages[j!.status]||j!.status}</b><small>任务：{j!.id}<br/>请求：{j!.requestId}</small>{j!.predictions.map((p,i)=><small key={i}>{p.model} · {p.predictionId||'预测ID尚未确认'} · {p.remoteStatus||p.reconciliationState}</small>)}</div>)}
+        {[analysisJob,generationJob].filter(Boolean).map(j=><div className="rp-task" key={j!.id}><b>{j!.kind==='analysis'?`${j!.predictions[0]?.model==='openai/o4-mini'?'o4-mini':REPLICATION_MODEL_NAMES.analysis} 产品分析`:j!.origin==='local_recomposition'?'本地智能合成（未调用生图模型）':'Nano Banana 2 图像生成'} · {stages[j!.status]||j!.status}</b><small>任务：{j!.id}<br/>请求：{j!.requestId}</small>{j!.predictions.map((p,i)=><small key={i}>{p.model} · {p.predictionId||'预测ID尚未确认'} · {p.remoteStatus||p.reconciliationState}</small>)}</div>)}
         {activeJob&&<><button className="rp-button" onClick={cancel}>请求取消远端任务</button><p className="rp-hint">远端终态确认后才标记取消；中断浏览器不会自动停止收费。</p>{['submission_unknown','cancel_unknown'].includes(activeJob.status)&&<label className="rp-label">手动核对供应商预测ID（会验证模型、时间和输入摘要）<input value={reconcileId} onChange={e=>setReconcileId(e.target.value)}/><button className="rp-button" onClick={reconcile}>关联并查询原预测</button></label>}</>}
       </section>}
       {candidate&&<section className="rp-card rp-settings" aria-label="候选质量审核"><h2>结果审核 · {stages[candidate.job.status]||candidate.job.status}</h2>
-        <p className="rp-hint">像素检查无法证明新产品身份正确，请对照全部参考审核。</p><ul>{candidate.result.quality.reasons?.map(r=><li key={r}>{qualityMessage[r]||r}</li>)}</ul>
+        <p className="rp-hint">像素检查无法证明新产品身份正确，请对照全部参考审核。</p><ul>{candidate.result.quality.reasons?.map(r=><li key={r}>{qualityMessage[r]||ERROR_MESSAGES[r]||r}</li>)}</ul>
+        {!candidate.result.composite&&<p role="alert">智能合成未完成，已保留模型原始结果；没有可确认合格的合成候选。</p>}
+        {!!candidate.result.composite&&candidate.result.quality.mechanism!=='adaptive-v1'&&<p>这是历史合成结果，尚未通过自适应轮廓检查；可复用模型原图，仅重新合成。</p>}
+        {isFinalJob(candidate.job)&&<ReplicationContourEditor key={candidate.job.id} job={candidate.job} result={candidate.result} busy={composing||locked} onRecompose={recompose}/>}
         {candidate.job.status==='completed_needs_review'&&<><div className="rp-review-checks">{Object.entries({identity:'新产品结构、配色和标识正确',allInstances:'每个选中对象都已替换',occlusion:'裤脚、袜子等遮挡自然',scene:'场景、视角和光影合理'}).map(([k,v])=><label key={k}><input type="checkbox" checked={!!reviewChecks[k]} onChange={e=>setReviewChecks(p=>({...p,[k]:e.target.checked}))}/>{v}</label>)}</div><div className="rp-mask-tools"><button className="rp-button rp-primary" disabled={!['identity','allInstances','occlusion','scene'].every(k=>reviewChecks[k])} onClick={()=>review('accept')}>确认替换合格</button><button className="rp-button" onClick={()=>review('reject')}>标记效果不合格</button></div></>}
         <div className="rp-mask-tools"><button className="rp-button" onClick={()=>download(candidate.result.raw.url,'模型原始结果')}><Download/>下载原始候选</button>{candidate.result.composite&&<button className="rp-button" onClick={()=>download(candidate.result.composite!.url,candidate.job.status==='succeeded'?'确认合格':'待审核候选')}><Download/>下载合成{candidate.job.status==='succeeded'?'结果':'候选'}</button>}</div>
       </section>}

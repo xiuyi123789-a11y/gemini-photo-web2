@@ -12,8 +12,9 @@ export type BrushStroke = {tool:'paint'|'erase';size:number;points:Point[]};
 export type BrushSelection = {version:1;strokes:BrushStroke[]};
 export type Asset = {name:string;url:string;width:number;height:number;sha256:string;angle?:ReferenceAngle};
 export type Analysis = {data:any;text:string;rawText:string;revision:number;revisionHash:string;confirmedAt:number|null};
-export type Quality = {status:string;reasons?:string[];instances?:Array<{instanceId:string;meanDifference:number;changedFraction:number}>};
-export type JobResult = {raw:Asset;composite:Asset|null;quality:Quality;predictionId:string};
+export type Quality = {status:string;mechanism?:string;reasons?:string[];instances?:Array<{instanceId:string;meanDifference:number;changedFraction:number}>};
+export type ContourHint={image:'source'|'generated';instanceId:string;kind:'foreground'|'background'|'occlusion';x:number;y:number};
+export type JobResult = {raw:Asset;composite:Asset|null;compositeMasks?:Record<string,Asset>;quality:Quality;predictionId:string};
 export type ReplicationJob = {
   id:string;jobId:string;requestId:string;ownerId:string;kind:ReplicationKind;
   status:string;stage:string;inputFingerprint:string;sourceHash:string;revision:number;
@@ -23,7 +24,8 @@ export type ReplicationJob = {
   errorCode:string|null;error:string|null;quality:Quality|null;pendingRaw:Asset|null;
   recoveryErrorCode?:string|null;
   recoveryNeeded?:boolean;
-  input?:{masks:EditMask[];protectMasks:Point[][];brush?:BrushSelection;selectedInstances:string[];resolution:string};
+  origin?:string|null;derivedFrom?:string|null;
+  input?:{masks:EditMask[];protectMasks:Point[][];brush?:BrushSelection;selectedInstances:string[];resolution:string;contourHints?:ContourHint[]};
   predictions:Array<{model:string;predictionId:string|null;remoteStatus:string;reconciliationState:string}>;
 };
 export type Operation = {jobId?:string;requestId:string;kind:ReplicationKind;inputFingerprint:string;ownerId:string};
@@ -67,9 +69,10 @@ export const listActiveJobs=(kind:ReplicationKind):Promise<{jobs:ReplicationJob[
 export const resumeReplicationJob=(id:string):Promise<ReplicationJob>=>request('/jobs/'+encodeURIComponent(id)+'/resume',{});
 export const cancelReplicationJob=(id:string):Promise<ReplicationJob>=>request('/jobs/'+encodeURIComponent(id)+'/cancel',{});
 export const checkReplicationConnection=():Promise<any>=>request('/connectivity',{});
-export const getReplicationCapabilities=():Promise<{enabled:boolean;maxReferences:number;counts:number[];resolutions:string[]}>=>request('/capabilities');
+export const getReplicationCapabilities=():Promise<{enabled:boolean;maxReferences:number;counts:number[];resolutions:string[];adaptiveComposition?:{configured:boolean}}>=>request('/capabilities');
 export const reviseAnalysis=(job:ReplicationJob,text:string):Promise<ReplicationJob>=>request('/jobs/'+job.id+'/revision',{text,previousHash:job.analysis?.revisionHash});
 export const reviewReplication=(id:string,decision:'accept'|'reject',checks?:Record<string,boolean>):Promise<ReplicationJob>=>request('/jobs/'+id+'/review',{decision,checks});
+export const recomposeReplication=(id:string,requestId:string,hints:ContourHint[]):Promise<ReplicationJob>=>request('/jobs/'+id+'/recompose',{requestId,hints});
 export const reconcileReplication=(id:string,predictionId:string):Promise<ReplicationJob>=>request('/jobs/'+id+'/reconcile',{predictionId});
 
 const assertReceipt=(operation:Operation,receipt:RequestReceipt)=>{

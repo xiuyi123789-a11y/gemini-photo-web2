@@ -16,6 +16,17 @@ export function matchesOperation(expected, job) {
     (!expected.jobId || job.id === expected.jobId);
 }
 export const ERROR_MESSAGES = {
+  SEGMENTATION_UNAVAILABLE:'本地分割组件未配置或依赖缺失。已保留模型原图，不使用涂抹范围强行裁切。',
+  SEGMENTATION_TIMEOUT:'本地轮廓识别超时，未输出合成图；模型原图已保留。',
+  SEGMENTATION_BUSY:'本地分割正在处理其他图片，已保留模型原图。可稍后仅重新合成，不必再次生图。',
+  SEGMENTATION_FAILED:'本地轮廓识别失败，未输出合成图。可修正产品内部或背景提示点后仅重新合成。',
+  SEGMENTATION_INVALID:'分割返回的轮廓数据无效，未输出合成图。',
+  CONTOUR_UNCERTAIN:'产品完整轮廓无法可靠确认，请补充产品内部或背景提示点。',
+  INSTANCE_AMBIGUOUS:'多个产品轮廓发生冲突或对应不明确，已停止合成。',
+  ALIGNMENT_UNRELIABLE:'模型图与原图无法可靠对齐，未强行拉伸或输出合成图。',
+  OCCLUSION_UNCERTAIN:'袜子、裤脚等遮挡尚未可靠确认，请在原图上添加保护遮挡物提示点。',
+  BACKGROUND_RESTORATION_UNCERTAIN:'旧产品移除后的背景无法可靠恢复，未输出可能有残留的合成图。',
+  OLD_PRODUCT_RESIDUE:'旧产品移除区域仍与原产品过于一致，疑似残留，未输出合成候选。',
   MODEL_UNAVAILABLE: '供应商返回模型不存在或已停用。任务已停止，未自动重试；请核对模型配置后再提交。',
   REQUEST_CLOSED: '本次请求已安全结束，尚未启动模型。请核对素材后重新点击。',
   ASSET_PREPARATION_FAILED: '素材已收到，但服务器处理失败。已保留当前选择，可稍后重试。',
