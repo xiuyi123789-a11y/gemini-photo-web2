@@ -3,11 +3,11 @@ import { ArrowLeftRight, Check, Download, Expand, ImagePlus, Layers, LoaderCircl
 import { ImageModal } from './ImageModal';
 import { ReplicationContourEditor } from './ReplicationContourEditor';
 import { userStorage } from '../services/browserStorage';
-import { MAX_REFERENCES, isFinalJob, REPLICATION_MODEL_NAMES, ERROR_MESSAGES } from '../shared/replication-contract.js';
+import { MAX_REFERENCES, isFinalJob, REPLICATION_MODEL_NAMES, ERROR_MESSAGES, compositionFailure } from '../shared/replication-contract.js';
 import { BRUSH_LIMITS, matchBrushSubjects, validSubjectBox } from '../shared/replication-brush.js';
 import { startAnalysis,startGeneration,listActiveJobs,cancelReplicationJob,checkReplicationConnection,getReplicationCapabilities,
   reviseAnalysis,reviewReplication,reconcileReplication,readOperation,saveOperation,forgetOperation,assertOperation,ownerId,
-  lookupOperation,closeOperation,resumeReplicationJob,recomposeReplication,type ContourHint,
+  lookupOperation,closeOperation,resumeReplicationJob,recomposeReplication,findReplicationRequest,type ContourHint,
   type Operation,type ReplicationJob,type ReferenceAngle,type PreserveKey,type Point,type EditMask,type JobResult,type BrushStroke } from '../services/replicationService';
 import './ImageReplicationView.css';
 
@@ -37,13 +37,15 @@ export const ImageReplicationView:React.FC=()=>{
   const viewport=useRef<HTMLDivElement>(null),paintRef=useRef<{pointerId:number;stroke:BrushStroke}|null>(null),panRef=useRef<{x:number;y:number;left:number;top:number}|null>(null);
   const brushMaskId=useRef('brush-'+crypto.randomUUID());
   const [composing,setComposing]=useState(false),[overlayMask,setOverlayMask]=useState('');
+  const [contourHints,setContourHints]=useState<ContourHint[]>([]),[editorOpen,setEditorOpen]=useState(false);
+  const compositionBusy=useRef(false),hintJob=useRef('');
   const currentFingerprint=useRef(''),loops=useRef({analysis:0,generation:0});
   const latestRevisions=useRef(new Map<string,number>());
   const restoredInputs=useRef(new Set<string>());
   const activeJob=[analysisJob,generationJob].find(j=>j&&!isFinalJob(j));
   const unresolved=(Object.values(operations) as Array<Operation|null>).filter((op):op is Operation=>!!op&&![analysisJob,generationJob].some(j=>j?.requestId===op.requestId&&isFinalJob(j)));
   const feeLocked=!!activeJob||unresolved.length>0;
-  const locked=reading||!!pendingKind||feeLocked;
+  const locked=reading||!!pendingKind||feeLocked||composing;
   const syncOperations=()=>setOperations({analysis:readOperation('analysis'),generation:readOperation('generation')});
   const instances=analysisJob?.analysis?.data?.scene?.old_product_instances||[];
   const brush={version:1 as const,strokes};
@@ -60,7 +62,9 @@ export const ImageReplicationView:React.FC=()=>{
       if(next.status==='succeeded'&&next.analysis?.data)setAnalysisText(next.analysis.text);
     }else{
       setGenerationJob(next);
+      if(hintJob.current!==next.id){hintJob.current=next.id;setContourHints(next.input?.contourHints||[]);setReviewChecks({});}
       if(next.results.length){setCandidate({job:next,result:next.results[next.results.length-1]});setMode(next.results.at(-1)?.composite?'compare':'raw');}
+      if(next.status==='quality_failed'&&['CONTOUR_UNCERTAIN','OCCLUSION_UNCERTAIN','INSTANCE_AMBIGUOUS'].includes(compositionFailure(next)?.code||''))setEditorOpen(true);
     }
     if(restore&&!currentFingerprint.current){
       currentFingerprint.current=next.inputFingerprint;setFingerprint(next.inputFingerprint);
@@ -75,7 +79,8 @@ export const ImageReplicationView:React.FC=()=>{
       setSource(previous=>({...materialFrom(next.source),file:previous?.file||null}));
       setReferences(previous=>next.references.map((a,i)=>({...materialFrom(a),file:previous[i]?.file||null})));
     }
-    if(next.error)setError(next.error+' ['+next.errorCode+']');else setError('');
+    const compositionIssue=compositionFailure(next);
+    if(compositionIssue)setError(compositionIssue.message);else if(next.error)setError(next.error+' ['+next.errorCode+']');else setError('');
     if(isFinalJob(next))setNotice(next.kind==='analysis'?(next.status==='succeeded'?'识别完成。请在右侧涂抹想替换的产品；不会自动生图。':'产品识别未完成，请查看提示。'):
       next.status==='completed_needs_review'?'候选已生成，需核对新产品身份与场景后再确认合格。':stages[next.status]||next.status);
   }
@@ -89,7 +94,7 @@ export const ImageReplicationView:React.FC=()=>{
         if(result.closed){forgetOperation(operation.kind);syncOperations();setError('');setNotice('本次提交已安全结束，可以重新上传或提交。');return;}
         if(!result.job){syncOperations();setNotice('原请求尚无模型任务。可重新连接查询，或安全结束本次提交；不会自动重发。');return;}
         let job=result.job;
-        if(recover&&job.recoveryNeeded&&!isFinalJob(job)&&!['submission_unknown','cancel_unknown'].includes(job.status))job=await resumeReplicationJob(job.id);
+        if(recover&&job.recoveryNeeded&&!isFinalJob(job)&&!['submission_unknown','cancel_unknown'].includes(job.status))job=await resumeReplicationJob(job.id,job.origin==='local_recomposition');
         if(!mounted.current||serial!==loops.current[operation.kind])return;
         assertOperation(operation,job);operation={...operation,jobId:job.id};saveOperation(operation);apply(job,true);
         syncOperations();
@@ -205,9 +210,10 @@ export const ImageReplicationView:React.FC=()=>{
     paintRef.current=null;panRef.current=null;setPainting(false);
     if(event.currentTarget.hasPointerCapture(event.pointerId))event.currentTarget.releasePointerCapture(event.pointerId);
   }
-  async function cancel(){if(!activeJob)return;try{const next=await cancelReplicationJob(activeJob.id);apply(next);const op=readOperation(next.kind);if(op)await track(op);}catch(e){setError(issue(e));}}
+  async function cancel(){if(!activeJob)return;try{const next=await cancelReplicationJob(activeJob.id,activeJob.origin==='local_recomposition');apply(next);const op=readOperation(next.kind);if(op)await track(op);}catch(e){setError(issue(e));}}
   async function reconnect(){setError('');try{await Promise.all([restore('analysis'),restore('generation')]);}catch(e){setError(issue(e));}}
   async function safelyEnd(op:Operation){
+    if(op.localOnly){forgetOperation(op.kind);syncOperations();setNotice('已结束等待本地测试，原图与任务记录保留；没有重新调用生图模型。');setError('');return;}
     try{const result=await closeOperation(op);syncOperations();if(result.job)apply(result.job);
       if(result.closed){setError('');setNotice('已确认未提交模型并封存原请求，可以重新提交。');}
       else setNotice('该请求已有预测记录，费用保护仍保留；请查询或取消原任务，不会重新创建预测。');
@@ -218,25 +224,43 @@ export const ImageReplicationView:React.FC=()=>{
     if(!candidate)return;try{const next=await reviewReplication(candidate.job.id,decision,reviewChecks);apply(next);setCandidate({job:next,result:next.results.at(-1)!});}catch(e){setError(issue(e));}
   }
   async function recompose(hints:ContourHint[]){
-    if(!candidate||composing)return;
-    setComposing(true);setError('');
-    const operation:Operation={kind:'generation',ownerId:ownerId(),requestId:crypto.randomUUID(),inputFingerprint:candidate.job.inputFingerprint};
+    if(!candidate||compositionBusy.current||activeJob||unresolved.length)return;
+    compositionBusy.current=true;setComposing(true);setError('');setMode('raw');setNotice('正在重新测试智能合成，复用模型原图，不重新生图。');
+    const previous=readOperation('generation');
+    const operation:Operation={kind:'generation',ownerId:ownerId(),requestId:crypto.randomUUID(),inputFingerprint:candidate.job.inputFingerprint,localOnly:true,sourceJobId:candidate.job.id};
     saveOperation(operation);syncOperations();
-    try{const next=await recomposeReplication(candidate.job.id,operation.requestId,hints);saveOperation({...operation,jobId:next.id});syncOperations();await track({...operation,jobId:next.id});}
-    catch(e){setError(issue(e));}finally{setComposing(false);}
+    try{const next=await recomposeReplication(candidate.job.id,operation.requestId,hints);assertOperation(operation,next);saveOperation({...operation,jobId:next.id});syncOperations();await track({...operation,jobId:next.id});}
+    catch(e){
+      // A lost local ACK is recovered with GET, never another POST. A definitive
+      // rejection without a new job restores the old marker and releases loading.
+      try{const next=await findReplicationRequest(operation.requestId);assertOperation(operation,next);saveOperation({...operation,jobId:next.id});syncOperations();await track({...operation,jobId:next.id});}
+      catch(lookupError){
+        if((lookupError as any)?.status===404&&Number.isInteger((e as any)?.status)){
+          if(previous)saveOperation(previous);else forgetOperation('generation');syncOperations();setError(issue(e));setNotice('本地测试未受理，已保留修正点，可重新测试。');
+        }else{setError(issue(e));setNotice('本地测试接收状态待确认。请重新连接查询，不会自动重发或调用生图模型。');}
+      }
+    }finally{compositionBusy.current=false;setComposing(false);}
   }
+  function openContourEditor(){setEditorOpen(true);window.setTimeout(()=>{if(typeof document!=='undefined')document.getElementById('replication-contour-editor')?.scrollIntoView({behavior:'smooth',block:'start'});},0);}
   async function download(url:string,label:string){try{const response=await fetch(url,{credentials:'same-origin'});if(!response.ok)throw new Error('下载失败。');
     const u=URL.createObjectURL(await response.blob()),a=document.createElement('a');a.href=u;a.download=`图像复刻_${label}_${Date.now()}.png`;a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);}catch(e){setError(issue(e));}}
   const originalUrl=candidate&&mode!=='original'?candidate.job.source.url:source?.preview;
   const preview=mode==='raw'?candidate?.result.raw.url:mode==='result'?candidate?.result.composite?.url:originalUrl;
   const polygonPoints=(p:Point[])=>p.map(v=>`${v.x*(source?.width||1)},${v.y*(source?.height||1)}`).join(' ');
   const generationReady=validAnalysis&&brushReady&&selection.valid&&!locked&&caps.enabled&&caps.adaptiveComposition?.configured!==false;
+  const compositionProblem=!composing&&candidate?.job.id===generationJob?.id?compositionFailure(candidate?.job):null;
+  const displayError=error||compositionProblem?.message;
+  const localPending=unresolved.some(op=>op.localOnly);
+  const canRetest=!!candidate?.result.raw&&isFinalJob(candidate.job);
+  const retestDisabled=composing||!!activeJob||!!pendingKind||reading||unresolved.some(op=>!op.localOnly);
+  const retryComposition=()=>localPending?reconnect():recompose(contourHints);
   return <section className="rp-view" aria-label="图像复刻工作台">
     <div className="rp-heading"><div><h1>图像复刻 <span>换产品，保留场景</span></h1><p>上传你的产品，AI 找到场景中的对应物品。涂抹确认要替换的产品，系统自动适配新产品轮廓。</p></div>
       <button className="rp-button" disabled={reading||!!pendingKind} onClick={async()=>{try{await checkReplicationConnection();setNotice('两模型元数据可访问，未创建预测任务。');}catch(e){setError(issue(e));}}}><PlugZap/>检查连接</button></div>
     <div className="rp-workflow"><span>01 上传场景与产品</span><span>02 AI 识别对应物品</span><span>03 涂抹确认</span><span>04 开始替换</span></div>
-    {!caps.enabled&&<div className="rp-message">新任务入口已关闭，现有任务仍可查询。</div>}
-    {(error||notice)&&<div className={'rp-message '+(error?'rp-error':'')} role={error?'alert':'status'}>{error||notice}</div>}
+    {!caps.enabled&&<div className="rp-message">新生图入口已关闭；已有模型原图仍可重新测试智能合成，无需重新上传。</div>}
+    {(displayError||notice)&&<div className={'rp-message '+(displayError?(displayError===compositionProblem?.message?'rp-warning':'rp-error'):'')} role={displayError?'alert':'status'}>{displayError||notice}</div>}
+    {canRetest&&<div className="rp-retest-bar" aria-label="重新测试智能合成"><div><b>{composing?'正在重新测试智能合成…':'重新测试已有图片'}</b><p>复用当前模型原图和 {contourHints.length} 个修正点；只做本地识别与合成，不重新分析或生图。</p></div><div className="rp-mask-tools"><button className="rp-button rp-primary" disabled={retestDisabled} onClick={retryComposition}><RefreshCw/>{composing?'正在重新测试…':localPending?'重新连接本地测试':'重新测试智能合成'}</button><button className="rp-button" disabled={composing||!!activeJob} onClick={openContourEditor}>修正识别范围</button></div></div>}
     <div className="rp-layout"><section className="rp-card rp-materials">
       <div className="rp-card-title"><h2><Layers/>输入素材</h2><button className="rp-text" disabled={locked} onClick={()=>{if(window.confirm('清空本次素材与编辑？已保存的任务不会删除。')){stale();setSource(null);setReferences([]);}}}><Trash2/>清空</button></div>
       <div className="rp-section-label"><b>01</b>想保留的场景照片</div>
@@ -295,15 +319,16 @@ export const ImageReplicationView:React.FC=()=>{
       {(analysisJob||generationJob||pendingKind||unresolved.length>0)&&<section className="rp-card rp-settings" aria-label="任务状态">
         <div className="rp-card-title"><h2>独立任务状态</h2><button className="rp-button" onClick={reconnect}><RefreshCw/>重新连接查询</button></div>
         {pendingKind&&<p>{pendingKind==='analysis'?'分析':'生图'}请求尚在提交或接收待确认；请勿重复提交。</p>}
-        {unresolved.map(op=><div className="rp-task" key={op.requestId}><b>{op.kind==='analysis'?'分析':'生图'}请求 · 原请求保留</b><small>请求：{op.requestId}</small><button className="rp-button" disabled={!!pendingKind} onClick={()=>safelyEnd(op)}>安全结束本次提交</button><small>仅当服务端确认没有预测提交记录时解除费用保护；不取消、不重建预测。</small></div>)}
+        {unresolved.map(op=><div className="rp-task" key={op.requestId}><b>{op.localOnly?'本地测试':op.kind==='analysis'?'分析':'生图'}请求 · 原请求保留</b><small>请求：{op.requestId}</small><button className="rp-button" disabled={!!pendingKind} onClick={()=>safelyEnd(op)}>{op.localOnly?'结束本地等待':'安全结束本次提交'}</button><small>{op.localOnly?'仅结束本地等待，原图和记录保留；不创建或取消模型预测。':'仅当服务端确认没有预测提交记录时解除费用保护；不取消、不重建预测。'}</small></div>)}
         {[analysisJob,generationJob].filter(Boolean).map(j=><div className="rp-task" key={j!.id}><b>{j!.kind==='analysis'?`${j!.predictions[0]?.model==='openai/o4-mini'?'o4-mini':REPLICATION_MODEL_NAMES.analysis} 产品分析`:j!.origin==='local_recomposition'?'本地智能合成（未调用生图模型）':'Nano Banana 2 图像生成'} · {stages[j!.status]||j!.status}</b><small>任务：{j!.id}<br/>请求：{j!.requestId}</small>{j!.predictions.map((p,i)=><small key={i}>{p.model} · {p.predictionId||'预测ID尚未确认'} · {p.remoteStatus||p.reconciliationState}</small>)}</div>)}
-        {activeJob&&<><button className="rp-button" onClick={cancel}>请求取消远端任务</button><p className="rp-hint">远端终态确认后才标记取消；中断浏览器不会自动停止收费。</p>{['submission_unknown','cancel_unknown'].includes(activeJob.status)&&<label className="rp-label">手动核对供应商预测ID（会验证模型、时间和输入摘要）<input value={reconcileId} onChange={e=>setReconcileId(e.target.value)}/><button className="rp-button" onClick={reconcile}>关联并查询原预测</button></label>}</>}
+        {activeJob&&<><button className="rp-button" onClick={cancel}>{activeJob.origin==='local_recomposition'?'请求停止本地测试':'请求取消远端任务'}</button><p className="rp-hint">{activeJob.origin==='local_recomposition'?'这里只执行本地合成，原始模型图片会保留，不创建或取消远端预测。':'远端终态确认后才标记取消；中断浏览器不会自动停止收费。'}</p>{['submission_unknown','cancel_unknown'].includes(activeJob.status)&&<label className="rp-label">手动核对供应商预测ID（会验证模型、时间和输入摘要）<input value={reconcileId} onChange={e=>setReconcileId(e.target.value)}/><button className="rp-button" onClick={reconcile}>关联并查询原预测</button></label>}</>}
       </section>}
       {candidate&&<section className="rp-card rp-settings" aria-label="候选质量审核"><h2>结果审核 · {stages[candidate.job.status]||candidate.job.status}</h2>
         <p className="rp-hint">像素检查无法证明新产品身份正确，请对照全部参考审核。</p><ul>{candidate.result.quality.reasons?.map(r=><li key={r}>{qualityMessage[r]||ERROR_MESSAGES[r]||r}</li>)}</ul>
         {!candidate.result.composite&&<p role="alert">智能合成未完成，已保留模型原始结果；没有可确认合格的合成候选。</p>}
         {!!candidate.result.composite&&candidate.result.quality.mechanism!=='adaptive-v1'&&<p>这是历史合成结果，尚未通过自适应轮廓检查；可复用模型原图，仅重新合成。</p>}
-        {isFinalJob(candidate.job)&&<ReplicationContourEditor key={candidate.job.id} job={candidate.job} result={candidate.result} busy={composing||locked} onRecompose={recompose}/>}
+        {canRetest&&<div className="rp-mask-tools"><button className="rp-button rp-primary" disabled={retestDisabled} onClick={retryComposition}>{composing?'正在重新测试…':localPending?'重新连接本地测试':'重新测试智能合成'}</button><button className="rp-button" disabled={composing||!!activeJob} onClick={openContourEditor}>修正识别范围</button></div>}
+        {isFinalJob(candidate.job)&&<ReplicationContourEditor key={candidate.job.id} job={candidate.job} result={candidate.result} busy={composing||locked} onRecompose={recompose} hints={contourHints} onHintsChange={setContourHints} open={editorOpen} onOpenChange={setEditorOpen}/>}
         {candidate.job.status==='completed_needs_review'&&<><div className="rp-review-checks">{Object.entries({identity:'新产品结构、配色和标识正确',allInstances:'每个选中对象都已替换',occlusion:'裤脚、袜子等遮挡自然',scene:'场景、视角和光影合理'}).map(([k,v])=><label key={k}><input type="checkbox" checked={!!reviewChecks[k]} onChange={e=>setReviewChecks(p=>({...p,[k]:e.target.checked}))}/>{v}</label>)}</div><div className="rp-mask-tools"><button className="rp-button rp-primary" disabled={!['identity','allInstances','occlusion','scene'].every(k=>reviewChecks[k])} onClick={()=>review('accept')}>确认替换合格</button><button className="rp-button" onClick={()=>review('reject')}>标记效果不合格</button></div></>}
         <div className="rp-mask-tools"><button className="rp-button" onClick={()=>download(candidate.result.raw.url,'模型原始结果')}><Download/>下载原始候选</button>{candidate.result.composite&&<button className="rp-button" onClick={()=>download(candidate.result.composite!.url,candidate.job.status==='succeeded'?'确认合格':'待审核候选')}><Download/>下载合成{candidate.job.status==='succeeded'?'结果':'候选'}</button>}</div>
       </section>}

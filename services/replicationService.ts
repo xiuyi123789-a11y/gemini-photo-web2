@@ -28,7 +28,7 @@ export type ReplicationJob = {
   input?:{masks:EditMask[];protectMasks:Point[][];brush?:BrushSelection;selectedInstances:string[];resolution:string;contourHints?:ContourHint[]};
   predictions:Array<{model:string;predictionId:string|null;remoteStatus:string;reconciliationState:string}>;
 };
-export type Operation = {jobId?:string;requestId:string;kind:ReplicationKind;inputFingerprint:string;ownerId:string};
+export type Operation = {jobId?:string;requestId:string;kind:ReplicationKind;inputFingerprint:string;ownerId:string;localOnly?:boolean;sourceJobId?:string};
 export type RequestReceipt = {ownerId:string;requestId:string;kind:ReplicationKind;inputFingerprint:string;state:'reserved'|'preparing'|'accepted'|'closed';jobId:string|null;revision:number};
 export type GenerationInput = {
   inputFingerprint:string;analysisJobId:string;analysisRevisionHash:string;
@@ -48,8 +48,8 @@ export const readOperation=(kind:ReplicationKind):Operation|null=>{
 export const saveOperation=(operation:Operation)=>userStorage.setItem(recoveryKey(operation.kind),JSON.stringify(operation));
 export const forgetOperation=(kind:ReplicationKind)=>userStorage.removeItem(recoveryKey(kind));
 export const assertOperation=(operation:Operation,job:ReplicationJob)=>{if(!matchesOperation(operation,job))throw new Error('恢复任务与账号、素材或操作类型不一致，已阻止关联。');};
-async function request(path:string,body?:unknown):Promise<any> {
-  const token=/^\/(analysis|generation|connectivity)$|\/(resume|cancel|reconcile)$/.test(path)?validToken():null;
+async function request(path:string,body?:unknown,localOnly=false):Promise<any> {
+  const token=!localOnly&&/^\/(analysis|generation|connectivity)$|\/(resume|cancel|reconcile)$/.test(path)?validToken():null;
   const requestId=(body as any)?.requestId;
   const response=await fetch('/api/replication'+path,{method:body===undefined?'GET':'POST',credentials:'same-origin',
     headers:{'Content-Type':'application/json','x-user-id':getUserId(),...(token?{'x-replicate-token':token}:{}),...(requestId?{'x-replication-request-id':requestId}:{})},
@@ -66,8 +66,8 @@ function validToken():string|null {
 export const getReplicationJob=(id:string):Promise<ReplicationJob>=>request('/jobs/'+encodeURIComponent(id));
 export const findReplicationRequest=(id:string):Promise<ReplicationJob>=>request('/request/'+encodeURIComponent(id));
 export const listActiveJobs=(kind:ReplicationKind):Promise<{jobs:ReplicationJob[];requests?:RequestReceipt[]}>=>request('/active?kind='+kind);
-export const resumeReplicationJob=(id:string):Promise<ReplicationJob>=>request('/jobs/'+encodeURIComponent(id)+'/resume',{});
-export const cancelReplicationJob=(id:string):Promise<ReplicationJob>=>request('/jobs/'+encodeURIComponent(id)+'/cancel',{});
+export const resumeReplicationJob=(id:string,localOnly=false):Promise<ReplicationJob>=>request('/jobs/'+encodeURIComponent(id)+'/resume',{},localOnly);
+export const cancelReplicationJob=(id:string,localOnly=false):Promise<ReplicationJob>=>request('/jobs/'+encodeURIComponent(id)+'/cancel',{},localOnly);
 export const checkReplicationConnection=():Promise<any>=>request('/connectivity',{});
 export const getReplicationCapabilities=():Promise<{enabled:boolean;maxReferences:number;counts:number[];resolutions:string[];adaptiveComposition?:{configured:boolean}}>=>request('/capabilities');
 export const reviseAnalysis=(job:ReplicationJob,text:string):Promise<ReplicationJob>=>request('/jobs/'+job.id+'/revision',{text,previousHash:job.analysis?.revisionHash});

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
-import { REPLICATION_MODELS, MAX_REFERENCES, isFinalJob, ERROR_MESSAGES, canonicalJson } from '../shared/replication-contract.js';
+import { REPLICATION_MODELS, MAX_REFERENCES, isFinalJob, ERROR_MESSAGES, canonicalJson, compositionFailure } from '../shared/replication-contract.js';
 import { sha256 } from './replication-assets.js';
 import { createReplicationWorker } from './replication-worker.js';
 import { prepareMasks, createRegionGuide } from './replication-composite.js';
@@ -26,7 +26,7 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
     analysis:job.analysis||null,analysisJobId:job.analysisJobId||null,approvedAnalysis:job.approvedAnalysis||null,origin:job.origin||null,derivedFrom:job.derivedFrom||null,
     source:job.assets.source,references:job.assets.references,target:job.target||'',input:job.kind==='generation'?job.input:null,
     results:job.results,images:job.kind==='analysis'?[]:job.images,pendingRaw:job.pendingRaw||null,quality:job.quality||null,
-    errorCode:job.errorCode||null,error:job.errorCode?(ERROR_MESSAGES[job.errorCode]||'任务尚未完成，请查看阶段与任务标识。'):null,
+    errorCode:job.errorCode||null,error:compositionFailure(job)?.message||(job.errorCode?(ERROR_MESSAGES[job.errorCode]||'任务尚未完成，请查看阶段与任务标识。'):null),
     expiresAt:job.expiresAt,
     predictions:(await store.attempts(job.id)).map(a=>({localAttemptId:a.id,model:a.model,predictionId:a.predictionId,attemptNo:a.attemptNo,
       remoteStatus:a.remoteStatus,createStartedAt:a.createStartedAt,cancelRequestedAt:a.cancelRequestedAt||null,reconciliationState:a.reconciliationState,metrics:a.metricsSummary||null}))});

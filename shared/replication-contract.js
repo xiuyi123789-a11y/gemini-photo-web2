@@ -15,7 +15,17 @@ export function matchesOperation(expected, job) {
     job.ownerId === expected.ownerId && job.inputFingerprint === expected.inputFingerprint &&
     (!expected.jobId || job.id === expected.jobId);
 }
+// A saved human rejection is history, not a new model/API error. Local failure
+// reasons must remain visible instead of being flattened into QUALITY_FAILED.
+export function compositionFailure(job){
+  if(job?.kind!=='generation'||job.status!=='quality_failed')return null;
+  if(job.stage==='human_review')return {code:'RESULT_REJECTED',message:'上次结果经审核未通过，原图和历史记录已保留。可以重新测试智能合成；这不会重新生图。'};
+  const reasons=[...(job.quality?.reasons||[]),...(job.results?.at(-1)?.quality?.reasons||[])];
+  const code=reasons.find(r=>r!=='HUMAN_PRODUCT_IDENTITY_REVIEW_REQUIRED'&&typeof ERROR_MESSAGES[r]==='string')||'COMPOSITION_FAILED';
+  return {code,message:ERROR_MESSAGES[code]};
+}
 export const ERROR_MESSAGES = {
+  COMPOSITION_FAILED:'本次智能合成未完成，模型原图已保留。请修正识别范围后重新测试；不会重新生图。',
   SEGMENTATION_UNAVAILABLE:'本地分割组件未配置或依赖缺失。已保留模型原图，不使用涂抹范围强行裁切。',
   SEGMENTATION_TIMEOUT:'本地轮廓识别超时，未输出合成图；模型原图已保留。',
   SEGMENTATION_BUSY:'本地分割正在处理其他图片，已保留模型原图。可稍后仅重新合成，不必再次生图。',

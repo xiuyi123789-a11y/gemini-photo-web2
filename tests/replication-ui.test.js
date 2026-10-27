@@ -33,7 +33,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
     assert.equal(typeof url,'string');assert(url.startsWith('/api/replication/'),'Non-local fetch blocked');
     new Headers(options.headers); // Real browser Fetch header validation, before any request can reach a server.
     const method=options.method||'GET',body=options.body?JSON.parse(options.body):null;calls.push({method,url,requestId:body?.requestId,body});
-    if(url.endsWith('/capabilities'))return response(200,{enabled:true,maxReferences:6,counts:[1],resolutions:['1K','2K']});
+    if(url.endsWith('/capabilities'))return response(200,{enabled:!mode.startsWith('retry-'),maxReferences:6,counts:[1],resolutions:['1K','2K']});
     if(url.includes('/active?'))return response(200,{jobs:[],requests:receipt&&url.endsWith(receipt.kind)&&['reserved','preparing'].includes(receipt.state)?[receipt]:[]});
     if(url.endsWith('/requests')&&method==='POST'){
       if(mode==='offline')throw new TypeError('MOCK disconnected');
@@ -68,7 +68,20 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
     if(method==='POST'&&url.endsWith('/generation')){
       accepted++;remoteCreates++;currentJob={...makeJob(body,'completed_needs_review'),kind:'generation',analysis:null,input:body,analysisJobId:body.analysisJobId};return response(202,currentJob);
     }
-    if(url.includes('/request/')||url.includes('/jobs/'))return currentJob?response(200,currentJob):response(404,{errorCode:'JOB_NOT_FOUND'});
+    if(method==='POST'&&url.endsWith('/recompose')){
+      assert(mode.startsWith('retry-'));assert(!new Headers(options.headers).has('x-replicate-token'));
+      if(mode==='retry-rejected')return response(422,{errorCode:'INPUT_INVALID'});
+      if(mode==='retry-offline')throw new TypeError('Local response unavailable');
+      await pause(10);
+      currentJob={...currentJob,id:randomUUID(),requestId:body.requestId,origin:'local_recomposition',derivedFrom:currentJob.id,revision:1,stage:'completed_needs_review',
+        status:'completed_needs_review',errorCode:null,error:null,input:{...currentJob.input,contourHints:body.hints},
+        results:[{raw:currentJob.results[0].raw,composite:{name:'composite-1.png',url:'/fake-composite.png'},quality:{status:'needs_review',mechanism:'adaptive-v1',reasons:['HUMAN_PRODUCT_IDENTITY_REVIEW_REQUIRED']}}]};
+      if(mode==='retry-contour')currentJob={...currentJob,status:'quality_failed',stage:'quality_failed',errorCode:'QUALITY_FAILED',error:contract.ERROR_MESSAGES.QUALITY_FAILED,quality:{status:'failed',reasons:['CONTOUR_UNCERTAIN']},results:currentJob.results.map(r=>({...r,composite:null,quality:{status:'failed',reasons:['CONTOUR_UNCERTAIN']}}))};
+      if(mode==='retry-lost-ack')throw new TypeError('Local ACK lost');
+      return response(202,currentJob);
+    }
+    if(url.includes('/request/'))return currentJob&&url.endsWith(currentJob.requestId)?response(200,currentJob):response(404,{errorCode:'JOB_NOT_FOUND'});
+    if(url.includes('/jobs/'))return currentJob?response(200,currentJob):response(404,{errorCode:'JOB_NOT_FOUND'});
     throw new Error('Unexpected mock route '+method+' '+url);
   };
   class FakeImage{naturalWidth=96;naturalHeight=64;set src(v){queueMicrotask(()=>this.onload());}}
@@ -232,4 +245,52 @@ test('background painting cannot enable generation; zoom does not change normali
   await h.paint([{x:.5,y:.02},{x:.9,y:.02}]);assert(h.button('开始替换').props.disabled);assert(h.label().includes('不匹配'));
   await h.click('清空涂抹');await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);h.change('确认本次替换费用',true);await h.click('开始替换');
   const body=h.calls.find(c=>c.url.endsWith('/generation')).body;assert(Math.abs(body.brush.strokes[0].points[0].x-.2)<1e-6);assert(Math.abs(body.brush.strokes[0].points[0].y-.4)<1e-6);
+});
+
+function retryFixture(mode){
+  const job={id:randomUUID(),ownerId:'owner-incident',requestId:randomUUID(),kind:'generation',status:'quality_failed',stage:'human_review',revision:1,
+    inputFingerprint:'a'.repeat(64),sourceHash:'a'.repeat(64),createdAt:Date.now(),updatedAt:Date.now(),completed:1,total:1,analysis:null,
+    source:{name:'source.png',url:'/fake-source.png',width:96,height:64,sha256:'a'.repeat(64)},references:[],predictions:[],images:[],
+    errorCode:'QUALITY_FAILED',error:contract.ERROR_MESSAGES.QUALITY_FAILED,quality:{status:'failed'},
+    input:{selectedInstances:['left'],masks:[],protectMasks:[],contourHints:[{image:'source',instanceId:'left',kind:'foreground',x:.2,y:.5}]},
+    results:[{raw:{name:'raw-1.png',url:'/fake-raw.png'},composite:{name:'old-composite.png',url:'/old-composite.png'},quality:{status:'needs_review',reasons:['HUMAN_PRODUCT_IDENTITY_REVIEW_REQUIRED']}}]};
+  const storage=new Map([['replication_v2_generation',JSON.stringify({kind:'generation',ownerId:job.ownerId,requestId:job.requestId,inputFingerprint:job.inputFingerprint,jobId:job.id})]]);
+  return {job,h:harness(mode,storage,{currentJob:job})};
+}
+test('retry is prominent with paid entry closed; history rejection has an actionable message and one local POST',async()=>{
+  const {job,h}=retryFixture('retry-normal');await h.mountEffects();
+  assert(!h.button('重新测试智能合成').props.disabled);assert(h.label().includes('上次结果经审核未通过'));assert(!h.label().includes('[QUALITY_FAILED]'));
+  await h.click('修正识别范围');await h.click('重新测试智能合成');
+  const posts=h.calls.filter(c=>c.method==='POST');assert.equal(posts.length,1);assert(posts[0].url.endsWith('/recompose'));assert.deepEqual(posts[0].body.hints,job.input.contourHints);
+  assert.equal(h.counts().remoteCreates,0);assert(!h.label().includes('上次结果经审核未通过'));assert(!h.button('重新测试智能合成').props.disabled);
+});
+test('retry releases loading and restores the old operation after a definitive rejection without a new job',async()=>{
+  const {job,h}=retryFixture('retry-rejected');await h.mountEffects();await h.click('重新测试智能合成');
+  assert.equal(JSON.parse(h.storage.get('replication_v2_generation')).jobId,job.id);assert(!h.button('重新测试智能合成').props.disabled);
+  assert(h.label().includes('素材或参数无效'));assert.equal(h.counts().remoteCreates,0);
+});
+test('retry double click submits once; original history warning clears while processing',async()=>{
+  const {h}=retryFixture('retry-normal');await h.mountEffects();const onClick=h.button('重新测试智能合成').props.onClick;
+  const first=onClick(),second=onClick();h.render();assert(h.button('正在重新测试').props.disabled);assert(!h.label().includes('上次结果经审核未通过'));
+  assert(h.label().includes('本地测试请求'));assert(!h.label().includes('生图请求'));
+  await Promise.all([first,second]);h.render();assert.equal(h.calls.filter(c=>c.url.endsWith('/recompose')).length,1);assert.equal(h.counts().remoteCreates,0);
+});
+test('lost local retry acknowledgment recovers through GET, refresh never resubmits or creates a prediction',async()=>{
+  const {h}=retryFixture('retry-lost-ack');await h.mountEffects();await h.click('重新测试智能合成');
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/recompose')).length,1);assert(!h.button('重新测试智能合成').props.disabled);
+  const refreshed=harness('retry-normal',h.storage,h.snapshot());await refreshed.mountEffects();assert(!refreshed.calls.some(c=>c.method==='POST'));assert.equal(refreshed.counts().remoteCreates,0);
+});
+test('local contour failure reports its exact cause, keeps raw output and exposes retry plus correction',async()=>{
+  const {h}=retryFixture('retry-contour');await h.mountEffects();await h.click('重新测试智能合成');
+  assert(h.label().includes(contract.ERROR_MESSAGES.CONTOUR_UNCERTAIN));assert(!h.label().includes('[QUALITY_FAILED]'));assert(!h.button('重新测试智能合成').props.disabled);
+  assert(h.button('修正识别范围'));assert(!h.button('确认替换合格'));assert.equal(h.counts().remoteCreates,0);
+});
+test('unknown local retry exposes reconnect instead of another POST',async()=>{
+  const {h}=retryFixture('retry-offline');await h.mountEffects();await h.click('重新测试智能合成');assert(h.button('重新连接本地测试'));
+  await h.click('重新连接本地测试');assert.equal(h.calls.filter(c=>c.url.endsWith('/recompose')).length,1);assert.equal(h.counts().remoteCreates,0);
+});
+test('local-only resume and cancel ignore an invalid stored model token',async()=>{
+  const {job,h}=retryFixture('retry-normal');h.storage.set('replicate_api_token','不能作为请求头的凭据');
+  await h.service.resumeReplicationJob(job.id,true);await h.service.cancelReplicationJob(job.id,true);
+  assert.equal(h.calls.filter(c=>c.method==='POST').length,2);assert.equal(h.counts().remoteCreates,0);
 });
