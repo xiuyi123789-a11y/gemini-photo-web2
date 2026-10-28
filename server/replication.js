@@ -22,6 +22,8 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
   const view=async job=>({id:job.id,jobId:job.id,ownerId:job.ownerId,requestId:job.requestId,kind:job.kind,status:job.status,stage:job.stage,
     inputFingerprint:job.inputFingerprint,sourceHash:job.sourceHash,createdAt:job.createdAt,updatedAt:job.updatedAt,revision:job.revision,
     recoveryNeeded:!isFinalJob(job)&&(!job.workerLease||job.workerLease.until<=Date.now()),
+    outputRecoveryAvailable:job.kind==='generation'&&job.status==='quality_failed'&&job.errorCode==='OUTPUT_INVALID'&&!job.results.length&&
+      (await store.attempts(job.id)).some(a=>a.model===REPLICATION_MODELS.generation&&a.predictionId&&a.remoteStatus==='succeeded'),
     completed:job.kind==='analysis'?(job.status==='succeeded'?1:0):job.results.length,total:job.total,
     analysis:job.analysis||null,analysisJobId:job.analysisJobId||null,approvedAnalysis:job.approvedAnalysis||null,origin:job.origin||null,derivedFrom:job.derivedFrom||null,
     source:job.assets.source,references:job.assets.references,target:job.target||'',input:job.kind==='generation'?job.input:null,
@@ -130,6 +132,18 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
   }));
   router.post('/analysis',route((req,res)=>create(req,res,'analysis')));
   router.post('/generation',route((req,res)=>create(req,res,'generation')));
+  router.get('/workbench',route(async(req,res)=>{
+    // Completed outputs remain discoverable if local browser markers are lost.
+    // This endpoint only reads records, never wakes a worker or provider.
+    const jobs=(await store.list()).filter(j=>j.ownerId===req.userId&&(j.retainOriginals||!isFinalJob(j)||j.expiresAt>=Date.now()))
+      .sort((a,b)=>b.createdAt-a.createdAt||b.updatedAt-a.updatedAt);
+    const latest=jobs[0],context=latest?jobs.filter(j=>j.inputFingerprint===latest.inputFingerprint):[];
+    const newestAnalysis=context.find(j=>j.kind==='analysis');
+    const generation=context.find(j=>j.kind==='generation'&&(!newestAnalysis||j.createdAt>=newestAnalysis.createdAt));
+    const analysis=context.find(j=>j.kind==='analysis'&&(!generation||j.id===generation.analysisJobId))||newestAnalysis;
+    const intakes=await Promise.all(['analysis','generation'].map(kind=>store.activeRequests(req.userId,kind)));
+    res.json({jobs:await Promise.all([analysis,generation].filter(Boolean).map(view)),requests:intakes.flat().map(receiptView)});
+  }));
   router.get('/active',route(async(req,res)=>{
     if(!['analysis','generation'].includes(req.query.kind))throw fail('INPUT_INVALID');
     const jobs=(await store.list()).filter(j=>j.ownerId===req.userId&&j.kind===req.query.kind&&!isFinalJob(j));
@@ -143,7 +157,18 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
   const read=route(async(req,res)=>{const job=await own(req,req.params.id);res.json(await view(job));});
   router.get('/jobs/:id',read);router.get('/:id',read);
   router.post('/jobs/:id/resume',route(async(req,res)=>{
-    const job=await own(req,req.params.id);
+    let job=await own(req,req.params.id);
+    if(job.kind==='generation'&&job.status==='quality_failed'&&job.errorCode==='OUTPUT_INVALID'&&!job.results.length){
+      const attempts=await store.attempts(job.id);
+      if(attempts.some(a=>a.predictionId&&a.model===REPLICATION_MODELS.generation&&a.remoteStatus==='succeeded')){
+        const provider=getProvider(req);if(provider.accountRef!==job.providerAccountRef)throw fail('PROVIDER_ACCOUNT_MISMATCH',409);
+        if((await store.list()).some(j=>j.ownerId===job.ownerId&&j.id!==job.id&&!isFinalJob(j)))throw fail('TASK_BUSY',409);
+        // Reopen only this legacy download failure. resumeOnly below cannot
+        // create any missing prediction or charge for an additional sample.
+        job=await store.update(job.id,j=>j.status==='quality_failed'&&j.errorCode==='OUTPUT_INVALID'&&!j.results.length?
+          {...j,status:'postprocessing',stage:'postprocessing',errorCode:null,quality:null,workerLease:null}:null);
+      }
+    }
     if(job.origin==='local_recomposition'){resume(req,job);return res.json(await view(job));}
     if(!isFinalJob(job)&&!(await store.attempts(job.id)).length){
       if(job.workerLease?.until>Date.now())return res.json(await view(job));
@@ -218,7 +243,12 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
     const job=await own(req,req.params.id);
     const list=[job.assets.source,job.assets.inferenceSource,job.assets.guide,job.assets.raw,...job.assets.references,...job.results.flatMap(r=>[r.raw,r.composite,...Object.values(r.compositeMasks||{})]),job.pendingRaw].filter(Boolean);
     const asset=list.find(a=>a.name===req.params.name);if(!asset)throw fail('JOB_NOT_FOUND',404);
-    res.type('png').send(await assets.read(job,asset));
+    const preview=['1','canvas'].includes(req.query.preview),canvas=req.query.preview==='canvas';
+    const etag='"'+asset.sha256+(preview?(canvas?'-canvas-v1':'-preview-v1'):'')+'"';
+    // Recheck ownership before every 304, and never permit public image caching.
+    res.set({'Cache-Control':'private, max-age=0, must-revalidate',ETag:etag});res.vary('Cookie');res.vary('x-user-id');
+    if(req.get('If-None-Match')===etag)return res.status(304).end();
+    res.type(preview?'webp':'png').send(preview?await assets.thumbnail(job,asset,canvas):await assets.read(job,asset));
   }));
   // Cleanup is local-only, explicit, and never removes unresolved remote attempts.
   router.cleanup=async()=>{for(const job of await store.list())if(!job.retainOriginals&&isFinalJob(job)&&job.expiresAt<Date.now()){

@@ -139,7 +139,12 @@ export function createReplicationWorker({store,assets,vision,pollMs=1500,budgetM
         // Saved raw output survives even if local composition or quality checks fail.
         const url=Array.isArray(prediction.output)?prediction.output[0]:prediction.output;
         let rawAsset;
-        try {rawAsset=job.pendingRaw||await assets.saveRaw(job,index,url);}catch{await state(id,'quality_failed',{errorCode:'OUTPUT_INVALID',quality:{status:'failed',reasons:['OUTPUT_INVALID']}});return;}
+        try {rawAsset=job.pendingRaw||await assets.saveRaw(job,index,url);}catch(e){
+          if((await store.get(id)).cancelRequested)await state(id,'canceled',{errorCode:null,quality:null});
+          else if(e.code==='RESULT_DOWNLOAD_INTERRUPTED')await state(id,'running',{errorCode:'RESULT_DOWNLOAD_INTERRUPTED'});
+          else await state(id,'quality_failed',{errorCode:'OUTPUT_INVALID',quality:{status:'failed',reasons:['OUTPUT_INVALID']}});
+          return;
+        }
         const live=await store.update(id,j=>!isFinalJob(j)&&j.workerLease?.id===lease?{...j,pendingRaw:rawAsset}:null);
         if(isFinalJob(live)||live.workerLease?.id!==lease)return;
         if(job.input.outputMode==='model'){

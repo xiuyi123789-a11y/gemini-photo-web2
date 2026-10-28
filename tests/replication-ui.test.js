@@ -15,12 +15,13 @@ const contract=require(path.join(root,'shared/replication-contract.js'));
 const realSetTimeout=setTimeout;
 
 function harness(mode,storage=new Map(),serverSnapshot=null){
-  let cursor=0,values=[],effects=[],effectMounted=false,tree;
-  const calls=[],timeouts=[],downloads=[];let accepted=0,remoteCreates=0,currentJob=serverSnapshot?.currentJob||null,receipt=serverSnapshot?.receipt||null;
+  let cursor=0,values=[],effects=[],effectMounted=false,tree,memoComputations=0;
+  const calls=[],timeouts=[],downloads=[];let accepted=0,remoteCreates=0,currentJob=serverSnapshot?.currentJob||null,receipt=serverSnapshot?.receipt||null,lookupFailures=serverSnapshot?.lookupFailures||0;
   const storageApi={getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)};
   const react={createElement:(type,props,...children)=>({type,props:{...props,children}}),
     useState:initial=>{const i=cursor++;if(!(i in values))values[i]=typeof initial==='function'?initial():initial;return [values[i],value=>{values[i]=typeof value==='function'?value(values[i]):value;}];},
     useRef:initial=>{const i=cursor++;if(!(i in values))values[i]={current:initial};return values[i];},
+    useMemo:(fn,deps)=>{const i=cursor++;if(!(i in values)||deps.some((v,n)=>!Object.is(v,values[i].deps[n]))){memoComputations++;values[i]={deps,value:fn()};}return values[i].value;},
     useEffect:effect=>{cursor++;if(!effectMounted)effects.push(effect);}};
   const response=(status,value)=>new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}});
   const makeJob=(payload,status)=>({id:randomUUID(),jobId:'unused',ownerId:'owner-incident',requestId:payload.requestId,kind:'analysis',status,stage:status,
@@ -35,6 +36,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
     const method=options.method||'GET',body=options.body?JSON.parse(options.body):null;calls.push({method,url,requestId:body?.requestId,body});
     if(url==='/fake-raw.png')return new Response(new Uint8Array([1,2,3]),{headers:{'Content-Type':'image/png'}});
     if(url.endsWith('/capabilities'))return response(200,{enabled:!mode.startsWith('retry-'),maxReferences:6,counts:[1],resolutions:['1K','2K'],...(mode==='no-segmenter'?{adaptiveComposition:{configured:false}}:{}),...(mode==='generation-only'?{submission:{analysis:false,generation:true}}:{})});
+    if(url.endsWith('/workbench'))return response(200,{jobs:serverSnapshot?.workbenchJobs||[],requests:receipt&&['reserved','preparing'].includes(receipt.state)?[receipt]:[]});
     if(url.includes('/active?'))return response(200,{jobs:[],requests:receipt&&url.endsWith(receipt.kind)&&['reserved','preparing'].includes(receipt.state)?[receipt]:[]});
     if(url.endsWith('/requests')&&method==='POST'){
       if(mode==='offline')throw new TypeError('MOCK disconnected');
@@ -82,7 +84,11 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
       return response(202,currentJob);
     }
     if(url.includes('/request/'))return currentJob&&url.endsWith(currentJob.requestId)?response(200,currentJob):response(404,{errorCode:'JOB_NOT_FOUND'});
-    if(url.includes('/jobs/')){const job=serverSnapshot?.jobs?.[url.split('/jobs/')[1]]||currentJob;return job?response(200,job):response(404,{errorCode:'JOB_NOT_FOUND'});}
+    if(mode==='output-recovery'&&method==='POST'&&url.endsWith('/resume')){
+      currentJob={...currentJob,status:'completed_needs_review',stage:'completed_needs_review',revision:2,errorCode:null,error:null,outputRecoveryAvailable:false,
+        results:[{raw:{url:'/fake-raw.png'},composite:null,quality:{status:'needs_review'}}]};return response(200,currentJob);
+    }
+    if(url.includes('/jobs/')){if(lookupFailures-->0)throw new TypeError('Mock lost GET response');const job=mode==='output-recovery'?currentJob:serverSnapshot?.jobs?.[url.split('/jobs/')[1]]||currentJob;return job?response(200,job):response(404,{errorCode:'JOB_NOT_FOUND'});}
     throw new Error('Unexpected mock route '+method+' '+url);
   };
   class FakeImage{naturalWidth=96;naturalHeight=64;set src(v){queueMicrotask(()=>this.onload());}}
@@ -126,6 +132,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
       await pause(5);render();}
   }
   async function mountEffects(){effects.forEach(fn=>fn());effectMounted=true;await pause(15);render();}
+  async function waitFor(predicate){const deadline=Date.now()+1500;do{render();if(predicate())return;await pause(5);}while(Date.now()<deadline);assert.fail('Mock UI did not reach the expected state');}
   function change(label,value){render();const node=nodes(tree).find(node=>node.type==='input'&&node.props['aria-label']===label);assert(node);assert(!node.props.disabled);node.props.onChange({target:{value,checked:value}});render();}
   async function paint(points){
     const element={getScreenCTM:()=>({inverse:()=>({})}),setPointerCapture:()=>{},hasPointerCapture:()=>true,releasePointerCapture:()=>{}};
@@ -136,7 +143,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
     render();nodes(tree).find(node=>node.props?.['aria-label']==='涂抹替换范围画布').props.onPointerUp({pointerId:1,currentTarget:element});render();
   }
   render();
-  return {storage,calls,timeouts,downloads,render,button,click,upload,mountEffects,change,paint,nodes:()=>nodes(tree),snapshot:()=>({receipt,currentJob}),label:()=>label(tree),counts:()=>({accepted,remoteCreates}),service:compile('services/replicationService.ts')};
+  return {storage,calls,timeouts,downloads,render,button,click,upload,mountEffects,waitFor,change,paint,nodes:()=>nodes(tree),snapshot:()=>({receipt,currentJob}),label:()=>label(tree),counts:()=>({accepted,remoteCreates}),memoComputations:()=>memoComputations,service:compile('services/replicationService.ts')};
 }
 
 test('interrupted upload: durable seal ends loading, clears the orphan only after acknowledgment, and permits a new submit',async()=>{
@@ -332,4 +339,82 @@ test('local-only resume and cancel ignore an invalid stored model token',async()
   const {job,h}=retryFixture('retry-normal');h.storage.set('replicate_api_token','不能作为请求头的凭据');
   await h.service.resumeReplicationJob(job.id,true);await h.service.cancelReplicationJob(job.id,true);
   assert.equal(h.calls.filter(c=>c.method==='POST').length,2);assert.equal(h.counts().remoteCreates,0);
+});
+
+async function completedWorkbench(){
+  const original=harness('normal');await original.upload();await original.click('识别产品与替换位置');
+  const analysis=structuredClone(original.snapshot().currentJob);analysis.analysis.confirmedAt=1;analysis.createdAt=100;
+  await original.paint([{x:.2,y:.4},{x:.3,y:.5}]);original.change('确认本次替换费用',true);await original.click('开始替换');
+  const generation={...original.snapshot().currentJob,createdAt:200,results:[{raw:{url:'/fake-raw.png'},composite:null,quality:{status:'needs_review'}}]};
+  return {analysis,generation,storage:new Map(original.storage),jobs:{[analysis.id]:analysis,[generation.id]:generation}};
+}
+
+test('fee checkbox remains usable before painting or with a mismatched brush, but invalid selection cannot create an image',async()=>{
+  const h=harness('normal');await h.upload();await h.click('识别产品与替换位置');
+  h.change('确认本次替换费用',true);assert(h.button('开始替换').props.disabled);
+  await h.paint([{x:.5,y:.02},{x:.9,y:.02}]);h.change('确认本次替换费用',true);
+  assert(h.button('开始替换').props.disabled);assert(h.label().includes('涂抹与AI定位不一致'));assert.equal(h.counts().remoteCreates,1);
+  await h.click('清空涂抹');await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);h.change('确认本次替换费用',true);
+  assert(!h.button('开始替换').props.disabled);assert(!h.calls.some(c=>c.url.endsWith('/generation')));
+});
+
+test('refresh with lost local markers restores the completed model result from one read-only server snapshot',async()=>{
+  const f=await completedWorkbench(),h=harness('normal',new Map(),{...f,workbenchJobs:[f.analysis,f.generation]});await h.mountEffects();
+  const img=h.nodes().find(n=>n.type==='img'&&n.props.alt==='生成结果');assert.equal(img.props.src,'/fake-raw.png');
+  assert(!h.button('下载图片').props.disabled);assert(h.label().includes('图片已生成'));
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/workbench')).length,1);
+  assert.equal(h.calls.filter(c=>c.url.includes('/jobs/')||c.method==='POST').length,0);
+  assert(!h.nodes().find(n=>n.type==='input'&&n.props['aria-label']==='确认本次替换费用').props.checked);
+});
+
+test('a stale analysis marker cannot replace the newer generation materials or bind old instance positions to new images',async()=>{
+  const f=await completedWorkbench(),old={...structuredClone(f.analysis),id:randomUUID(),requestId:randomUUID(),inputFingerprint:'old-fingerprint',createdAt:1};
+  f.storage.set('replication_v2_analysis',JSON.stringify({kind:'analysis',ownerId:old.ownerId,jobId:old.id,requestId:old.requestId,inputFingerprint:old.inputFingerprint}));
+  const h=harness('normal',f.storage,{...f,jobs:{...f.jobs,[old.id]:old},workbenchJobs:[f.analysis,f.generation]});await h.mountEffects();
+  assert.equal(JSON.parse(h.storage.get('replication_v2_analysis')).jobId,f.analysis.id);
+  assert.equal(h.nodes().find(n=>n.type==='img'&&n.props.alt==='生成结果').props.src,'/fake-raw.png');
+  h.change('确认本次替换费用',true);assert(!h.button('重新生成一张').props.disabled);
+  assert(!h.calls.some(c=>c.method==='POST'));assert.equal(h.counts().remoteCreates,0);
+});
+
+test('two lost GET responses recover the existing finished image without repeating POST or reverting to the original',async()=>{
+  const f=await completedWorkbench();f.storage.delete('replication_v2_analysis');
+  const h=harness('normal',f.storage,{...f,lookupFailures:2});await h.mountEffects();
+  await h.waitFor(()=>h.nodes().some(n=>n.type==='img'&&n.props.alt==='生成结果'));
+  assert.equal(h.nodes().find(n=>n.type==='img'&&n.props.alt==='生成结果').props.src,'/fake-raw.png');
+  assert.equal(h.calls.filter(c=>c.url.includes('/jobs/')).length,3);assert(!h.calls.some(c=>c.method==='POST'));
+});
+
+test('image-load retry retains the generated asset and download, and never substitutes the original or sends a model POST',async()=>{
+  const f=await completedWorkbench();f.generation.results[0].raw.url='/api/replication/assets/'+f.generation.id+'/raw-1.png?owner=owner-incident';
+  const h=harness('normal',new Map(),{...f,workbenchJobs:[f.analysis,f.generation]});await h.mountEffects();
+  h.nodes().find(n=>n.type==='img'&&n.props.alt==='生成结果').props.onError();h.render();
+  assert(h.label().includes('任务和生成结果已保留'));assert(!h.button('下载图片').props.disabled);
+  await h.click('重新加载图片');const img=h.nodes().find(n=>n.type==='img'&&n.props.alt==='生成结果');
+  assert(img.props.src.includes('/raw-1.png'));assert(img.props.src.includes('retry=1'));img.props.onLoad();h.render();assert(!h.button('重新加载图片'));
+  assert(!h.calls.some(c=>c.method==='POST'));assert(!h.nodes().some(n=>n.type==='img'&&n.props.alt==='场景原图'));
+  h.nodes().find(n=>n.props.role==='tab'&&n.props.children.includes('场景原图')).props.onClick();h.render();
+  h.nodes().find(n=>n.type==='img'&&n.props.alt==='场景原图缩略图').props.onError();h.render();
+  h.nodes().find(n=>n.type==='img'&&n.props.alt==='场景原图').props.onLoad();h.render();
+  assert(h.button('重新加载图片'),'a successful canvas load must not erase a separate thumbnail failure');
+  h.nodes().find(n=>n.type==='img'&&n.props.alt==='场景原图缩略图').props.onLoad();h.render();assert(!h.button('重新加载图片'));
+});
+
+test('hover and unrelated renders reuse brush matching; concurrent reads coalesce without changing POST semantics',async()=>{
+  const h=harness('normal');await h.upload();await h.click('识别产品与替换位置');await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);
+  const before=h.memoComputations();for(let i=0;i<25;i++){h.nodes().find(n=>n.props['aria-label']==='涂抹替换范围画布').props.onPointerMove({clientX:10+i,clientY:10,currentTarget:{getScreenCTM:()=>({inverse:()=>({})})}});h.render();}
+  assert.equal(h.memoComputations(),before);
+  const id=h.snapshot().currentJob.id,reads=h.calls.filter(c=>c.url.includes('/jobs/')).length;
+  await Promise.all([h.service.getReplicationJob(id),h.service.getReplicationJob(id)]);
+  assert.equal(h.calls.filter(c=>c.url.includes('/jobs/')).length,reads+1);assert(h.timeouts.includes(15000));
+});
+
+test('legacy missing output exposes an explicit read/download recovery action, rather than silently presenting the original as a result',async()=>{
+  const f=await completedWorkbench();Object.assign(f.generation,{status:'quality_failed',errorCode:'OUTPUT_INVALID',error:'模型图片未取回',outputRecoveryAvailable:true,results:[]});
+  const h=harness('output-recovery',new Map(),{...f,currentJob:f.generation,workbenchJobs:[f.analysis,f.generation]});await h.mountEffects();
+  assert(h.button('取回已生成图片'));assert(h.button('下载图片').props.disabled);await h.click('取回已生成图片');
+  assert.equal(h.nodes().find(n=>n.type==='img'&&n.props.alt==='生成结果').props.src,'/fake-raw.png');
+  assert(!h.button('取回已生成图片'));assert(!h.button('下载图片').props.disabled);
+  assert.equal(h.calls.filter(c=>c.method==='POST').length,1);assert(h.calls.find(c=>c.method==='POST').url.endsWith('/resume'));
+  assert.equal(h.counts().remoteCreates,0);
 });

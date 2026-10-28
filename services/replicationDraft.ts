@@ -3,6 +3,11 @@
 type DraftImage={file:File;width:number;height:number;angle?:string};
 export type ReplicationDraft={version:1;source:DraftImage;references:DraftImage[];savedAt:number};
 let database:Promise<IDBDatabase>|undefined;
+async function bounded<T>(work:Promise<T>,fallback:T):Promise<T>{
+  let timer:ReturnType<typeof setTimeout>;
+  try{return await Promise.race([work,new Promise<T>(resolve=>{timer=setTimeout(()=>resolve(fallback),1500);})]);}
+  finally{clearTimeout(timer!);}
+}
 function open():Promise<IDBDatabase>{
   if(!database)database=new Promise<IDBDatabase>((resolve,reject)=>{
     const request=indexedDB.open('replication-upload-drafts',1);
@@ -20,12 +25,12 @@ export async function saveReplicationDraft(owner:string,draft:ReplicationDraft):
 }
 export async function loadReplicationDraft(owner:string):Promise<ReplicationDraft|null>{
   if(typeof indexedDB==='undefined')return null;
-  try{const db=await open();return await new Promise((resolve,reject)=>{
+  try{return await bounded((async()=>{const db=await open();return await new Promise<ReplicationDraft|null>((resolve,reject)=>{
     const r=db.transaction('drafts','readonly').objectStore('drafts').get(owner);
     r.onsuccess=()=>{const d=r.result;
       resolve(d?.version===1&&d.source?.file instanceof Blob&&Array.isArray(d.references)&&d.references.every(i=>i.file instanceof Blob)?d:null);};
     r.onerror=()=>reject(r.error);
-  });}catch{return null;}
+  });})(),null);}catch{return null;}
 }
 export async function clearReplicationDraft(owner:string):Promise<void>{
   if(typeof indexedDB==='undefined')return;

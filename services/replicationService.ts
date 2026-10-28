@@ -24,6 +24,7 @@ export type ReplicationJob = {
   errorCode:string|null;error:string|null;quality:Quality|null;pendingRaw:Asset|null;
   recoveryErrorCode?:string|null;
   recoveryNeeded?:boolean;
+  outputRecoveryAvailable?:boolean;
   origin?:string|null;derivedFrom?:string|null;
   input?:{masks:EditMask[];protectMasks:Point[][];brush?:BrushSelection;selectedInstances:string[];resolution:string;contourHints?:ContourHint[]};
   predictions:Array<{model:string;predictionId:string|null;remoteStatus:string;reconciliationState:string}>;
@@ -49,15 +50,23 @@ export const readOperation=(kind:ReplicationKind):Operation|null=>{
 export const saveOperation=(operation:Operation)=>userStorage.setItem(recoveryKey(operation.kind),JSON.stringify(operation));
 export const forgetOperation=(kind:ReplicationKind)=>userStorage.removeItem(recoveryKey(kind));
 export const assertOperation=(operation:Operation,job:ReplicationJob)=>{if(!matchesOperation(operation,job))throw new Error('恢复任务与账号、素材或操作类型不一致，已阻止关联。');};
+const reads=new Map<string,Promise<any>>();
 async function request(path:string,body?:unknown,localOnly=false):Promise<any> {
+  const key=ownerId()+':'+path;
+  if(body===undefined&&reads.has(key))return reads.get(key);
+  const run=async()=>{
   const token=!localOnly&&/^\/(analysis|generation|connectivity)$|\/(resume|cancel|reconcile)$/.test(path)?validToken():null;
   const requestId=(body as any)?.requestId;
   const response=await fetch('/api/replication'+path,{method:body===undefined?'GET':'POST',credentials:'same-origin',
     headers:{'Content-Type':'application/json','x-user-id':getUserId(),...(token?{'x-replicate-token':token}:{}),...(requestId?{'x-replication-request-id':requestId}:{})},
-    ...(body===undefined?{}:{body:JSON.stringify(body)}),signal:AbortSignal.timeout(60000)});
+    ...(body===undefined?{}:{body:JSON.stringify(body)}),signal:AbortSignal.timeout(body===undefined?15000:60000)});
   const data=await response.json().catch(()=>({}));
   if(!response.ok)throw Object.assign(new Error(ERROR_MESSAGES[data.errorCode]||data.error||`请求未完成（HTTP ${response.status}）`),{status:response.status,code:data.errorCode});
   return data;
+  };
+  if(body!==undefined)return run(); // Paid POSTs are never retried or coalesced.
+  const pending=run().finally(()=>{if(reads.get(key)===pending)reads.delete(key);});
+  reads.set(key,pending);return pending;
 }
 function validToken():string|null {
   const value=userStorage.getItem('replicate_api_token')?.trim();
@@ -67,6 +76,15 @@ function validToken():string|null {
 export const getReplicationJob=(id:string):Promise<ReplicationJob>=>request('/jobs/'+encodeURIComponent(id));
 export const findReplicationRequest=(id:string):Promise<ReplicationJob>=>request('/request/'+encodeURIComponent(id));
 export const listActiveJobs=(kind:ReplicationKind):Promise<{jobs:ReplicationJob[];requests?:RequestReceipt[]}>=>request('/active?kind='+kind);
+export async function getReplicationWorkbench():Promise<{jobs:ReplicationJob[];requests:RequestReceipt[]}>{
+  try{return await request('/workbench');}catch(e){if((e as any).status!==404)throw e;}
+  const lists=await Promise.all([listActiveJobs('analysis'),listActiveJobs('generation')]);
+  return {jobs:lists.flatMap(l=>l.jobs),requests:lists.flatMap(l=>l.requests||[])};
+}
+export function replicationImageUrl(url:string,thumbnail:boolean|'canvas'=false,retry=0):string{
+  if(!url.startsWith('/api/replication/assets/'))return url;
+  return url+(thumbnail?(url.includes('?')?'&':'?')+'preview='+(thumbnail==='canvas'?'canvas':'1'):'')+(retry?((url.includes('?')||thumbnail)?'&':'?')+'retry='+retry:'');
+}
 export const resumeReplicationJob=(id:string,localOnly=false):Promise<ReplicationJob>=>request('/jobs/'+encodeURIComponent(id)+'/resume',{},localOnly);
 export const cancelReplicationJob=(id:string,localOnly=false):Promise<ReplicationJob>=>request('/jobs/'+encodeURIComponent(id)+'/cancel',{},localOnly);
 export const checkReplicationConnection=():Promise<any>=>request('/connectivity',{});

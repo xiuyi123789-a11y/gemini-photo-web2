@@ -63,6 +63,7 @@ export const ERROR_MESSAGES = {
   FEATURE_DISABLED: '图像复刻新任务入口已关闭，现有任务仍可查询。',
   QUALITY_FAILED: '结果未通过图像检查，请查看原始结果与问题说明。',
   OUTPUT_INVALID: '模型输出不是可用图片，未标记为复刻成功。',
+  RESULT_DOWNLOAD_INTERRUPTED: '模型已生成，图片下载中断。请重新连接取回原结果；不会重新生图。',
   INPUT_INVALID: '素材或参数无效，请检查后重试。',
   TOKEN_INVALID: 'Replicate Token 无效或无模型权限。',
   BALANCE_REQUIRED: 'Replicate 额度不足。',

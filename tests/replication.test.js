@@ -72,6 +72,74 @@ async function waitFor(h,id,predicate=j=>isFinalJob(j)||['submission_unknown','c
 async function analyze(h){const r=await h.request('/analysis',analysisBody());assert.equal(r.status,202);return waitFor(h,(await r.json()).id);}
 async function approved(h){const j=await analyze(h);const response=await h.request('/jobs/'+j.id+'/revision',{text:j.analysis.text,previousHash:j.analysis.revisionHash});assert.equal(response.status,200);return response.json();}
 
+test('workbench recovers the latest completed original model image after restart, is owner-isolated and never wakes a provider',async()=>{
+  const h=await harness();try{
+    const a=await approved(h),r=await h.request('/generation',generationBody(a,{outputMode:'model'}));assert.equal(r.status,202);
+    const g=await waitFor(h,(await r.json()).id);assert(g.results[0].raw.url);const count=h.created.length,queries=h.queried.length;
+    await h.restart();
+    for(let i=0;i<3;i++){
+      const snapshot=await(await h.request('/workbench')).json();
+      assert.equal(snapshot.jobs.find(j=>j.kind==='analysis').id,a.id);
+      const restored=snapshot.jobs.find(j=>j.kind==='generation');assert.equal(restored.id,g.id);assert.equal(restored.results[0].raw.sha256,g.results[0].raw.sha256);
+    }
+    assert.deepEqual((await(await h.request('/workbench',undefined,'bob')).json()).jobs,[]);
+    assert.equal(h.created.length,count);assert.equal(h.queried.length,queries);
+    await pause(3);const next=await analyze(h);
+    const snapshot=await(await h.request('/workbench')).json();assert.equal(snapshot.jobs.length,1);assert.equal(snapshot.jobs[0].id,next.id);
+  }finally{await h.close();}
+});
+
+test('private conditional image caching and bounded thumbnails preserve full output and recheck ownership before 304',async()=>{
+  const h=await harness();try{
+    const a=await analyze(h),url=a.source.url.replace('/api/replication','').split('?')[0];
+    const full=await h.request(url);assert.equal(full.status,200);const etag=full.headers.get('etag');assert.match(full.headers.get('cache-control'),/private/);
+    assert.equal(sha256(Buffer.from(await full.arrayBuffer())),a.source.sha256);
+    const cached=await fetch(full.url,{headers:{'x-user-id':'alice','If-None-Match':etag}});assert.equal(cached.status,304);assert.equal((await cached.arrayBuffer()).byteLength,0);
+    assert.equal((await fetch(full.url,{headers:{'x-user-id':'bob','If-None-Match':etag}})).status,404);
+    const preview=await h.request(url+'?preview=1');assert.equal(preview.status,200);assert.match(preview.headers.get('content-type'),/image\/webp/);assert.notEqual(preview.headers.get('etag'),etag);
+    const meta=await sharp(Buffer.from(await preview.arrayBuffer())).metadata();assert(meta.width<=384&&meta.height<=384);
+    const canvas=await h.request(url+'?preview=canvas');assert.match(canvas.headers.get('content-type'),/webp/);assert.notEqual(canvas.headers.get('etag'),preview.headers.get('etag'));
+    const canvasMeta=await sharp(Buffer.from(await canvas.arrayBuffer())).metadata();assert(canvasMeta.width<=1600&&canvasMeta.height<=1600);
+    assert.equal(h.created.length,1);
+  }finally{await h.close();}
+});
+
+test('a completed prediction with an interrupted download resumes by the same ID after restart and creates zero replacement predictions',async()=>{
+  const h=await harness();try{
+    const a=await approved(h),save=h.assets.saveRaw.bind(h.assets);let downloads=0;
+    h.assets.saveRaw=async(...args)=>{if(++downloads===1)throw Object.assign(new Error('mock download interruption'),{code:'RESULT_DOWNLOAD_INTERRUPTED'});return save(...args);};
+    const r=await h.request('/generation',generationBody(a,{outputMode:'model'}));
+    const g=await waitFor(h,(await r.json()).id,j=>j.errorCode==='RESULT_DOWNLOAD_INTERRUPTED');assert.equal(g.status,'running');assert.equal(g.results.length,0);
+    const ids=(await h.store.attempts(g.id)).map(a=>a.predictionId),count=h.created.length;
+    await h.restart();await h.request('/workbench');await h.request('/jobs/'+g.id);assert.equal(downloads,1,'GET must not retry downloads or dispatch work');
+    assert.equal((await h.request('/jobs/'+g.id+'/resume',{})).status,200);const done=await waitFor(h,g.id);
+    assert.equal(done.status,'completed_needs_review');assert(done.results[0].raw.url);assert.equal(h.created.length,count);
+    assert.deepEqual((await h.store.attempts(g.id)).map(a=>a.predictionId),ids);assert.equal(downloads,2);
+  }finally{await h.close();}
+});
+
+test('legacy OUTPUT_INVALID download failures can recover their existing successful prediction, without changing model, ID or cost',async()=>{
+  const h=await harness();try{
+    const a=await approved(h),save=h.assets.saveRaw.bind(h.assets);let failed=false;
+    h.assets.saveRaw=async(...args)=>{if(!failed){failed=true;throw new Error('old download failure');}return save(...args);};
+    const r=await h.request('/generation',generationBody(a,{outputMode:'model'})),g=await waitFor(h,(await r.json()).id);
+    assert.equal(g.status,'quality_failed');assert.equal(g.outputRecoveryAvailable,true);assert.equal(g.errorCode,'OUTPUT_INVALID');const count=h.created.length;
+    assert.equal((await h.request('/jobs/'+g.id+'/resume',{},'alice','wrong')).status,409);
+    assert.equal((await h.request('/jobs/'+g.id+'/resume',{})).status,200);const done=await waitFor(h,g.id);
+    assert.equal(done.status,'completed_needs_review');assert.equal(done.outputRecoveryAvailable,false);assert(done.results[0].raw.url);assert.equal(h.created.length,count);
+    assert.equal((await h.store.attempts(g.id)).length,1);
+  }finally{await h.close();}
+});
+
+test('stopping retrieval of an unavailable generated image releases the local busy state without a replacement prediction',async()=>{
+  const h=await harness();try{
+    const a=await approved(h);h.assets.saveRaw=async()=>{throw Object.assign(new Error('mock unavailable output'),{code:'RESULT_DOWNLOAD_INTERRUPTED'});};
+    const r=await h.request('/generation',generationBody(a,{outputMode:'model'}));const g=await waitFor(h,(await r.json()).id,j=>j.errorCode==='RESULT_DOWNLOAD_INTERRUPTED');
+    const count=h.created.length;await h.request('/jobs/'+g.id+'/cancel',{});const done=await waitFor(h,g.id);
+    assert.equal(done.status,'canceled');assert.equal(h.created.length,count);assert.equal((await h.store.attempts(g.id)).length,1);
+  }finally{await h.close();}
+});
+
 test('generation-only admission preserves existing analysis, denies new analysis receipts and accepts one explicit new image task',async()=>{
   let generationOnly=false;
   const h=await harness({canSubmit:(kind,req)=>!generationOnly||kind==='generation'&&req.userId==='alice'});

@@ -14,7 +14,7 @@ function service(state={records:new Map(),failWrite:false}){
       })};return tx;
     }};request.onsuccess();
   });return request;}};
-  const context=vm.createContext({indexedDB,Blob,File,console});
+  const context=vm.createContext({indexedDB:state.blocked?{open:()=>({})}:indexedDB,Blob,File,console,setTimeout:(fn,ms)=>setTimeout(fn,Math.min(ms,25)),clearTimeout});
   const code=ts.transpileModule(readFileSync('services/replicationDraft.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
   const module={exports:{}};vm.runInContext('(function(module,exports){'+code+'\n})',context)(module,module.exports);
   return module.exports;
@@ -33,4 +33,8 @@ test('draft storage failures do not throw or lock the page and cannot erase the 
   const draft={version:1,source:{file:new File(['a'],'a.png'),width:1,height:1},references:[],savedAt:1};
   assert(await s.saveReplicationDraft('alice',draft));state.failWrite=true;
   assert.equal(await s.saveReplicationDraft('alice',{...draft,savedAt:2}),false);assert.equal((await s.loadReplicationDraft('alice')).savedAt,1);
+});
+
+test('blocked IndexedDB cannot hold task and result recovery indefinitely',async()=>{
+  const s=service({blocked:true});assert.equal(await s.loadReplicationDraft('alice'),null);
 });

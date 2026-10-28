@@ -40,6 +40,7 @@ export function decodeImage(value) {
   return bytes;
 }
 export function createReplicationAssets(dataDir,{download=downloadModelImage}={}) {
+  const thumbnails=new Map();
   const base=path.resolve(dataDir);
   const directory=job=>{
     if(!/^[a-zA-Z0-9-]+$/.test(job.ownerId)||!/^[0-9a-f-]{36}$/.test(job.id))throw invalid();
@@ -77,6 +78,15 @@ export function createReplicationAssets(dataDir,{download=downloadModelImage}={}
       }catch(e){if(e.status)throw e;throw preparationFailure();}
     },
     read:(job,asset)=>fs.readFile(path.join(directory(job),filename(asset.name))),
+    async thumbnail(job,asset,canvas=false){
+      const edge=canvas?1600:384,key=directory(job)+'/'+filename(asset.name)+':'+asset.sha256+':'+edge;
+      if(!thumbnails.has(key)){
+        const pending=this.read(job,asset).then(bytes=>sharp(bytes,{limitInputPixels:64*1024*1024}).resize({width:edge,height:edge,fit:'inside',withoutEnlargement:true}).webp({quality:canvas?90:80}).toBuffer())
+          .catch(e=>{thumbnails.delete(key);throw e;});
+        thumbnails.set(key,pending);if(thumbnails.size>24)thumbnails.delete(thumbnails.keys().next().value);
+      }
+      return thumbnails.get(key);
+    },
     async cloneMaterials(job,fromJob) {
       const source={...fromJob.assets.source,...await save(job,'source.png',await this.read(fromJob,fromJob.assets.source))};
       const references=[];
@@ -101,9 +111,12 @@ export function createReplicationAssets(dataDir,{download=downloadModelImage}={}
 export async function downloadModelImage(url) {
   let u;try{u=new URL(url);}catch{throw invalid();}
   if(u.protocol!=='https:'||u.username||u.password||!(u.hostname==='replicate.delivery'||u.hostname.endsWith('.replicate.delivery')))throw invalid();
-  const r=await fetch(u,{redirect:'error',signal:AbortSignal.timeout(60000)});
-  if(!r.ok||!r.body||Number(r.headers.get('content-length'))>50*1024*1024)throw invalid();
-  let size=0;const chunks=[];
-  for await(const c of r.body){size+=c.length;if(size>50*1024*1024)throw invalid();chunks.push(c);}
-  return Buffer.concat(chunks);
+  try{
+    const r=await fetch(u,{redirect:'error',signal:AbortSignal.timeout(60000)});
+    if(!r.ok||!r.body)throw new Error('RESULT_DOWNLOAD_INTERRUPTED');
+    if(Number(r.headers.get('content-length'))>50*1024*1024)throw invalid();
+    let size=0;const chunks=[];
+    for await(const c of r.body){size+=c.length;if(size>50*1024*1024)throw invalid();chunks.push(c);}
+    return Buffer.concat(chunks);
+  }catch(e){if(e.code==='INPUT_INVALID')throw e;throw Object.assign(new Error('RESULT_DOWNLOAD_INTERRUPTED'),{code:'RESULT_DOWNLOAD_INTERRUPTED',status:502});}
 }
