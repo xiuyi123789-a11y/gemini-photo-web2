@@ -9,11 +9,17 @@ async function raster(width,height,polygons) {
     polygons.map(points=>`<polygon fill="white" points="${points.map(p=>`${p.x*width},${p.y*height}`).join(' ')}"/>`).join('')+'</svg>';
   return sharp(Buffer.from(svg)).removeAlpha().greyscale().raw().toBuffer();
 }
-export async function prepareMasks(width,height,masks,protectMasks,{brush,subjects=[]}={}) {
+export async function prepareMasks(width,height,masks,protectMasks,{brush,subjects=[],userBrush=false}={}) {
   const edit=brush?await sharp(Buffer.from(brushSvg(brush,width,height))).removeAlpha().greyscale().raw().toBuffer():await raster(width,height,masks.map(m=>m.points));
   const protect=await raster(width,height,protectMasks);
   const instances=[];
-  if(brush){
+  if(brush&&userBrush){
+    // In the direct-model flow the guide is the user's selection. Incorrect AI
+    // boxes may neither clip it nor turn its painted pixels into protected pixels.
+    let count=0;for(let i=0;i<edit.length;i++)if(edit[i]>128&&!protect[i])count++;
+    if(count<4)throw Object.assign(new Error('TARGET_SELECTION_REQUIRED'),{code:'TARGET_SELECTION_REQUIRED',status:422});
+    instances.push({instanceId:'user-brush',pixels:Buffer.from(edit),count});
+  }else if(brush){
     const match=matchBrushSubjects(brush,subjects,width,height);
     if(!match.valid)throw Object.assign(new Error('TARGET_SELECTION_REQUIRED'),{code:'TARGET_SELECTION_REQUIRED',status:422});
     // Protect every unselected recognized object, even an incidental brush edge.
@@ -42,7 +48,7 @@ export async function prepareMasks(width,height,masks,protectMasks,{brush,subjec
 
 export async function createRegionGuide(source,input,subjects){
   const {data,info}=await sharp(source).rotate().toColourspace('srgb').ensureAlpha().raw().toBuffer({resolveWithObject:true});
-  const {edit,protect}=await prepareMasks(info.width,info.height,input.masks,input.protectMasks,{brush:input.brush,subjects});
+  const {edit,protect}=await prepareMasks(info.width,info.height,input.masks,input.protectMasks,{brush:input.brush,subjects,userBrush:input.selectionMode==='user-brush'});
   const colors=[48,116,255];
   for(let i=0;i<edit.length;i++)if(edit[i]&&!protect[i])for(let c=0;c<3;c++)data[i*4+c]=Math.round(data[i*4+c]*(1-.5*edit[i]/255)+colors[c]*.5*edit[i]/255);
   return sharp(data,{raw:{width:info.width,height:info.height,channels:4}}).resize({width:1536,height:1536,fit:'inside',withoutEnlargement:true}).png().toBuffer();

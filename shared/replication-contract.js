@@ -53,6 +53,7 @@ export const ERROR_MESSAGES = {
   ANALYSIS_SCHEMA_INVALID: '分析返回不完整或格式不符合要求，未启动生图。可查看原始分析文本。',
   ANALYSIS_STALE: '素材或分析版本已改变，请重新分析并确认。',
   TARGET_SELECTION_REQUIRED: '请在识别到的产品上涂抹，确认需要替换的范围。',
+  BRUSH_CONFIRMATION_REQUIRED: 'AI定位与涂抹有差异，请确认以当前涂抹为准后继续。',
   IDEMPOTENCY_CONFLICT: '请求标识已用于不同内容，已阻止重复提交。',
   SUBMISSION_UNKNOWN: '提交结果待核对；可能已创建远端任务，不会自动重新提交。',
   CANCEL_UNKNOWN: '远端取消未确认，请核对供应商运行记录；仍可能计费。',

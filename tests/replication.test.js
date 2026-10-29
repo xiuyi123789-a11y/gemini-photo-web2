@@ -72,6 +72,35 @@ async function waitFor(h,id,predicate=j=>isFinalJob(j)||['submission_unknown','c
 async function analyze(h){const r=await h.request('/analysis',analysisBody());assert.equal(r.status,202);return waitFor(h,(await r.json()).id);}
 async function approved(h){const j=await analyze(h);const response=await h.request('/jobs/'+j.id+'/revision',{text:j.analysis.text,previousHash:j.analysis.revisionHash});assert.equal(response.status,200);return response.json();}
 
+test('user brush outside all AI boxes requires target consent, then generates once with the full guide and no invented instance IDs',async()=>{
+  const h=await harness();try{
+    const a=await approved(h),brush={version:1,strokes:[{tool:'paint',size:.12,points:[{x:.25,y:.08},{x:.85,y:.08}]}]};
+    const input=generationBody(a,{outputMode:'model',selectionMode:'user-brush',selectionOverrideConfirmed:false,selectedInstances:[],masks:[],protectMasks:[],brush});
+    assert.equal(matchBrushSubjects(brush,a.analysis.data.scene.old_product_instances,96,64).outsideFraction,1);
+    const blocked=await h.request('/generation',input);assert.equal(blocked.status,422);assert.equal((await blocked.json()).errorCode,'BRUSH_CONFIRMATION_REQUIRED');assert.equal(h.created.length,1);
+    const accepted={...input,selectionOverrideConfirmed:true};
+    const r=await h.request('/generation',accepted);assert.equal(r.status,202);const g=await waitFor(h,(await r.json()).id);
+    assert.equal(g.status,'completed_needs_review');assert.equal(h.created.length,2);assert.equal(h.created[1].model,REPLICATION_MODELS.generation);
+    assert.equal(h.created[1].input.image_input.length,4);assert.match(h.created[1].input.prompt,/用户确认：以区域指引图中的蓝色涂抹/);assert(!h.created[1].input.prompt.includes('"bbox":'));
+    const stored=await h.store.get(g.id),guide=await h.assets.read(stored,stored.assets.guide),{data,info}=await sharp(guide).raw().toBuffer({resolveWithObject:true});
+    const p=(Math.floor(info.height*.08)*info.width+Math.floor(info.width*.5))*info.channels;assert(data[p+2]>data[p]+40,'paint outside AI boxes must remain blue in the guide');
+    assert.equal((await h.request('/generation',accepted)).status,202);assert.equal(h.created.length,2);
+  }finally{await h.close();}
+});
+
+test('manual selection cannot bypass empty brushes, target consent, image mode, identity, or fee validation',async()=>{
+  const h=await harness();try{
+    const a=await approved(h),brush={version:1,strokes:[{tool:'paint',size:.12,points:[{x:.3,y:.08},{x:.8,y:.08}]}]};
+    const input=generationBody(a,{outputMode:'model',selectionMode:'user-brush',selectionOverrideConfirmed:true,selectedInstances:[],masks:[],protectMasks:[],brush});
+    const erased={version:1,strokes:[...brush.strokes,{...brush.strokes[0],tool:'erase'}]};
+    for(const patch of [{brush:{version:1,strokes:[]}},{brush:erased},{selectionOverrideConfirmed:false},{selectionOverrideConfirmed:'true'},{outputMode:'adaptive'},{selectedInstances:['left']},{confirmedPredictions:0},{maskSpace:{...input.maskSpace,sourceHash:'0'.repeat(64)}}]){
+      const r=await h.request('/generation',{...input,...patch});assert(r.status>=400,'invalid input must be rejected');
+    }
+    assert.equal((await h.request('/generation',input,'bob')).status,404);assert.equal(h.created.length,1);
+    const prepared=await prepareMasks(96,64,[],[],{brush,subjects:[],userBrush:true});assert(prepared.instances[0].count>4);assert(prepared.protect.every(v=>v===0));
+  }finally{await h.close();}
+});
+
 test('workbench recovers the latest completed original model image after restart, is owner-isolated and never wakes a provider',async()=>{
   const h=await harness();try{
     const a=await approved(h),r=await h.request('/generation',generationBody(a,{outputMode:'model'}));assert.equal(r.status,202);

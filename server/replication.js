@@ -74,9 +74,12 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
       const subjects=analysisJob.analysis.data.scene.old_product_instances;
       if(input.brush){
         const match=matchBrushSubjects(input.brush,subjects,s.width,s.height);
-        if(!match.valid||canonicalJson([...match.selectedInstances].sort())!==canonicalJson([...input.selectedInstances].sort()))throw fail('TARGET_SELECTION_REQUIRED',422);
+        if(input.selectionMode==='user-brush'){
+          if(!match.painted)throw fail('TARGET_SELECTION_REQUIRED',422);
+          if(!match.valid&&input.selectionOverrideConfirmed!==true)throw fail('BRUSH_CONFIRMATION_REQUIRED',422);
+        }else if(!match.valid||canonicalJson([...match.selectedInstances].sort())!==canonicalJson([...input.selectedInstances].sort()))throw fail('TARGET_SELECTION_REQUIRED',422);
       }
-      await prepareMasks(s.width,s.height,input.masks,input.protectMasks,{brush:input.brush,subjects});
+      await prepareMasks(s.width,s.height,input.masks,input.protectMasks,{brush:input.brush,subjects,userBrush:input.selectionMode==='user-brush'});
     }
     const provider=getProvider(req);
     const active=(await store.list()).filter(j=>!isFinalJob(j));

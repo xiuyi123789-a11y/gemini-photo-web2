@@ -26,7 +26,7 @@ export type ReplicationJob = {
   recoveryNeeded?:boolean;
   outputRecoveryAvailable?:boolean;
   origin?:string|null;derivedFrom?:string|null;
-  input?:{masks:EditMask[];protectMasks:Point[][];brush?:BrushSelection;selectedInstances:string[];resolution:string;contourHints?:ContourHint[]};
+  input?:{masks:EditMask[];protectMasks:Point[][];brush?:BrushSelection;selectedInstances:string[];resolution:string;contourHints?:ContourHint[];selectionMode?:'user-brush';selectionOverrideConfirmed?:boolean};
   predictions:Array<{model:string;predictionId:string|null;remoteStatus:string;reconciliationState:string}>;
 };
 export type Operation = {jobId?:string;requestId:string;kind:ReplicationKind;inputFingerprint:string;ownerId:string;localOnly?:boolean;sourceJobId?:string};
@@ -38,6 +38,7 @@ export type GenerationInput = {
   maskSpace:{width:number;height:number;sourceHash:string};resolution:string;count:number;
   preserve:PreserveKey[];notes:string;confirmedPredictions:number;
   outputMode?:'model'|'adaptive';
+  selectionMode?:'user-brush';selectionOverrideConfirmed?:boolean;
 };
 export const ownerId = () => getStorageUser() || getUserId();
 export async function digest(value:BufferSource|string):Promise<string> {

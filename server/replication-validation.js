@@ -49,12 +49,16 @@ function polygon(p) {
   return points;
 }
 export function validateGenerationInput(body,{advancedOutputs=false}={}) {
-  only(body,['requestId','inputFingerprint','analysisJobId','analysisRevisionHash','selectedInstances','masks','protectMasks','brush','maskSpace','resolution','count','preserve','notes','confirmedPredictions','outputMode']);
+  only(body,['requestId','inputFingerprint','analysisJobId','analysisRevisionHash','selectedInstances','masks','protectMasks','brush','maskSpace','resolution','count','preserve','notes','confirmedPredictions','outputMode','selectionMode','selectionOverrideConfirmed']);
   if(body.outputMode!==undefined&&!['model','adaptive'].includes(body.outputMode))throw fail('INPUT_INVALID');
+  if((body.selectionMode!==undefined&&body.selectionMode!=='user-brush')||(body.selectionOverrideConfirmed!==undefined&&typeof body.selectionOverrideConfirmed!=='boolean'))throw fail('INPUT_INVALID');
+  const userBrush=body.selectionMode==='user-brush';
+  if(userBrush&&(body.outputMode!=='model'||!body.brush))throw fail('TARGET_SELECTION_REQUIRED',422);
+  if(!userBrush&&body.selectionOverrideConfirmed!==undefined)throw fail('INPUT_INVALID');
   if(!UUID.test(body.requestId||'')||!HASH.test(body.inputFingerprint||''))throw fail('INPUT_INVALID');
   if(!UUID.test(body.analysisJobId||'')||!HASH.test(body.analysisRevisionHash||''))throw fail('ANALYSIS_REQUIRED',409);
   const selected=body.selectedInstances;
-  if(!Array.isArray(selected)||!selected.length||selected.length>12||new Set(selected).size!==selected.length||!selected.every(s=>typeof s==='string'&&/^[a-zA-Z0-9_-]{1,80}$/.test(s)))throw fail('TARGET_SELECTION_REQUIRED',422);
+  if(!Array.isArray(selected)||(userBrush?selected.length!==0:!selected.length)||selected.length>12||new Set(selected).size!==selected.length||!selected.every(s=>typeof s==='string'&&/^[a-zA-Z0-9_-]{1,80}$/.test(s)))throw fail('TARGET_SELECTION_REQUIRED',422);
   if(body.brush!==undefined&&!validBrush(body.brush))throw fail('TARGET_SELECTION_REQUIRED',422);
   const brush=body.brush?{version:1,strokes:body.brush.strokes.map(s=>({tool:s.tool,size:s.size,points:s.points.map(p=>({x:p.x,y:p.y}))}))}:undefined;
   if(!Array.isArray(body.masks)||(brush?body.masks.length!==0:body.masks.length!==selected.length||new Set(body.masks.map(m=>m?.instanceId)).size!==selected.length))throw fail('TARGET_SELECTION_REQUIRED',422);
