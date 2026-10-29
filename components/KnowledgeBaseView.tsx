@@ -1,5 +1,6 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
+import {imagePreviewProps} from '../services/imageDelivery';
 import { FileUpload } from './FileUpload';
 import { ImageFile, KnowledgeBaseEntry, KnowledgeBaseCategory, KnowledgeBaseAnalysis } from '../types';
 import { analyzeAndCategorizeImageForKB } from '../services/replicateService';
@@ -224,7 +225,7 @@ export const KnowledgeBaseView: React.FC = () => {
                         
                         <div className="flex flex-col md:flex-row h-full">
                             <div className="w-full md:w-1/3 h-48 md:h-full bg-slate-50 flex items-center justify-center flex-shrink-0">
-                                <img src={expandedEntry.sourceImagePreview} alt="Source" className="w-full h-full object-contain" />
+                                <img {...imagePreviewProps(expandedEntry.sourceImagePreview,'canvas')} alt="Source" className="w-full h-full object-contain" />
                             </div>
                             <div className="flex-grow p-6 md:p-8 overflow-y-auto custom-scrollbar bg-white">
                                 <div className="mb-4">
@@ -414,7 +415,7 @@ export const KnowledgeBaseView: React.FC = () => {
                                                     <span className="absolute top-2 right-2 text-[10px] bg-fuchsia-500 text-white font-bold px-2 py-0.5 rounded-full shadow-sm z-10">复刻</span>
                                                 )}
                                                 <div className="w-20 h-20 flex-shrink-0 rounded-lg overflow-hidden bg-slate-100">
-                                                    <img src={entry.sourceImagePreview} alt="Source" className="w-full h-full object-cover" />
+                                                    <img {...imagePreviewProps(entry.sourceImagePreview,'thumb')} alt="Source" className="w-full h-full object-cover" />
                                                 </div>
                                                 <div className="flex-grow flex flex-col justify-between min-w-0">
                                                     <p className="text-slate-800 text-sm mb-1 line-clamp-3 font-medium pl-6">{entry.promptFragment}</p> {/* Added padding-left for checkbox space */}

@@ -1,7 +1,8 @@
 import { userStorage, getStorageUser } from './browserStorage';
 import { getUserId } from './userIdentity';
 import { fileToBase64 } from './replicateService';
-import { canonicalJson, materialIdentity, recoveryKey, matchesOperation, ERROR_MESSAGES, isFinalJob } from '../shared/replication-contract.js';
+import {imageDisplayUrl} from './imageDelivery';
+import { canonicalJson, materialIdentity, recoveryKey, matchesOperation, ERROR_MESSAGES, isFinalJob, MAX_REFERENCES } from '../shared/replication-contract.js';
 
 export type ReferenceAngle = 'front'|'side'|'back'|'detail'|'other';
 export type PreserveKey = 'background'|'composition'|'lighting'|'perspective';
@@ -41,6 +42,31 @@ export type GenerationInput = {
   selectionMode?:'user-brush';selectionOverrideConfirmed?:boolean;
 };
 export const ownerId = () => getStorageUser() || getUserId();
+const previewKey='replication_preview_v1';
+export type ReplicationPreview={ownerId:string;source:Asset;references:Asset[];raw:Asset};
+// Presentation only: never restore task authority, submission state, masks or
+// fee confirmation from this cache. The authenticated GET remains authoritative.
+export function readReplicationPreview():ReplicationPreview|null {
+  try{
+    const raw=userStorage.getItem(previewKey);if(!raw||raw.length>131072)return null;
+    const value=JSON.parse(raw);
+    const asset=(a:any)=>{
+      if(!a||typeof a.url!=='string'||!a.url.startsWith('/api/replication/assets/')||!Number.isFinite(a.width)||!Number.isFinite(a.height)||a.width<=0||a.height<=0)return false;
+      const u=new URL(a.url,'http://localhost');return /^\/api\/replication\/assets\/[a-zA-Z0-9-]+\/[a-zA-Z0-9_.-]+$/.test(u.pathname)&&[...u.searchParams].every(([key,v])=>key==='owner'?v===ownerId():key==='v'&&/^[a-f0-9]{64}$/.test(v));
+    };
+    if(value.ownerId!==ownerId()||!Number.isFinite(value.savedAt)||Date.now()-value.savedAt>86400000||value.savedAt>Date.now()+60000||!asset(value.source)||!asset(value.raw)||!Array.isArray(value.references)||value.references.length>MAX_REFERENCES||!value.references.every(asset))return null;
+    return value;
+  }catch{return null;}
+}
+export function clearReplicationPreview(){try{userStorage.removeItem(previewKey);}catch{}}
+export function cacheReplicationPreview(jobs:ReplicationJob[]){
+  const newest=[...jobs].sort((a,b)=>b.createdAt-a.createdAt||b.updatedAt-a.updatedAt)[0];
+  const job=jobs.find(j=>j.kind==='generation'&&isFinalJob(j)&&j.inputFingerprint===newest?.inputFingerprint&&j.results.some(r=>r.raw?.url));
+  if(!job){clearReplicationPreview();return;}
+  const pick=(a:Asset)=>({name:a.name,url:a.url,width:a.width,height:a.height,sha256:a.sha256,angle:a.angle});
+  const value={ownerId:job.ownerId,savedAt:Date.now(),source:pick(job.source),references:job.references.map(pick),raw:pick(job.results[job.results.length-1].raw)};
+  try{const text=JSON.stringify(value);if(job.ownerId===ownerId()&&text.length<=131072)userStorage.setItem(previewKey,text);}catch{}
+}
 export async function digest(value:BufferSource|string):Promise<string> {
   const bytes=typeof value==='string'?new TextEncoder().encode(value):value;
   return [...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(b=>b.toString(16).padStart(2,'0')).join('');
@@ -103,7 +129,8 @@ export async function getReplicationWorkbench():Promise<{jobs:ReplicationJob[];r
 }
 export function replicationImageUrl(url:string,thumbnail:boolean|'canvas'=false,retry=0):string{
   if(!url.startsWith('/api/replication/assets/'))return url;
-  return url+(thumbnail?(url.includes('?')?'&':'?')+'preview='+(thumbnail==='canvas'?'canvas':'1'):'')+(retry?((url.includes('?')||thumbnail)?'&':'?')+'retry='+retry:'');
+  const display=thumbnail?imageDisplayUrl(url,thumbnail==='canvas'?'canvas':'thumb'):url;
+  return display+(retry?(display.includes('?')?'&':'?')+'retry='+retry:'');
 }
 export const resumeReplicationJob=(id:string,localOnly=false):Promise<ReplicationJob>=>request('/jobs/'+encodeURIComponent(id)+'/resume',{},localOnly);
 export const cancelReplicationJob=(id:string,localOnly=false):Promise<ReplicationJob>=>request('/jobs/'+encodeURIComponent(id)+'/cancel',{},localOnly);

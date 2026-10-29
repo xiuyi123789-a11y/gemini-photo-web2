@@ -1,4 +1,5 @@
 import { userStorage } from '../services/browserStorage';
+import {imagePreviewProps,startImageDownload} from '../services/imageDelivery';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CheckIcon, ChevronDownIcon, CursorIcon, DownloadIcon, EyeIcon, EyeSlashIcon, FitViewIcon, HandIcon, HomeIcon, LayersIcon, PlusIcon, RedoIcon, TextIcon, TrashIcon, UndoIcon, UploadIcon, XIcon, ZoomInIcon, ZoomOutIcon } from './IconComponents';
 import { DEFAULT_REAL_ESRGAN_PARAMS, generateWorkbenchImage, removeWatermark, retouchImageFromBase64, retouchImageFromUrl, taskChatWithGemini, upscaleImage } from '../services/replicateService';
@@ -172,12 +173,7 @@ const loadVideoSize = (src: string) =>
   });
 
 const downloadUrl = async (url: string, filename: string) => {
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+  startImageDownload(url,filename);
 };
 
 const PLATFORM_OPTIONS = [
@@ -1887,7 +1883,7 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
                         <div className="grid grid-cols-3 sm:grid-cols-5 gap-3">
                           {pendingImagePreviews.map((p) => (
                             <div key={p.key} className="relative aspect-square rounded-2xl overflow-hidden border border-slate-200 bg-white shadow-sm">
-                              <img src={p.url} className="w-full h-full object-cover" draggable={false} />
+                              <img {...imagePreviewProps(p.url,'thumb')} className="w-full h-full object-cover" draggable={false} />
                               <button
                                 type="button"
                                 onClick={(e) => {
@@ -2143,7 +2139,7 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
                     onPointerDown={(e) => onItemPointerDown(e, it.id)}
                   >
                     {it.type === 'image' && it.src && (
-                      <img src={it.src} draggable={false} className="w-full h-full object-contain bg-white rounded-lg shadow-sm border border-slate-200" />
+                      <img {...imagePreviewProps(it.src,'canvas')} draggable={false} className="w-full h-full object-contain bg-white rounded-lg shadow-sm border border-slate-200" />
                     )}
                     {it.type === 'video' && it.src && (
                       <video src={it.src} className="w-full h-full object-contain bg-white rounded-lg shadow-sm border border-slate-200" controls={false} />

@@ -19,6 +19,7 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
     visionProbe ||= createLocalVision()({probe:true}).then(v=>v.ready===true).catch(()=>false);
     if(!await visionProbe){visionProbe=null;throw fail('SEGMENTATION_UNAVAILABLE',503);}
   };
+  const assetView=a=>a?{...a,url:a.url+(a.url.includes('?')?'&':'?')+'v='+a.sha256}:a;
   const view=async job=>({id:job.id,jobId:job.id,ownerId:job.ownerId,requestId:job.requestId,kind:job.kind,status:job.status,stage:job.stage,
     inputFingerprint:job.inputFingerprint,sourceHash:job.sourceHash,createdAt:job.createdAt,updatedAt:job.updatedAt,revision:job.revision,
     recoveryNeeded:!isFinalJob(job)&&(!job.workerLease||job.workerLease.until<=Date.now()),
@@ -26,8 +27,8 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
       (await store.attempts(job.id)).some(a=>a.model===REPLICATION_MODELS.generation&&a.predictionId&&a.remoteStatus==='succeeded'),
     completed:job.kind==='analysis'?(job.status==='succeeded'?1:0):job.results.length,total:job.total,
     analysis:job.analysis||null,analysisJobId:job.analysisJobId||null,approvedAnalysis:job.approvedAnalysis||null,origin:job.origin||null,derivedFrom:job.derivedFrom||null,
-    source:job.assets.source,references:job.assets.references,target:job.target||'',input:job.kind==='generation'?job.input:null,
-    results:job.results,images:job.kind==='analysis'?[]:job.images,pendingRaw:job.pendingRaw||null,quality:job.quality||null,
+    source:assetView(job.assets.source),references:job.assets.references.map(assetView),target:job.target||'',input:job.kind==='generation'?job.input:null,
+    results:job.results.map(r=>({...r,raw:assetView(r.raw),composite:assetView(r.composite)})),images:job.kind==='analysis'?[]:job.images.map(url=>{const a=job.results.flatMap(r=>[r.raw,r.composite]).find(a=>a?.url===url);return a?assetView(a).url:url;}),pendingRaw:assetView(job.pendingRaw)||null,quality:job.quality||null,
     errorCode:job.errorCode||null,error:compositionFailure(job)?.message||(job.errorCode?(ERROR_MESSAGES[job.errorCode]||'任务尚未完成，请查看阶段与任务标识。'):null),
     expiresAt:job.expiresAt,
     predictions:(await store.attempts(job.id)).map(a=>({localAttemptId:a.id,model:a.model,predictionId:a.predictionId,attemptNo:a.attemptNo,
@@ -138,18 +139,20 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
   router.get('/workbench',route(async(req,res)=>{
     // Completed outputs remain discoverable if local browser markers are lost.
     // This endpoint only reads records, never wakes a worker or provider.
-    const jobs=(await store.list()).filter(j=>j.ownerId===req.userId&&(j.retainOriginals||!isFinalJob(j)||j.expiresAt>=Date.now()))
+    const started=performance.now();
+    const jobs=(await store.list(req.userId)).filter(j=>j.ownerId===req.userId&&(j.retainOriginals||!isFinalJob(j)||j.expiresAt>=Date.now()))
       .sort((a,b)=>b.createdAt-a.createdAt||b.updatedAt-a.updatedAt);
     const latest=jobs[0],context=latest?jobs.filter(j=>j.inputFingerprint===latest.inputFingerprint):[];
     const newestAnalysis=context.find(j=>j.kind==='analysis');
     const generation=context.find(j=>j.kind==='generation'&&(!newestAnalysis||j.createdAt>=newestAnalysis.createdAt));
     const analysis=context.find(j=>j.kind==='analysis'&&(!generation||j.id===generation.analysisJobId))||newestAnalysis;
     const intakes=await Promise.all(['analysis','generation'].map(kind=>store.activeRequests(req.userId,kind)));
-    res.json({jobs:await Promise.all([analysis,generation].filter(Boolean).map(view)),requests:intakes.flat().map(receiptView)});
+    const result={jobs:await Promise.all([analysis,generation].filter(Boolean).map(view)),requests:intakes.flat().map(receiptView)};
+    res.set('Server-Timing',`workbench;dur=${(performance.now()-started).toFixed(1)}`);res.json(result);
   }));
   router.get('/active',route(async(req,res)=>{
     if(!['analysis','generation'].includes(req.query.kind))throw fail('INPUT_INVALID');
-    const jobs=(await store.list()).filter(j=>j.ownerId===req.userId&&j.kind===req.query.kind&&!isFinalJob(j));
+    const jobs=(await store.list(req.userId)).filter(j=>j.ownerId===req.userId&&j.kind===req.query.kind&&!isFinalJob(j));
     res.json({jobs:await Promise.all(jobs.map(j=>view(j))),requests:(await store.activeRequests(req.userId,req.query.kind)).map(receiptView)});
   }));
   router.get('/request/:requestId',route(async(req,res)=>{
@@ -246,12 +249,7 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
     const job=await own(req,req.params.id);
     const list=[job.assets.source,job.assets.inferenceSource,job.assets.guide,job.assets.raw,...job.assets.references,...job.results.flatMap(r=>[r.raw,r.composite,...Object.values(r.compositeMasks||{})]),job.pendingRaw].filter(Boolean);
     const asset=list.find(a=>a.name===req.params.name);if(!asset)throw fail('JOB_NOT_FOUND',404);
-    const preview=['1','canvas'].includes(req.query.preview),canvas=req.query.preview==='canvas';
-    const etag='"'+asset.sha256+(preview?(canvas?'-canvas-v1':'-preview-v1'):'')+'"';
-    // Recheck ownership before every 304, and never permit public image caching.
-    res.set({'Cache-Control':'private, max-age=0, must-revalidate',ETag:etag});res.vary('Cookie');res.vary('x-user-id');
-    if(req.get('If-None-Match')===etag)return res.status(304).end();
-    res.type(preview?'webp':'png').send(preview?await assets.thumbnail(job,asset,canvas):await assets.read(job,asset));
+    await assets.serve(req,res,job,asset);
   }));
   // Cleanup is local-only, explicit, and never removes unresolved remote attempts.
   router.cleanup=async()=>{for(const job of await store.list())if(!job.retainOriginals&&isFinalJob(job)&&job.expiresAt<Date.now()){

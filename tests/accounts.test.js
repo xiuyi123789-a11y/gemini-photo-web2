@@ -86,6 +86,19 @@ test('images require the owning account', async () => {
   assert.equal((await request(endpoint, { cookie: bobCookie })).status, 404);
   assert.equal((await request(endpoint, { cookie: aliceCookie })).status, 200);
 });
+test('stored image previews and native original downloads remain private and owner authenticated',async()=>{
+  const filename=randomUUID()+'.png',endpoint=`/api/images/${alice.id}/${filename}`;
+  const bytes=await sharp({create:{width:1800,height:1200,channels:3,background:'beige'}}).png().toBuffer();
+  await writeFile(path.join(directory,alice.id,'images',filename),bytes);
+  const preview=await request(endpoint+'?preview=1&pv=2',{cookie:aliceCookie});assert.equal(preview.status,200);
+  assert.match(preview.headers.get('cache-control'),/private, max-age=3600, immutable/);assert.match(preview.headers.get('vary'),/Cookie/);
+  assert((await sharp(Buffer.from(await preview.arrayBuffer())).metadata()).width<=384);
+  const download=await request(endpoint+'?download=1&preview=1',{cookie:aliceCookie});assert.equal(download.status,200);assert.match(download.headers.get('content-disposition'),/^attachment/);assert.deepEqual(Buffer.from(await download.arrayBuffer()),bytes);
+  for(const query of ['?preview=1&pv=2','?download=1']){
+    assert.equal((await request(endpoint+query)).status,401);
+    assert.equal((await request(endpoint+query,{cookie:bobCookie,headers:{'If-None-Match':preview.headers.get('etag'),'x-user-id':alice.id}})).status,404);
+  }
+});
 test('replication jobs use the signed-in owner even when x-user-id is forged', async () => {
   let canceled=false;
   const provider = {accountRef:'fake-account',

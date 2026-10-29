@@ -2,24 +2,28 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeftRight, Download, Expand, ImagePlus, Layers, Plus, RefreshCw, ScanEye, Sparkles, Trash2, X } from 'lucide-react';
 import { ReplicationImageViewer } from './ReplicationImageViewer';
 import { userStorage } from '../services/browserStorage';
+import {startImageDownload} from '../services/imageDelivery';
 import {saveReplicationDraft,loadReplicationDraft,clearReplicationDraft} from '../services/replicationDraft';
 import { MAX_REFERENCES, isFinalJob, REPLICATION_MODEL_NAMES } from '../shared/replication-contract.js';
 import { BRUSH_LIMITS, matchBrushSubjects } from '../shared/replication-brush.js';
 import { startAnalysis,startGeneration,getReplicationWorkbench,replicationImageUrl,cancelReplicationJob,getReplicationCapabilities,
   reviseAnalysis,readOperation,saveOperation,forgetOperation,assertOperation,operationFromServerJob,ownerId,
-  lookupOperation,closeOperation,resumeReplicationJob,
+  lookupOperation,closeOperation,resumeReplicationJob,readReplicationPreview,cacheReplicationPreview,clearReplicationPreview,
   type Operation,type ReplicationJob,type ReferenceAngle,type PreserveKey,type Point,type EditMask,type JobResult,type BrushStroke } from '../services/replicationService';
 import './ImageReplicationView.css';
 
 type Material={id:string;file:File|null;preview:string;width:number;height:number;angle:ReferenceAngle};
-type Candidate={job:ReplicationJob;result:JobResult};
+type Candidate={job:Pick<ReplicationJob,'source'>;result:Pick<JobResult,'raw'>};
+function materialFrom(a:any):Material{return {id:a.name,file:null,preview:a.url,width:a.width,height:a.height,angle:a.angle||'other'};}
 const NO_INSTANCES:any[]=[];
 const angles:Record<ReferenceAngle,string>={front:'正面',side:'侧面',back:'背面',detail:'细节',other:'其他'};
 const locks:Record<PreserveKey,string>={background:'背景与道具',composition:'构图与位置',lighting:'光线与阴影',perspective:'角度与透视'};
 const stages:Record<string,string>={queued:'等待提交',submitting:'正在提交',running:'模型运行中',postprocessing:'正在保存结果',submission_unknown:'提交待核对',cancel_requested:'正在请求取消',cancel_unknown:'取消未确认',completed_needs_review:'图片已生成',quality_failed:'结果需查看',succeeded:'已完成',failed:'执行失败',canceled:'远端已取消'};
 const issue=(e:unknown)=>e instanceof Error?e.message:'操作未完成，请重试查询。';
 export const ImageReplicationView:React.FC=()=>{
-  const [source,setSource]=useState<Material|null>(null),[references,setReferences]=useState<Material[]>([]);
+  const [cachedPreview]=useState(()=>readReplicationPreview());
+  const showingCache=useRef(!!cachedPreview);
+  const [source,setSource]=useState<Material|null>(()=>cachedPreview?materialFrom(cachedPreview.source):null),[references,setReferences]=useState<Material[]>(()=>cachedPreview?cachedPreview.references.map(materialFrom):[]);
   const [analysisJob,setAnalysisJob]=useState<ReplicationJob|null>(null),[generationJob,setGenerationJob]=useState<ReplicationJob|null>(null);
   const [analysisText,setAnalysisText]=useState(''),[fingerprint,setFingerprint]=useState('');
   const [selectedIds,setSelectedIds]=useState<string[]>([]),[masks,setMasks]=useState<EditMask[]>([]),[protectMasks,setProtectMasks]=useState<Point[][]>([]);
@@ -31,10 +35,11 @@ export const ImageReplicationView:React.FC=()=>{
   const [caps,setCaps]=useState<{enabled:boolean;maxReferences:number;counts:number[];resolutions:string[];submission?:{analysis:boolean;generation:boolean};adaptiveComposition?:{configured:boolean}}>({enabled:true,maxReferences:MAX_REFERENCES,counts:[1],resolutions:['1K','2K']});
   const [pendingKind,setPendingKind]=useState<'analysis'|'generation'|null>(null),[reading,setReading]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
   const [operations,setOperations]=useState<{analysis:Operation|null;generation:Operation|null}>(()=>({analysis:readOperation('analysis'),generation:readOperation('generation')}));
-  const [mode,setMode]=useState<'original'|'raw'|'compare'>('original'),[candidate,setCandidate]=useState<Candidate|null>(null),[split,setSplit]=useState(50),[enlarged,setEnlarged]=useState<{src:string;label:string}|null>(null);
+  const [mode,setMode]=useState<'original'|'raw'|'compare'>(cachedPreview?'raw':'original'),[candidate,setCandidate]=useState<Candidate|null>(()=>cachedPreview?{job:{source:cachedPreview.source},result:{raw:cachedPreview.raw}}:null),[split,setSplit]=useState(50),[enlarged,setEnlarged]=useState<{src:string;label:string}|null>(null);
+  const [downloadNotice,setDownloadNotice]=useState('');
   const [costConfirmed,setCostConfirmed]=useState(false);
   const [brushConfirmed,setBrushConfirmed]=useState(false);
-  const [restoring,setRestoring]=useState(false),[imageRetry,setImageRetry]=useState(0),[failedImages,setFailedImages]=useState<string[]>([]);
+  const [restoring,setRestoring]=useState(!!cachedPreview),[imageRetry,setImageRetry]=useState(0),[failedImages,setFailedImages]=useState<string[]>([]);
   const [fullImageFallbacks,setFullImageFallbacks]=useState<string[]>([]);
   const sourceInput=useRef<HTMLInputElement>(null),refsInput=useRef<HTMLInputElement>(null),mounted=useRef(true),urls=useRef(new Set<string>()),operationBusy=useRef(false);
   const viewport=useRef<HTMLDivElement>(null),paintRef=useRef<{pointerId:number;stroke:BrushStroke}|null>(null),panRef=useRef<{x:number;y:number;left:number;top:number}|null>(null);
@@ -55,7 +60,6 @@ export const ImageReplicationView:React.FC=()=>{
   const validAnalysis=analysisJob?.status==='succeeded'&&analysisJob.inputFingerprint===fingerprint&&!!analysisJob.analysis?.data;
   const selectionWarning=!!validAnalysis&&selection.painted>0&&!selection.valid;
   const sourceFailed=!!source&&failedImages.includes(source.preview+'#canvas');
-  const materialFrom=(a:any):Material=>({id:a.name,file:null,preview:a.url,width:a.width,height:a.height,angle:a.angle||'other'});
   function apply(next:ReplicationJob,restore=false){
     if(!mounted.current)return;
     const latest=latestKinds.current.get(next.kind);
@@ -68,7 +72,7 @@ export const ImageReplicationView:React.FC=()=>{
       if(next.status==='succeeded'&&next.analysis?.data)setAnalysisText(next.analysis.text);
     }else{
       setGenerationJob(next);
-      if(next.results.length){setCandidate({job:next,result:next.results[next.results.length-1]});setMode('raw');}
+      if(next.results.length){setCandidate({job:next,result:next.results[next.results.length-1]});setMode('raw');if(isFinalJob(next))cacheReplicationPreview([next]);}
     }
     if(restore&&!currentFingerprint.current){
       currentFingerprint.current=next.inputFingerprint;setFingerprint(next.inputFingerprint);
@@ -128,6 +132,10 @@ export const ImageReplicationView:React.FC=()=>{
     try{
       const snapshot=await getReplicationWorkbench();
       if(!mounted.current||serial!==restoreSerial.current)return;
+      // Do not let an obsolete GET repopulate presentation storage after the
+      // component or material context was superseded.
+      cacheReplicationPreview(snapshot.jobs);
+      if(showingCache.current){showingCache.current=false;setCandidate(null);setMode('original');if(!snapshot.jobs.length){setSource(null);setReferences([]);}}
       // Choose one material context before applying either concurrent response.
       const newest=[...snapshot.jobs].sort((a,b)=>b.createdAt-a.createdAt||b.updatedAt-a.updatedAt)[0];
       if(newest&&!currentFingerprint.current){currentFingerprint.current=newest.inputFingerprint;setFingerprint(newest.inputFingerprint);materialsJob.current=newest;
@@ -194,6 +202,7 @@ export const ImageReplicationView:React.FC=()=>{
   },[source?.width,source?.height,source?.file,references]);
   function stale(){
     if(feeLocked)return;
+    clearReplicationPreview();showingCache.current=false;setDownloadNotice('');
     setAnalysisJob(null);setGenerationJob(null);setAnalysisText('');setFingerprint('');currentFingerprint.current='';
     setSelectedIds([]);setMasks([]);setProtectMasks([]);setStrokes([]);paintRef.current=null;panRef.current=null;setZoom(100);setCandidate(null);setMode('original');setCostConfirmed(false);setBrushConfirmed(false);setError('');setNotice('素材已改变，请重新识别产品。');
     materialsJob.current=null;latestKinds.current.clear();setFailedImages([]);setFullImageFallbacks([]);forgetOperation('analysis');forgetOperation('generation');
@@ -303,8 +312,7 @@ export const ImageReplicationView:React.FC=()=>{
       else setNotice('该请求已有预测记录，费用保护仍保留；请查询或取消原任务，不会重新创建预测。');
     }catch(e){setError(issue(e));}finally{setPendingKind(null);syncOperations();}
   }
-  async function download(url:string,label:string){try{const response=await fetch(url,{credentials:'same-origin'});if(!response.ok)throw new Error('下载失败。');
-    const u=URL.createObjectURL(await response.blob()),a=document.createElement('a');a.href=u;a.download=`图像复刻_${label}_${Date.now()}.png`;a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);}catch(e){setError(issue(e));}}
+  function download(url:string,label:string){try{startImageDownload(url,`图像复刻_${label}_${Date.now()}.png`);setDownloadNotice('已发起下载，请查看浏览器下载列表。');}catch(e){setError(issue(e));}}
   const originalUrl=candidate&&mode!=='original'?candidate.job.source.url:source?.preview;
   const preview=mode==='raw'?candidate?.result.raw.url:originalUrl;
   const polygonPoints=(p:Point[])=>p.map(v=>`${v.x*(source?.width||1)},${v.y*(source?.height||1)}`).join(' ');
@@ -312,9 +320,9 @@ export const ImageReplicationView:React.FC=()=>{
   const generationReady=feeReady&&selection.painted>0&&(!selectionWarning||brushConfirmed)&&!sourceFailed;
   const generatingAgain=!!generationJob?.results.length;
   const unavailable=!caps.enabled||!validAnalysis&&caps.submission?.analysis===false;
-  const statusText=error||(failedImages.length?'图片加载失败，任务和生成结果已保留，请重新加载图片。':restoring?'正在恢复素材与生成结果…':pendingKind?pendingKind==='analysis'?'正在提交分析素材…':'正在提交生图任务…':activeJob?
+  const statusText=error||(failedImages.length?'图片加载失败，任务和生成结果已保留，请重新加载图片。':restoring?cachedPreview?'已显示上次图片，正在同步任务状态…':'正在恢复素材与生成结果…':pendingKind?pendingKind==='analysis'?'正在提交分析素材…':'正在提交生图任务…':activeJob?
     `${activeJob.kind==='analysis'?'产品分析':'图片生成'} · ${stages[activeJob.status]||'处理中'}`:unresolved.length?'提交结果待确认，请重新连接查询。':
-    candidate?'图片已生成 · 可预览、对比和下载':unavailable?`产品分析入口暂未开放 · ${notice||'已保留上传素材。'}`:notice||(validAnalysis?'识别完成，请涂抹要替换的物品。':'上传场景与产品图片，识别后涂抹替换。'));
+    downloadNotice|| (candidate?'图片已生成 · 可预览、对比和下载':unavailable?`产品分析入口暂未开放 · ${notice||'已保留上传素材。'}`:notice||(validAnalysis?'识别完成，请涂抹要替换的物品。':'上传场景与产品图片，识别后涂抹替换。')));
   const enlarge=(src:string|undefined,label:string)=>{if(src)setEnlarged({src,label});};
   const imageProps=(url:string,thumbnail:boolean|'canvas'=false)=>{
     const key=url+(thumbnail===true?'#thumbnail':thumbnail==='canvas'?'#canvas':'');

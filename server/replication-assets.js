@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import sharp from 'sharp';
+import {createImageDelivery} from './image-delivery.js';
 export const sha256 = value => createHash('sha256').update(value).digest('hex');
 const invalid=()=>Object.assign(new Error('INPUT_INVALID'),{code:'INPUT_INVALID',status:400});
 const preparationFailure=()=>Object.assign(new Error('ASSET_PREPARATION_FAILED'),{code:'ASSET_PREPARATION_FAILED',status:500});
@@ -40,7 +41,7 @@ export function decodeImage(value) {
   return bytes;
 }
 export function createReplicationAssets(dataDir,{download=downloadModelImage}={}) {
-  const thumbnails=new Map();
+  const delivery=createImageDelivery(dataDir);
   const base=path.resolve(dataDir);
   const directory=job=>{
     if(!/^[a-zA-Z0-9-]+$/.test(job.ownerId)||!/^[0-9a-f-]{36}$/.test(job.id))throw invalid();
@@ -78,14 +79,11 @@ export function createReplicationAssets(dataDir,{download=downloadModelImage}={}
       }catch(e){if(e.status)throw e;throw preparationFailure();}
     },
     read:(job,asset)=>fs.readFile(path.join(directory(job),filename(asset.name))),
+    file:(job,asset)=>path.join(directory(job),filename(asset.name)),
+    serve:(req,res,job,asset)=>delivery.serve(req,res,{file:path.join(directory(job),filename(asset.name)),owner:job.ownerId,
+      identity:asset.sha256,versioned:req.query.v===asset.sha256,downloadName:`quantumleap_${job.id.slice(0,8)}_${asset.name}`}),
     async thumbnail(job,asset,canvas=false){
-      const edge=canvas?1600:384,key=directory(job)+'/'+filename(asset.name)+':'+asset.sha256+':'+edge;
-      if(!thumbnails.has(key)){
-        const pending=this.read(job,asset).then(bytes=>sharp(bytes,{limitInputPixels:64*1024*1024}).resize({width:edge,height:edge,fit:'inside',withoutEnlargement:true}).webp({quality:canvas?90:80}).toBuffer())
-          .catch(e=>{thumbnails.delete(key);throw e;});
-        thumbnails.set(key,pending);if(thumbnails.size>24)thumbnails.delete(thumbnails.keys().next().value);
-      }
-      return thumbnails.get(key);
+      return fs.readFile(await delivery.preview(this.file(job,asset),job.ownerId,asset.sha256,canvas?'canvas':'1'));
     },
     async cloneMaterials(job,fromJob) {
       const source={...fromJob.assets.source,...await save(job,'source.png',await this.read(fromJob,fromJob.assets.source))};

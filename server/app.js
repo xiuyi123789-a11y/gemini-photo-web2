@@ -13,6 +13,7 @@ import { createReplicationProvider } from './replication-provider.js';
 import { createPgReplicationStore, createFileReplicationStore } from './replication-store.js';
 import { createReplicationAssets,prepareAnalysisImage } from './replication-assets.js';
 import {createTextAnalyzer,parseAnalysisJson,textAnalysisError,TEXT_ANALYSIS_MODEL} from './text-analysis.js';
+import {createImageDelivery} from './image-delivery.js';
 
 dotenv.config();
 
@@ -74,6 +75,7 @@ app.use((req, res, next) => {
 // --- Directories ---
 const DATA_DIR = path.resolve(dataDir || process.env.DATA_DIR || path.join(__dirname, '../data'));
 const DIST_DIR = path.join(__dirname, '../dist'); // Frontend build directory
+const imageDelivery=createImageDelivery(DATA_DIR);
 
 // Helper to get user directory
 const getUserDir = (userId) => path.join(DATA_DIR, userId);
@@ -985,7 +987,11 @@ app.get('/api/images/:userId/:filename', async (req, res) => {
   const filePath = path.join(getUserImagesDir(userId), filename);
 
   if (await fs.pathExists(filePath)) {
-    res.sendFile(filename, { root: getUserImagesDir(userId) });
+    try{
+      const stat=await fs.stat(filePath);
+      await imageDelivery.serve(req,res,{file:filePath,owner:userId,identity:userId+':'+filename+':'+stat.size+':'+stat.mtimeMs,
+        versioned:/^[0-9a-f-]{36}\.png$/i.test(filename),downloadName:filename});
+    }catch{if(!res.headersSent)res.status(500).send('Image delivery failed');}
   } else {
     res.status(404).send('Image not found');
   }

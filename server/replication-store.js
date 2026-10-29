@@ -83,7 +83,7 @@ export function createPgReplicationStore(pool,{inTransaction=false}={}) {
     },
     async get(id) { return (await pool.query('SELECT document FROM replication_jobs WHERE job_id=$1', [id])).rows[0]?.document || null; },
     async byRequest(owner, requestId) { return (await pool.query('SELECT document FROM replication_jobs WHERE user_id=$1 AND request_id=$2', [owner,requestId])).rows[0]?.document || null; },
-    async list() { return (await pool.query('SELECT document FROM replication_jobs')).rows.map(r=>r.document); },
+    async list(owner) { return (await pool.query('SELECT document FROM replication_jobs'+(owner?' WHERE user_id=$1':''),owner?[owner]:[])).rows.map(r=>r.document); },
     async create(job) {
       try { await pool.query('INSERT INTO replication_jobs(job_id,user_id,kind,request_id,payload_hash,status,revision,document) VALUES($1,$2,$3,$4,$5,$6,0,$7::jsonb)',
         [job.id,job.ownerId,job.kind,job.requestId,job.payloadHash,job.status,JSON.stringify({...job,revision:0})]); return job; }
@@ -155,7 +155,7 @@ export function createFileReplicationStore(directory) {
     }),
     get:id=>transaction(d=>d.jobs.find(j=>j.id===id)||null,false),
     byRequest:(owner,id)=>transaction(d=>d.jobs.find(j=>j.ownerId===owner&&j.requestId===id)||null,false),
-    list:()=>transaction(d=>d.jobs,false),
+    list:owner=>transaction(d=>owner?d.jobs.filter(j=>j.ownerId===owner):d.jobs,false),
     create:job=>transaction(d=>{
       const old=d.jobs.find(j=>j.ownerId===job.ownerId&&j.requestId===job.requestId);if(old)return old;
       if(d.jobs.some(j=>j.ownerId===job.ownerId&&!isFinalJob(j)))throw busy();

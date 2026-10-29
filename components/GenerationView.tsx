@@ -3,6 +3,7 @@ import { AnalysisResult, VariablePrompt, GeneratedImageState, ReferenceImageFile
 import { MagicWandIcon, PlusIcon, TrashIcon, DownloadIcon, ZoomInIcon, PlayIcon, CheckIcon, LoadingSpinner, UploadIcon } from './IconComponents';
 import { generateSingleFromMaster, analyzeImages, generateWorkbenchImage, urlToBase64, fileToBase64, parseImageUnderstandingPrompt, runVisionAnalysis, analyzeAndCategorizeImageForKB } from '../services/replicateService';
 import { ImageModal } from './ImageModal';
+import {imagePreviewProps,startImageDownload} from '../services/imageDelivery';
 
 // Simple UUID generator polyfill
 function uuidv4() {
@@ -360,22 +361,12 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
     ));
   };
 
-  const handleDownloadImage = async (url: string, filename: string) => {
+  const handleDownloadImage = (url: string, filename: string) => {
     try {
-      const response = await fetch(url);
-      const blob = await response.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = blobUrl;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(blobUrl);
+      startImageDownload(url,filename);
     } catch (error) {
       console.error('Download failed:', error);
-      // Fallback to direct link if fetch fails (e.g. CORS)
-      window.open(url, '_blank');
+      setError('下载未启动，请重试。');
     }
   };
 
@@ -533,7 +524,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
           <div className="grid grid-cols-2 gap-2 mb-2">
             {referenceImages.map(img => (
               <div key={img.id} className="relative aspect-square bg-gray-100 rounded-lg overflow-hidden group border border-gray-200">
-                <img src={img.originalPreview} alt="Ref" className="w-full h-full object-cover" />
+                <img {...imagePreviewProps(img.originalPreview,'thumb')} alt="Ref" className="w-full h-full object-cover" />
                 <button 
                   onClick={() => removeReferenceImage(img.id)}
                   className="absolute top-1 right-1 p-1 bg-black/50 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
@@ -598,7 +589,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
               {masterImage ? (
                 <div className="relative w-full h-full">
                   <img 
-                    src={masterImage.preview} 
+                    {...imagePreviewProps(masterImage.preview)}
                     alt="Master" 
                     className="w-full h-full object-contain p-2"
                   />
@@ -653,7 +644,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
               {productDetailImages.map((img) => (
                 <div key={img.id} className="aspect-square bg-gray-50 rounded-lg border border-gray-200 relative group overflow-hidden">
                   <img 
-                    src={img.preview} 
+                    {...imagePreviewProps(img.preview,'thumb')}
                     alt="Detail" 
                     className="w-full h-full object-cover"
                   />
@@ -840,7 +831,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                     <div className="flex flex-wrap gap-3">
                       {(vp.referenceImages || []).map(img => (
                         <div key={img.id} className="relative w-16 h-16 rounded-lg overflow-hidden border border-gray-200 group">
-                          <img src={img.preview} alt="Ref" className="w-full h-full object-cover" />
+                          <img {...imagePreviewProps(img.preview,'thumb')} alt="Ref" className="w-full h-full object-cover" />
                           <button 
                             onClick={() => handleDeleteVariableReferenceImage(vp.id, img.id)}
                             className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-white"
@@ -896,7 +887,7 @@ export const GenerationView: React.FC<GenerationViewProps> = ({ initialAnalysisR
                       generatedImages[vp.id].src ? (
                           <div className="relative w-full aspect-[3/4] bg-gray-100 rounded-lg overflow-hidden shadow-sm group">
                               <img 
-                                  src={generatedImages[vp.id].src!} 
+                                  {...imagePreviewProps(generatedImages[vp.id].src!)}
                                   alt="Result" 
                                   className="w-full h-full object-cover"
                               />

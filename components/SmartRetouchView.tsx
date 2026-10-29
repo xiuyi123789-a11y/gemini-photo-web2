@@ -5,6 +5,7 @@ import { addRetouchLearningEntry } from '../services/knowledgeBaseService';
 import { MagicWandIcon, PlayIcon, DownloadIcon, ZoomInIcon, TrashIcon, PlusIcon, FireIcon, RefreshIcon } from './IconComponents';
 import { LoadingSpinner } from './LoadingSpinner';
 import { ImageModal } from './ImageModal';
+import {imagePreviewProps,startImageDownload} from '../services/imageDelivery';
 import { KnowledgeBaseModal } from './KnowledgeBaseModal';
 
 const CLARITY_SCHEDULERS = [
@@ -269,12 +270,7 @@ export const SmartRetouchView: React.FC = () => {
         const row = rows.find(r => r.id === rowId);
         
         try {
-            const link = document.createElement('a');
-            link.href = src;
-            link.download = `retouched_image_${rowId}_${Date.now()}.png`;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
+            startImageDownload(src,`retouched_image_${rowId}_${Date.now()}.png`);
 
             if (row?.originalImage && row.analysisText) {
                 await addRetouchLearningEntry(row.originalImage.file, row.analysisText);
@@ -326,12 +322,7 @@ export const SmartRetouchView: React.FC = () => {
 
 
     const handleDownloadSimple = (src: string, filenameBase: string) => {
-        const link = document.createElement('a');
-        link.href = src;
-        link.download = `${filenameBase}_${Date.now()}.png`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
+        startImageDownload(src,`${filenameBase}_${Date.now()}.png`);
     };
 
     const pageTitle =
@@ -422,7 +413,7 @@ export const SmartRetouchView: React.FC = () => {
                                                 >
                                                     {row.originalImage ? (
                                                         <>
-                                                            <img src={row.originalImage.preview} alt="Original" className="w-full h-full object-cover" />
+                                                            <img {...imagePreviewProps(row.originalImage.preview,'thumb')} alt="Original" className="w-full h-full object-cover" />
                                                             <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-3">
                                                                 <div className="p-3 bg-white/20 rounded-full text-white hover:bg-white/30 backdrop-blur-sm transition-colors">
                                                                     <ZoomInIcon className="w-6 h-6"/>
@@ -508,7 +499,7 @@ export const SmartRetouchView: React.FC = () => {
                                                         <LoadingSpinner text="正在重绘..." />
                                                     ) : row.generatedImage ? (
                                                         <>
-                                                            <img src={row.generatedImage} alt="Generated" className="w-full h-full object-cover" />
+                                                            <img {...imagePreviewProps(row.generatedImage)} alt="Generated" className="w-full h-full object-cover" />
                                                             <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                                                                 <div className="p-3 bg-white/20 rounded-full text-white hover:bg-white/30 backdrop-blur-sm transition-colors">
                                                                     <ZoomInIcon className="w-6 h-6"/>
@@ -621,7 +612,7 @@ export const SmartRetouchView: React.FC = () => {
                                         >
                                             {upscaleSource ? (
                                                 <>
-                                                    <img src={upscaleSource.preview} alt="Original" className="w-full h-full object-cover" />
+                                                    <img {...imagePreviewProps(upscaleSource.preview,'thumb')} alt="Original" className="w-full h-full object-cover" />
                                                     <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-3">
                                                         <div className="p-3 bg-white/20 rounded-full text-white hover:bg-white/30 backdrop-blur-sm transition-colors">
                                                             <ZoomInIcon className="w-6 h-6"/>
@@ -938,7 +929,7 @@ export const SmartRetouchView: React.FC = () => {
                                                 <LoadingSpinner text="放大中..." />
                                             ) : upscaledImage ? (
                                                 <>
-                                                    <img src={upscaledImage} alt="Upscaled" className="w-full h-full object-cover" />
+                                                    <img {...imagePreviewProps(upscaledImage)} alt="Upscaled" className="w-full h-full object-cover" />
                                                     <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                                                         <div className="p-3 bg-white/20 rounded-full text-white hover:bg-white/30 backdrop-blur-sm transition-colors">
                                                             <ZoomInIcon className="w-6 h-6"/>

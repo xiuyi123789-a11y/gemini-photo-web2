@@ -36,7 +36,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
     const method=options.method||'GET',body=options.body?JSON.parse(options.body):null;calls.push({method,url,requestId:body?.requestId,body});
     if(url==='/fake-raw.png')return new Response(new Uint8Array([1,2,3]),{headers:{'Content-Type':'image/png'}});
     if(url.endsWith('/capabilities'))return response(200,{enabled:!mode.startsWith('retry-'),maxReferences:6,counts:[1],resolutions:['1K','2K'],...(mode==='no-segmenter'?{adaptiveComposition:{configured:false}}:{}),...(mode==='generation-only'?{submission:{analysis:false,generation:true}}:{})});
-    if(url.endsWith('/workbench'))return response(200,{jobs:serverSnapshot?.workbenchJobs||[],requests:receipt&&['reserved','preparing'].includes(receipt.state)?[receipt]:[]});
+    if(url.endsWith('/workbench')){if(serverSnapshot?.workbenchGate)await serverSnapshot.workbenchGate;return response(200,{jobs:serverSnapshot?.workbenchJobs||[],requests:receipt&&['reserved','preparing'].includes(receipt.state)?[receipt]:[]});}
     if(url.includes('/active?'))return response(200,{jobs:[],requests:receipt&&url.endsWith(receipt.kind)&&['reserved','preparing'].includes(receipt.state)?[receipt]:[]});
     if(url.endsWith('/requests')&&method==='POST'){
       if(mode==='offline')throw new TypeError('MOCK disconnected');
@@ -97,7 +97,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
   class FakePoint{constructor(x,y){this.x=x;this.y=y;}matrixTransform(){return this;}}
   const context=vm.createContext({crypto:webcrypto,TextEncoder,Uint8Array,ArrayBuffer,URL,File,Blob,DOMPoint:FakePoint,
     fetch:fakeFetch,AbortSignal:{timeout:ms=>{timeouts.push(ms);return AbortSignal.timeout(['timeout-before-accept','cannot-seal'].includes(mode)?15:ms);}},
-    window:{setTimeout:(fn)=>realSetTimeout(fn,1),confirm:()=>true},document:{createElement:()=>({href:'',download:'',click(){downloads.push({href:this.href,download:this.download});}})},setTimeout:realSetTimeout,Image:FakeImage,console});
+    window:{setTimeout:(fn)=>realSetTimeout(fn,1),confirm:()=>true},document:{body:{appendChild(a){a.attached=true;},removeChild(a){a.attached=false;}},createElement:()=>({href:'',download:'',style:{},click(){assert(this.attached,'download must be attached during the original click');downloads.push({href:this.href,download:this.download});}})},setTimeout:realSetTimeout,Image:FakeImage,console});
   function compile(relative){
     if(moduleCache.has(relative))return moduleCache.get(relative);
     const source=fs.readFileSync(path.join(root,relative),'utf8');
@@ -116,6 +116,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
       if(name.endsWith('replication-contract.js'))return contract;
       if(name.endsWith('replication-brush.js'))return require(path.join(root,'shared/replication-brush.js'));
       if(name.endsWith('replicationService'))return compile('services/replicationService.ts');
+      if(name.endsWith('imageDelivery'))return compile('services/imageDelivery.ts');
       throw new Error('Unapproved module '+name);
     };
     vm.runInContext('(function(require,module,exports){'+code+'\n})',context,{filename:relative})(requireFake,module,module.exports);
@@ -305,7 +306,41 @@ test('all inputs and output can open the image viewer without model calls; downl
   const restored=retryFixture('retry-normal').h;await restored.mountEffects();await restored.click('放大当前预览');
   viewer=restored.nodes().find(n=>n.type==='ReplicationImageViewer');assert.equal(viewer.props.src,'/fake-raw.png');
   await restored.click('下载图片');assert.equal(restored.downloads.length,1);assert.match(restored.downloads[0].download,/生成结果/);
-  assert(restored.calls.some(c=>c.url==='/fake-raw.png'));assert(!restored.calls.some(c=>c.method==='POST'));
+  assert.equal(restored.downloads[0].href,'/fake-raw.png');assert(!restored.calls.some(c=>c.url==='/fake-raw.png'),'click must not await a full fetch/blob');assert(!restored.calls.some(c=>c.method==='POST'));
+});
+
+async function cachedWorkbench(){
+  const f=await completedWorkbench();
+  const asset=(job,name)=>({name,url:`/api/replication/assets/${job.id}/${name}?owner=owner-incident&v=${'a'.repeat(64)}`,width:96,height:64,sha256:'a'.repeat(64)});
+  for(const job of [f.analysis,f.generation]){job.source=asset(job,'source.png');job.references=[asset(job,'ref-1.png')];}
+  f.generation.results[0].raw=asset(f.generation,'raw-1.png');
+  const storage=new Map(),seed=harness('normal',storage);seed.service.cacheReplicationPreview([f.generation,f.analysis]);
+  return {...f,storage};
+}
+test('refresh paints cached completed images before slow HTTP, but restores no generation authority or cost consent',async()=>{
+  const f=await cachedWorkbench();let release;const gate=new Promise(r=>{release=r;});
+  const h=harness('normal',f.storage,{...f,workbenchJobs:[f.generation,f.analysis],workbenchGate:gate});
+  assert.equal(h.calls.length,0);assert(h.nodes().some(n=>n.type==='img'&&n.props.alt==='生成结果'&&n.props.src.includes('raw-1.png')));
+  assert(h.button('开始替换').props.disabled);assert(h.nodes().find(n=>n.props['aria-label']==='确认本次替换费用').props.disabled);
+  await h.mountEffects();assert(h.label().includes('正在同步任务'));assert(h.button('开始替换').props.disabled);
+  const before=h.calls.length;await h.click('下载图片');assert.equal(h.downloads.length,1);assert.equal(h.calls.length,before);assert(h.downloads[0].href.includes('download=1'));
+  release();await h.waitFor(()=>h.label().includes('已发起下载'));
+  assert(!h.calls.some(c=>c.method==='POST'));assert.equal(h.counts().remoteCreates,0);
+  const cache=JSON.parse(f.storage.get('replication_preview_v1'));assert.deepEqual(Object.keys(cache).sort(),['ownerId','raw','references','savedAt','source']);
+});
+test('authoritative empty/new-context workbench clears cached results rather than mislabelling them as current',async()=>{
+  for(const empty of [true,false]){
+    const f=await cachedWorkbench(),newAnalysis={...f.analysis,id:randomUUID(),createdAt:300,inputFingerprint:'new-context'};
+    const h=harness('normal',f.storage,{workbenchJobs:empty?[]:[newAnalysis],jobs:{[newAnalysis.id]:newAnalysis}});await h.mountEffects();
+    assert(!h.nodes().some(n=>n.type==='img'&&n.props.alt==='生成结果'));assert(h.button('下载图片').props.disabled);assert(!f.storage.has('replication_preview_v1'));
+    assert(!h.calls.some(c=>c.method==='POST'));
+  }
+});
+test('presentation cache rejects wrong account, expired, corrupted or external image metadata',async()=>{
+  const f=await cachedWorkbench(),value=JSON.parse(f.storage.get('replication_preview_v1'));
+  const variants=[{...value,ownerId:'someone-else'},{...value,savedAt:Date.now()-86400001},{...value,savedAt:null},{...value,raw:{...value.raw,url:'https://external.example/pixel'}},{...value,source:{...value.source,url:'/api/replication/assets/other/raw.png?owner=bob'}}];
+  for(const v of variants){const h=harness('normal',new Map([['replication_preview_v1',JSON.stringify(v)]]));assert.equal(h.service.readReplicationPreview(),null);assert(!h.nodes().some(n=>n.type==='img'));}
+  const h=harness('normal',new Map([['replication_preview_v1','{bad']]));assert.equal(h.service.readReplicationPreview(),null);
 });
 test('direct model output has no dependency on a configured local segmenter and generation double clicks submit once',async()=>{
   const h=harness('no-segmenter');await h.mountEffects();await h.upload();await h.click('识别产品与替换位置');

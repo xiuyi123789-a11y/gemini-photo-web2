@@ -129,6 +129,9 @@ test('private conditional image caching and bounded thumbnails preserve full out
     const meta=await sharp(Buffer.from(await preview.arrayBuffer())).metadata();assert(meta.width<=384&&meta.height<=384);
     const canvas=await h.request(url+'?preview=canvas');assert.match(canvas.headers.get('content-type'),/webp/);assert.notEqual(canvas.headers.get('etag'),preview.headers.get('etag'));
     const canvasMeta=await sharp(Buffer.from(await canvas.arrayBuffer())).metadata();assert(canvasMeta.width<=1600&&canvasMeta.height<=1600);
+    const versioned=await h.request(a.source.url.replace('/api/replication','')+'&preview=1&pv=2');assert.match(versioned.headers.get('cache-control'),/max-age=3600, immutable/);await versioned.arrayBuffer();
+    const download=await h.request(a.source.url.replace('/api/replication','')+'&download=1&preview=canvas');assert.equal(download.status,200);assert.match(download.headers.get('content-disposition'),/^attachment/);assert.equal(sha256(Buffer.from(await download.arrayBuffer())),a.source.sha256);
+    assert.equal((await h.request(a.source.url.replace('/api/replication','')+'&download=1',undefined,'bob')).status,404);
     assert.equal(h.created.length,1);
   }finally{await h.close();}
 });
