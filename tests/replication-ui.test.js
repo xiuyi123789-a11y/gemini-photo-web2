@@ -70,7 +70,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
     }
     if(method==='POST'&&url.endsWith('/revision')){currentJob={...currentJob,analysis:{...currentJob.analysis,text:body.text,revisionHash:'confirmed-h',confirmedAt:Date.now()},revision:2};return response(200,currentJob);}
     if(method==='POST'&&url.endsWith('/generation')){
-      accepted++;remoteCreates++;currentJob={...makeJob(body,'completed_needs_review'),kind:'generation',analysis:null,input:body,analysisJobId:body.analysisJobId};return response(202,currentJob);
+      accepted++;remoteCreates++;currentJob={...makeJob(body,'completed_needs_review'),kind:'generation',analysis:null,input:body,analysisJobId:body.analysisJobId};if(serverSnapshot?.generationAckGate)await serverSnapshot.generationAckGate;return response(202,currentJob);
     }
     if(method==='POST'&&url.endsWith('/recompose')){
       assert(mode.startsWith('retry-'));assert(!new Headers(options.headers).has('x-replicate-token'));
@@ -89,7 +89,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
       currentJob={...currentJob,status:'completed_needs_review',stage:'completed_needs_review',revision:2,errorCode:null,error:null,outputRecoveryAvailable:false,
         results:[{raw:{url:'/fake-raw.png'},composite:null,quality:{status:'needs_review'}}]};return response(200,currentJob);
     }
-    if(url.includes('/jobs/')){if(lookupFailures-->0)throw new TypeError('Mock lost GET response');const job=mode==='output-recovery'?currentJob:serverSnapshot?.jobs?.[url.split('/jobs/')[1]]||currentJob;return job?response(200,job):response(404,{errorCode:'JOB_NOT_FOUND'});}
+    if(url.includes('/jobs/')){if(serverSnapshot?.lookupGate)await serverSnapshot.lookupGate;if(lookupFailures-->0)throw new TypeError('Mock lost GET response');const job=mode==='output-recovery'?currentJob:serverSnapshot?.jobs?.[url.split('/jobs/')[1]]||currentJob;return job?response(200,job):response(404,{errorCode:'JOB_NOT_FOUND'});}
     throw new Error('Unexpected mock route '+method+' '+url);
   };
   class FakeImage{naturalWidth=96;naturalHeight=64;set src(v){queueMicrotask(()=>this.onload());}}
@@ -366,6 +366,101 @@ test('refresh with lost local markers restores the completed model result from o
   assert.equal(h.calls.filter(c=>c.url.endsWith('/workbench')).length,1);
   assert.equal(h.calls.filter(c=>c.url.includes('/jobs/')||c.method==='POST').length,0);
   assert(!h.nodes().find(n=>n.type==='input'&&n.props['aria-label']==='确认本次替换费用').props.checked);
+});
+
+test('server-confirmed request repairs stale local job metadata and restores its saved image without a model POST',async()=>{
+  const f=await completedWorkbench();
+  const marker=JSON.parse(f.storage.get('replication_v2_generation'));
+  f.storage.set('replication_v2_generation',JSON.stringify({...marker,jobId:randomUUID(),inputFingerprint:'stale-local-fingerprint'}));
+  const h=harness('normal',f.storage,{...f,workbenchJobs:[f.analysis,f.generation]});await h.mountEffects();
+  assert.equal(h.nodes().find(n=>n.type==='img'&&n.props.alt==='生成结果')?.props.src,'/fake-raw.png');
+  const restored=JSON.parse(h.storage.get('replication_v2_generation'));
+  assert.equal(restored.jobId,f.generation.id);assert.equal(restored.inputFingerprint,f.generation.inputFingerprint);
+  assert(!h.label().includes('已阻止关联'));assert(!h.calls.some(c=>c.method==='POST'));assert.equal(h.counts().remoteCreates,0);
+});
+
+test('a delayed old request lookup cannot overwrite the marker of a newer paid intent',async()=>{
+  const f=await completedWorkbench(),old=f.generation;
+  const op={kind:'generation',ownerId:old.ownerId,requestId:old.requestId,inputFingerprint:old.inputFingerprint};
+  let release;const lookupGate=new Promise(resolve=>{release=resolve;});
+  const storage=new Map([['replication_v2_generation',JSON.stringify(op)]]);
+  const h=harness('normal',storage,{currentJob:old,receipt:{...op,state:'accepted',jobId:old.id},lookupGate});
+  const pending=h.service.lookupOperation(op);await h.waitFor(()=>h.calls.some(c=>c.url.includes('/jobs/')));
+  const newer={...op,requestId:randomUUID(),inputFingerprint:'newer-material'};h.service.saveOperation(newer);
+  release();assert.equal((await pending).job.id,old.id);
+  assert.deepEqual(JSON.parse(storage.get('replication_v2_generation')),newer);
+  assert(!h.calls.some(c=>c.method==='POST'));assert.equal(h.counts().remoteCreates,0);
+});
+
+test('a delayed submission acknowledgment cannot overwrite another current intent',async()=>{
+  let release;const generationAckGate=new Promise(resolve=>{release=resolve;});
+  const h=harness('normal',new Map(),{generationAckGate});
+  const pending=h.service.startGeneration({inputFingerprint:'older-material'});
+  await h.waitFor(()=>h.calls.some(c=>c.url.endsWith('/generation')));
+  const newer={kind:'generation',ownerId:'owner-incident',requestId:randomUUID(),inputFingerprint:'newer-material'};h.service.saveOperation(newer);
+  release();assert.equal((await pending).inputFingerprint,'older-material');
+  assert.deepEqual(JSON.parse(h.storage.get('replication_v2_generation')),newer);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/generation')).length,1);
+});
+
+test('an old close acknowledgment cannot clear the marker protecting a newer intent',async()=>{
+  const h=harness('normal');const old={kind:'generation',ownerId:'owner-incident',requestId:randomUUID(),inputFingerprint:'older-material'};
+  h.service.saveOperation(old);const pending=h.service.closeOperation(old);
+  const newer={...old,requestId:randomUUID(),inputFingerprint:'newer-material'};h.service.saveOperation(newer);
+  assert.equal((await pending).closed,true);assert.deepEqual(JSON.parse(h.storage.get('replication_v2_generation')),newer);
+  assert.equal(h.counts().remoteCreates,0);
+});
+
+test('an unresolved older marker cannot hide the saved latest image or release its fee guard',async()=>{
+  const f=await completedWorkbench(),unknown={kind:'generation',ownerId:f.generation.ownerId,requestId:randomUUID(),jobId:randomUUID(),inputFingerprint:'unknown-intent'};
+  f.storage.set('replication_v2_generation',JSON.stringify(unknown));
+  const h=harness('normal',f.storage,{...f,workbenchJobs:[f.analysis,f.generation]});await h.mountEffects();
+  assert.equal(h.nodes().find(n=>n.type==='img'&&n.props.alt==='生成结果')?.props.src,'/fake-raw.png');
+  assert(!h.button('下载图片').props.disabled);assert.deepEqual(JSON.parse(h.storage.get('replication_v2_generation')),unknown);
+  assert(h.nodes().find(n=>n.props['aria-label']==='确认本次替换费用').props.disabled);
+  assert(!h.calls.some(c=>c.method==='POST'));assert.equal(h.counts().remoteCreates,0);
+});
+
+test('a private thumbnail failure falls back to the complete saved result and stays there after load',async()=>{
+  const f=await completedWorkbench();f.generation.results[0].raw.url='/api/replication/assets/'+f.generation.id+'/raw-1.png?owner=owner-incident';
+  const h=harness('normal',new Map(),{...f,workbenchJobs:[f.analysis,f.generation]});await h.mountEffects();
+  const image=()=>h.nodes().find(n=>n.type==='img'&&n.props.alt==='生成结果');assert(image().props.src.includes('preview=canvas'));
+  image().props.onError();h.render();assert(!image().props.src.includes('preview='));assert(image().props.src.includes('raw-1.png'));
+  image().props.onLoad();h.render();assert(!image().props.src.includes('preview='));assert(!h.button('重新加载图片'));
+  assert(!h.calls.some(c=>c.method==='POST'));assert.equal(h.counts().remoteCreates,0);
+});
+
+test('a workbench response for another owner is rejected before any material or result is displayed',async()=>{
+  const f=await completedWorkbench();f.analysis.ownerId='someone-else';f.generation.ownerId='someone-else';
+  const h=harness('normal',new Map(),{...f,workbenchJobs:[f.analysis,f.generation]});await h.mountEffects();
+  assert(!h.nodes().some(n=>n.type==='img'));assert(h.label().includes('账号'));
+  assert(!h.calls.some(c=>c.method==='POST'));assert.equal(h.counts().remoteCreates,0);
+});
+
+test('canonical browser recovery never accepts a different request, owner, or operation kind',async()=>{
+  const f=await completedWorkbench(),h=harness('normal');const expected={kind:'generation',ownerId:f.generation.ownerId,requestId:f.generation.requestId,inputFingerprint:'stale'};
+  for(const patch of [{requestId:randomUUID()},{ownerId:'other-account'},{kind:'analysis'}]){
+    assert.throws(()=>h.service.operationFromServerJob({...f.generation,...patch},expected),e=>e.code==='OPERATION_CONTEXT_MISMATCH');
+  }
+  assert.equal(h.service.operationFromServerJob(f.generation,expected).jobId,f.generation.id);
+  assert(!h.calls.some(c=>c.method==='POST'));
+});
+
+test('finished workbench keeps an explicit refresh action that reads saved results without creating or resuming a prediction',async()=>{
+  const f=await completedWorkbench(),h=harness('normal',new Map(),{...f,workbenchJobs:[f.analysis,f.generation]});await h.mountEffects();
+  assert(h.button('刷新结果'));const before=h.calls.filter(c=>c.url.endsWith('/workbench')).length;
+  await h.click('刷新结果');assert.equal(h.calls.filter(c=>c.url.endsWith('/workbench')).length,before+1);
+  assert.equal(h.nodes().find(n=>n.type==='img'&&n.props.alt==='生成结果').props.src,'/fake-raw.png');
+  assert(!h.calls.some(c=>c.method==='POST'));assert.equal(h.counts().remoteCreates,0);
+});
+
+test('refresh result cannot overwrite fresh unsubmitted uploads with old server materials',async()=>{
+  const f=await completedWorkbench(),h=harness('normal',new Map(),{...f,workbenchJobs:[f.analysis,f.generation]});
+  await h.upload();const source=h.nodes().find(n=>n.type==='img'&&n.props.alt==='场景原图缩略图').props.src;
+  const references=h.nodes().filter(n=>n.type==='img'&&n.props.alt?.startsWith('产品参考')).map(n=>n.props.src);
+  await h.click('刷新结果');assert.equal(h.nodes().find(n=>n.type==='img'&&n.props.alt==='场景原图缩略图').props.src,source);
+  assert.deepEqual(h.nodes().filter(n=>n.type==='img'&&n.props.alt?.startsWith('产品参考')).map(n=>n.props.src),references);
+  assert(h.label().includes('已保留当前上传素材'));assert(!h.calls.some(c=>c.method==='POST'||c.url.endsWith('/workbench')));
 });
 
 test('a stale analysis marker cannot replace the newer generation materials or bind old instance positions to new images',async()=>{

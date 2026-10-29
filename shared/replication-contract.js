@@ -54,6 +54,7 @@ export const ERROR_MESSAGES = {
   ANALYSIS_STALE: '素材或分析版本已改变，请重新分析并确认。',
   TARGET_SELECTION_REQUIRED: '请在识别到的产品上涂抹，确认需要替换的范围。',
   BRUSH_CONFIRMATION_REQUIRED: 'AI定位与涂抹有差异，请确认以当前涂抹为准后继续。',
+  OPERATION_CONTEXT_MISMATCH: '任务与当前账号或素材记录不一致，已暂停关联。请刷新结果核对原任务；已保存图片不会删除，不会重新生图。',
   IDEMPOTENCY_CONFLICT: '请求标识已用于不同内容，已阻止重复提交。',
   SUBMISSION_UNKNOWN: '提交结果待核对；可能已创建远端任务，不会自动重新提交。',
   CANCEL_UNKNOWN: '远端取消未确认，请核对供应商运行记录；仍可能计费。',

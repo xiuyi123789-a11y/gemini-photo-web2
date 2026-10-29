@@ -6,7 +6,7 @@ import {saveReplicationDraft,loadReplicationDraft,clearReplicationDraft} from '.
 import { MAX_REFERENCES, isFinalJob, REPLICATION_MODEL_NAMES } from '../shared/replication-contract.js';
 import { BRUSH_LIMITS, matchBrushSubjects } from '../shared/replication-brush.js';
 import { startAnalysis,startGeneration,getReplicationWorkbench,replicationImageUrl,cancelReplicationJob,getReplicationCapabilities,
-  reviseAnalysis,readOperation,saveOperation,forgetOperation,assertOperation,ownerId,
+  reviseAnalysis,readOperation,saveOperation,forgetOperation,assertOperation,operationFromServerJob,ownerId,
   lookupOperation,closeOperation,resumeReplicationJob,
   type Operation,type ReplicationJob,type ReferenceAngle,type PreserveKey,type Point,type EditMask,type JobResult,type BrushStroke } from '../services/replicationService';
 import './ImageReplicationView.css';
@@ -35,6 +35,7 @@ export const ImageReplicationView:React.FC=()=>{
   const [costConfirmed,setCostConfirmed]=useState(false);
   const [brushConfirmed,setBrushConfirmed]=useState(false);
   const [restoring,setRestoring]=useState(false),[imageRetry,setImageRetry]=useState(0),[failedImages,setFailedImages]=useState<string[]>([]);
+  const [fullImageFallbacks,setFullImageFallbacks]=useState<string[]>([]);
   const sourceInput=useRef<HTMLInputElement>(null),refsInput=useRef<HTMLInputElement>(null),mounted=useRef(true),urls=useRef(new Set<string>()),operationBusy=useRef(false);
   const viewport=useRef<HTMLDivElement>(null),paintRef=useRef<{pointerId:number;stroke:BrushStroke}|null>(null),panRef=useRef<{x:number;y:number;left:number;top:number}|null>(null);
   const brushMaskId=useRef('brush-'+crypto.randomUUID());
@@ -109,12 +110,14 @@ export const ImageReplicationView:React.FC=()=>{
         if(isFinalJob(job)&&(currentFingerprint.current&&currentFingerprint.current!==job.inputFingerprint||latest&&latest.id!==job.id&&latest.createdAt>job.createdAt)){
           if(readOperation(operation.kind)?.requestId===operation.requestId)forgetOperation(operation.kind);syncOperations();return;
         }
-        operation={...operation,jobId:job.id};saveOperation(operation);apply(job,true);
+        operation={...operation,jobId:job.id};
+        if(readOperation(operation.kind)?.requestId===operation.requestId)saveOperation(operation);
+        apply(job,true);
         syncOperations();
         if(isFinalJob(job)||job.recoveryErrorCode||job.errorCode==='RESULT_DOWNLOAD_INTERRUPTED'||['submission_unknown','cancel_unknown'].includes(job.status))return;
       }catch(e){
         // Only repeat read-only lookups. Never repeat POST submission or resume.
-        if(readingStatus&&(!(e as any).status||(e as any).status>=500)&&++readFailures<=2){await new Promise(r=>window.setTimeout(r,readFailures*1000));continue;}
+        if(readingStatus&&(e as any).code!=='OPERATION_CONTEXT_MISMATCH'&&(!(e as any).status||(e as any).status>=500)&&++readFailures<=2){await new Promise(r=>window.setTimeout(r,readFailures*1000));continue;}
         if(mounted.current&&serial===loops.current[operation.kind]){setPendingKind(previous=>previous===operation.kind?null:previous);syncOperations();setError(issue(e));setNotice('查询已中断。原请求仍保留，可重新连接或安全结束；不会自动重发。');}return;
       }
       await new Promise(r=>window.setTimeout(r,1600));
@@ -129,8 +132,19 @@ export const ImageReplicationView:React.FC=()=>{
       const newest=[...snapshot.jobs].sort((a,b)=>b.createdAt-a.createdAt||b.updatedAt-a.updatedAt)[0];
       if(newest&&!currentFingerprint.current){currentFingerprint.current=newest.inputFingerprint;setFingerprint(newest.inputFingerprint);materialsJob.current=newest;
         setSource(materialFrom(newest.source));setReferences(newest.references.map(materialFrom));}
+      // Display an authenticated saved result even if an unrelated old browser
+      // intent is unresolved. That old intent and its fee lock remain untouched.
+      const saved=snapshot.jobs.find(j=>j.kind==='generation'&&j.results.some(r=>r.raw?.url));
+      if(saved&&saved.inputFingerprint===currentFingerprint.current){
+        setCandidate({job:saved,result:saved.results[saved.results.length-1]});setMode('raw');
+      }
       const tracks=(['analysis','generation'] as const).map(async kind=>{
         let op=readOperation(kind),job=snapshot.jobs.find(j=>j.kind===kind);
+        if(op&&job&&op.requestId===job.requestId){
+          // The exact server-confirmed request binds the real source and job ID.
+          // Repair stale browser metadata, while rejecting another owner/intent.
+          op=operationFromServerJob(job,op);saveOperation(op);syncOperations();
+        }
         if(op&&job&&job.requestId!==op.requestId){
           // Another tab may have finished a newer task. Verify the old marker's
           // terminal state before replacing it; 404 alone never releases a fee lock.
@@ -182,7 +196,7 @@ export const ImageReplicationView:React.FC=()=>{
     if(feeLocked)return;
     setAnalysisJob(null);setGenerationJob(null);setAnalysisText('');setFingerprint('');currentFingerprint.current='';
     setSelectedIds([]);setMasks([]);setProtectMasks([]);setStrokes([]);paintRef.current=null;panRef.current=null;setZoom(100);setCandidate(null);setMode('original');setCostConfirmed(false);setBrushConfirmed(false);setError('');setNotice('素材已改变，请重新识别产品。');
-    materialsJob.current=null;latestKinds.current.clear();setFailedImages([]);forgetOperation('analysis');forgetOperation('generation');
+    materialsJob.current=null;latestKinds.current.clear();setFailedImages([]);setFullImageFallbacks([]);forgetOperation('analysis');forgetOperation('generation');
     syncOperations();
   }
   async function upload(files:FileList|File[],kind:'source'|'refs'){
@@ -206,12 +220,12 @@ export const ImageReplicationView:React.FC=()=>{
   async function analyze(){
     if(locked||operationBusy.current)return;
     if(!source?.file||!references.length||references.some(r=>!r.file)){setError('请上传场景原图和产品参考。已恢复的分析可直接确认并复刻；重新分析需重新上传素材。');return;}
-    operationBusy.current=true;setPendingKind('analysis');setError('');setNotice(`仅执行 ${REPLICATION_MODEL_NAMES.analysis} 产品文字分析，不会生成图片。`);
+    loops.current.analysis++;operationBusy.current=true;setPendingKind('analysis');setError('');setNotice(`仅执行 ${REPLICATION_MODEL_NAMES.analysis} 产品文字分析，不会生成图片。`);
     try{
       setMasks([]);setProtectMasks([]);setSelectedIds([]);setStrokes([]);setBrushConfirmed(false);setCostConfirmed(false);setMode('original');
       const next=await startAnalysis(source.file,references.map(r=>({file:r.file!,angle:r.angle})), '');
       currentFingerprint.current=next.inputFingerprint;setFingerprint(next.inputFingerprint);apply(next);
-      const op=readOperation('analysis');if(op)await track(op);
+      await track(operationFromServerJob(next));
     }catch(e){setError(issue(e));}
     finally{operationBusy.current=false;setPendingKind(null);syncOperations();}
   }
@@ -222,7 +236,7 @@ export const ImageReplicationView:React.FC=()=>{
     if(!selection.painted){setError('请先涂抹想替换的产品。');return;}
     if(selectionWarning&&!brushConfirmed){setError('请确认以当前涂抹为准后继续。');return;}
     if(!costConfirmed){setError(`请确认本次会请求${count}个图像预测，费用以供应商记录为准。`);return;}
-    operationBusy.current=true;setPendingKind('generation');setError('');setCostConfirmed(false);
+    loops.current.generation++;operationBusy.current=true;setPendingKind('generation');setError('');setCostConfirmed(false);
     try{
       // User's explicit generation click confirms the visible analysis and brush
       // together. Revision is a local write and cannot create a prediction.
@@ -232,7 +246,7 @@ export const ImageReplicationView:React.FC=()=>{
         selectedInstances:[],masks:[],protectMasks:[],brush,selectionMode:'user-brush',selectionOverrideConfirmed:selectionWarning&&brushConfirmed,
         maskSpace:{width:analysisJob.source.width,height:analysisJob.source.height,sourceHash:analysisJob.source.sha256},
         resolution,count,preserve,notes,confirmedPredictions:count,outputMode:'model'});
-      apply(next);const op=readOperation('generation');if(op)await track(op);
+      apply(next);await track(operationFromServerJob(next));
     }catch(e){setError(issue(e));}
     finally{operationBusy.current=false;setPendingKind(null);syncOperations();}
   }
@@ -266,7 +280,13 @@ export const ImageReplicationView:React.FC=()=>{
     if(event.currentTarget.hasPointerCapture(event.pointerId))event.currentTarget.releasePointerCapture(event.pointerId);
   }
   async function cancel(){if(!activeJob)return;try{const next=await cancelReplicationJob(activeJob.id,activeJob.origin==='local_recomposition');apply(next);const op=readOperation(next.kind);if(op)await track(op);}catch(e){setError(issue(e));}}
-  async function reconnect(){setError('');try{await restoreAll();}catch(e){setError(issue(e));}}
+  async function reconnect(){
+    setError('');
+    if(source?.file&&!currentFingerprint.current&&!materialsJob.current&&!unresolved.length&&!activeJob){
+      setNotice('已保留当前上传素材，请先识别产品；未切换到历史结果。');return;
+    }
+    try{await restoreAll();}catch(e){setError(issue(e));}
+  }
   async function recoverOutput(){
     if(!generationJob?.outputRecoveryAvailable||locked||operationBusy.current)return;
     operationBusy.current=true;setPendingKind('generation');setError('');
@@ -298,15 +318,17 @@ export const ImageReplicationView:React.FC=()=>{
   const enlarge=(src:string|undefined,label:string)=>{if(src)setEnlarged({src,label});};
   const imageProps=(url:string,thumbnail:boolean|'canvas'=false)=>{
     const key=url+(thumbnail===true?'#thumbnail':thumbnail==='canvas'?'#canvas':'');
-    return {src:replicationImageUrl(url,thumbnail,imageRetry),decoding:'async' as const,
-      onError:()=>setFailedImages(previous=>previous.includes(key)?previous:[...previous,key]),
+    return {src:replicationImageUrl(url,fullImageFallbacks.includes(key)?false:thumbnail,imageRetry),decoding:'async' as const,
+      onError:()=>{if(thumbnail&&url.startsWith('/api/replication/assets/'))setFullImageFallbacks(previous=>previous.includes(key)?previous:[...previous,key]);
+        setFailedImages(previous=>previous.includes(key)?previous:[...previous,key]);},
       onLoad:()=>setFailedImages(previous=>previous.includes(key)?previous.filter(v=>v!==key):previous)};
   };
   return <section className="rp-view" aria-label="图像复刻工作台">
     <header className="rp-heading"><h1>图像复刻</h1><div className={'rp-status-line '+(error?'rp-status-error':'')} role={error?'alert':'status'} title={statusText}>{statusText}</div>
       {failedImages.length>0&&<button className="rp-button" onClick={()=>setImageRetry(n=>n+1)}><RefreshCw/>重新加载图片</button>}
       {generationJob?.outputRecoveryAvailable&&<button className="rp-button" disabled={locked} onClick={recoverOutput}><RefreshCw/>取回已生成图片</button>}
-      {(unresolved.length>0||activeJob)&&<div className="rp-actions"><button className="rp-button" disabled={!!pendingKind} onClick={reconnect}><RefreshCw/>重新连接查询</button>
+      <button className="rp-button" title="查询服务器已保存的任务和图片，不会创建新的生图预测。" disabled={restoring||reading||!!pendingKind} onClick={reconnect}><RefreshCw/>{unresolved.length>0||activeJob?'重新连接查询':'刷新结果'}</button>
+      {(unresolved.length>0||activeJob)&&<div className="rp-actions">
         {unresolved.filter(op=>![analysisJob,generationJob].some(j=>j?.requestId===op.requestId&&!['submission_unknown','cancel_unknown'].includes(j.status))).map(op=><button key={op.requestId} className="rp-button" disabled={!!pendingKind} onClick={()=>safelyEnd(op)}>安全结束本次提交</button>)}
         {activeJob&&<button className="rp-button" onClick={cancel}>请求取消任务</button>}</div>}
     </header>

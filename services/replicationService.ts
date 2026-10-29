@@ -50,7 +50,20 @@ export const readOperation=(kind:ReplicationKind):Operation|null=>{
 };
 export const saveOperation=(operation:Operation)=>userStorage.setItem(recoveryKey(operation.kind),JSON.stringify(operation));
 export const forgetOperation=(kind:ReplicationKind)=>userStorage.removeItem(recoveryKey(kind));
-export const assertOperation=(operation:Operation,job:ReplicationJob)=>{if(!matchesOperation(operation,job))throw new Error('恢复任务与账号、素材或操作类型不一致，已阻止关联。');};
+const saveIfCurrent=(operation:Operation)=>{if(readOperation(operation.kind)?.requestId===operation.requestId)saveOperation(operation);};
+const forgetIfCurrent=(operation:Operation)=>{if(readOperation(operation.kind)?.requestId===operation.requestId)forgetOperation(operation.kind);};
+const contextMismatch=()=>Object.assign(new Error(ERROR_MESSAGES.OPERATION_CONTEXT_MISMATCH),{code:'OPERATION_CONTEXT_MISMATCH'});
+export const assertOperation=(operation:Operation,job:ReplicationJob)=>{if(!matchesOperation(operation,job))throw contextMismatch();};
+// Only an authenticated server snapshot can repair browser metadata. A matching
+// account, intent and exact request UUID are mandatory; no fuzzy/time matching.
+// This does not resolve or discard an unrelated unknown paid intent.
+export function operationFromServerJob(job:ReplicationJob,expected?:Operation):Operation {
+  if(job.ownerId!==ownerId()||!['analysis','generation'].includes(job.kind)||typeof job.id!=='string'||!job.id||
+    typeof job.requestId!=='string'||!job.requestId||typeof job.inputFingerprint!=='string'||!job.inputFingerprint||
+    (expected&&(expected.ownerId!==job.ownerId||expected.kind!==job.kind||expected.requestId!==job.requestId)))throw contextMismatch();
+  return {kind:job.kind,jobId:job.id,requestId:job.requestId,inputFingerprint:job.inputFingerprint,ownerId:job.ownerId,
+    ...(job.origin==='local_recomposition'?{localOnly:true,sourceJobId:job.derivedFrom||undefined}:{})};
+}
 const reads=new Map<string,Promise<any>>();
 async function request(path:string,body?:unknown,localOnly=false):Promise<any> {
   const key=ownerId()+':'+path;
@@ -78,9 +91,15 @@ export const getReplicationJob=(id:string):Promise<ReplicationJob>=>request('/jo
 export const findReplicationRequest=(id:string):Promise<ReplicationJob>=>request('/request/'+encodeURIComponent(id));
 export const listActiveJobs=(kind:ReplicationKind):Promise<{jobs:ReplicationJob[];requests?:RequestReceipt[]}>=>request('/active?kind='+kind);
 export async function getReplicationWorkbench():Promise<{jobs:ReplicationJob[];requests:RequestReceipt[]}>{
-  try{return await request('/workbench');}catch(e){if((e as any).status!==404)throw e;}
-  const lists=await Promise.all([listActiveJobs('analysis'),listActiveJobs('generation')]);
-  return {jobs:lists.flatMap(l=>l.jobs),requests:lists.flatMap(l=>l.requests||[])};
+  let snapshot:{jobs:ReplicationJob[];requests:RequestReceipt[]};
+  try{snapshot=await request('/workbench');}catch(e){if((e as any).status!==404)throw e;
+    const lists=await Promise.all([listActiveJobs('analysis'),listActiveJobs('generation')]);
+    snapshot={jobs:lists.flatMap(l=>l.jobs),requests:lists.flatMap(l=>l.requests||[])};
+  }
+  if(!Array.isArray(snapshot?.jobs)||!Array.isArray(snapshot.requests))throw contextMismatch();
+  snapshot.jobs.forEach(job=>operationFromServerJob(job));
+  if(snapshot.requests.some(receipt=>receipt.ownerId!==ownerId()||!['analysis','generation'].includes(receipt.kind)))throw contextMismatch();
+  return snapshot;
 }
 export function replicationImageUrl(url:string,thumbnail:boolean|'canvas'=false,retry=0):string{
   if(!url.startsWith('/api/replication/assets/'))return url;
@@ -97,7 +116,7 @@ export const reconcileReplication=(id:string,predictionId:string):Promise<Replic
 
 const assertReceipt=(operation:Operation,receipt:RequestReceipt)=>{
   if(receipt.ownerId!==operation.ownerId||receipt.kind!==operation.kind||receipt.requestId!==operation.requestId||receipt.inputFingerprint!==operation.inputFingerprint)
-    throw new Error('受理回执与账号、素材或操作类型不一致，已阻止关联。');
+    throw contextMismatch();
 };
 export async function lookupOperation(operation:Operation):Promise<{receipt:RequestReceipt|null;job:ReplicationJob|null;closed:boolean}> {
   if(operation.jobId){const job=await getReplicationJob(operation.jobId);assertOperation(operation,job);return {receipt:null,job,closed:false};}
@@ -108,14 +127,16 @@ export async function lookupOperation(operation:Operation):Promise<{receipt:Requ
   if(receipt&&receipt.state!=='accepted')return {receipt,job:null,closed:false};
   try{
     const job=receipt?.jobId?await getReplicationJob(receipt.jobId):await findReplicationRequest(operation.requestId);
-    assertOperation(operation,job);saveOperation({...operation,jobId:job.id});return {receipt,job,closed:false};
+    assertOperation(operation,job);
+    saveIfCurrent({...operation,jobId:job.id});
+    return {receipt,job,closed:false};
   }catch(e){if((e as any).status!==404)throw e;return {receipt,job:null,closed:false};}
 }
 export async function closeOperation(operation:Operation):Promise<{closed:boolean;receipt:RequestReceipt;job:ReplicationJob|null}> {
   const result=await request('/requests/'+encodeURIComponent(operation.requestId)+'/close',
     {requestId:operation.requestId,kind:operation.kind,inputFingerprint:operation.inputFingerprint});
   assertReceipt(operation,result.receipt);if(result.job)assertOperation(operation,result.job);
-  if(result.closed)forgetOperation(operation.kind);else if(result.job)saveOperation({...operation,jobId:result.job.id});
+  if(result.closed)forgetIfCurrent(operation);else if(result.job)saveIfCurrent({...operation,jobId:result.job.id});
   return result;
 }
 
@@ -125,7 +146,7 @@ async function submit(kind:ReplicationKind,payload:any):Promise<ReplicationJob> 
     const previous=readOperation(k);
     if(previous){
       let existing:ReplicationJob;
-      try{const result=await lookupOperation(previous);if(result.closed){forgetOperation(k);continue;}if(!result.job)throw new Error('REQUEST_UNRESOLVED');existing=result.job;}
+      try{const result=await lookupOperation(previous);if(result.closed){forgetIfCurrent(previous);continue;}if(!result.job)throw new Error('REQUEST_UNRESOLVED');existing=result.job;}
       catch{throw new Error('先前请求尚未核对，请重新连接查询；已阻止新的收费提交。');}
       if(!isFinalJob(existing))throw new Error('已有任务运行或提交待核对，请先处理该任务。');
     }
@@ -138,17 +159,17 @@ async function submit(kind:ReplicationKind,payload:any):Promise<ReplicationJob> 
     const receipt:RequestReceipt=await request('/requests',{requestId:operation.requestId,kind,inputFingerprint:operation.inputFingerprint});
     assertReceipt(operation,receipt);reserved=true;
     const job:ReplicationJob=await request('/'+kind,{...payload,requestId:operation.requestId});
-    assertOperation(operation,job);saveOperation({...operation,jobId:job.id});return job;
+    assertOperation(operation,job);saveIfCurrent({...operation,jobId:job.id});return job;
   } catch(error) {
     const status=(error as any).status;
     const closedFailure=()=>Number.isInteger(status)&&status>=400&&status<600?error:
       Object.assign(new Error(ERROR_MESSAGES.REQUEST_CLOSED),{code:'REQUEST_CLOSED'});
-    if(!reserved&&[401,403,413,422].includes(status)){forgetOperation(kind);throw error;}
+    if(!reserved&&[401,403,413,422].includes(status)){forgetIfCurrent(operation);throw error;}
     // GET cannot dispatch work. A 404 alone is never permission to forget or retry.
     let recovered;
     try{recovered=await lookupOperation(operation);}catch{}
     if(recovered?.job)return recovered.job;
-    if(recovered?.closed){forgetOperation(kind);throw closedFailure();}
+    if(recovered?.closed){forgetIfCurrent(operation);throw closedFailure();}
     let sealed;
     try{sealed=await closeOperation(operation);}catch{}
     if(sealed?.closed)throw closedFailure();
