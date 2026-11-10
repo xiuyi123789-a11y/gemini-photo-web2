@@ -1,8 +1,10 @@
 import { userStorage } from '../services/browserStorage';
-import {imagePreviewProps,startImageDownload} from '../services/imageDelivery';
+import {imagePreviewProps,startImageDownload,imageMetadataUrl} from '../services/imageDelivery';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CheckIcon, ChevronDownIcon, CursorIcon, DownloadIcon, EyeIcon, EyeSlashIcon, FitViewIcon, HandIcon, HomeIcon, LayersIcon, PlusIcon, RedoIcon, TextIcon, TrashIcon, UndoIcon, UploadIcon, XIcon, ZoomInIcon, ZoomOutIcon } from './IconComponents';
 import { DEFAULT_REAL_ESRGAN_PARAMS, generateWorkbenchImage, removeWatermark, retouchImageFromBase64, retouchImageFromUrl, taskChatWithGemini, upscaleImage } from '../services/replicateService';
+
+import {GenerationOptions,defaultGenerationSettings,generationSettingsIssue,type GenerationSettings} from './GenerationOptions';
 
 type ChatMessage = {
   id: string;
@@ -155,13 +157,21 @@ const findNonOverlappingPosition = (existing: CanvasItem[], w: number, h: number
   return { x, y };
 };
 
-const loadImageSize = (src: string) =>
-  new Promise<{ width: number; height: number }>((resolve, reject) => {
+const loadImageSize = async (src: string):Promise<{width:number;height:number}> => {
+  const metadata=imageMetadataUrl(src);
+  if(metadata){
+    try{
+      const response=await fetch(metadata,{credentials:'same-origin',signal:AbortSignal.timeout(8000)});
+      if(response.ok){const size=await response.json();if(size.width>0&&size.height>0)return size;}
+    }catch{/* Older servers or interrupted metadata reads can use native image sizing. */}
+  }
+  return new Promise<{ width: number; height: number }>((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve({ width: img.naturalWidth || img.width, height: img.naturalHeight || img.height });
     img.onerror = () => reject(new Error('Failed to load image'));
     img.src = src;
   });
+};
 
 const loadVideoSize = (src: string) =>
   new Promise<{ width: number; height: number }>((resolve, reject) => {
@@ -261,6 +271,12 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
     return raw === 'workbench' ? 'workbench' : 'init';
   });
   const [draft, setDraft] = useState('');
+  const [generationSettings,setGenerationSettings]=useState<GenerationSettings>(()=>{const saved=readJsonFromLocalStorage<GenerationSettings>('ql_home_generation_settings',defaultGenerationSettings);return saved&&typeof saved.style==='string'&&typeof saved.aspectRatio==='string'&&!generationSettingsIssue(saved)?saved:defaultGenerationSettings;});
+  const [generationIssue,setGenerationIssue]=useState('');
+  useEffect(()=>{userStorage.setItem('ql_home_generation_settings',JSON.stringify(generationSettings));},[generationSettings]);
+  const pendingInitial=useRef<string|null>(null);
+  const initialBusy=useRef(false);
+  const [starting,setStarting]=useState(false);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [isUploadDragOver, setIsUploadDragOver] = useState(false);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
@@ -711,29 +727,22 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
   );
 
   const handleSendFromInit = useCallback(async () => {
-    const text = draft.trim();
-    if (!text && pendingImages.length === 0 && pendingFiles.length === 0 && !hasProductInfo) return;
-    const sessionId = ensureSession();
-    const fullText = composeInput(text);
-    if (fullText) {
-      appendMessage(sessionId, { id: uuid(), role: 'user', content: fullText, createdAt: Date.now() });
-      setDraft('');
-    }
-    if (pendingFiles.length > 0) {
-      appendMessage(sessionId, {
-        id: uuid(),
-        role: 'user',
-        content: `【已上传文件】\n${pendingFiles.map((f) => `${f.name} (${Math.ceil(f.size / 1024)} KB)`).join('\n')}`,
-        createdAt: Date.now()
-      });
-      setPendingFiles([]);
-    }
-    if (pendingImages.length > 0) {
-      await importAssets(pendingImages);
-      setPendingImages([]);
-    }
-    setStage('workbench');
-  }, [appendMessage, composeInput, draft, ensureSession, hasProductInfo, importAssets, pendingFiles, pendingImages]);
+    if(initialBusy.current)return;
+    const issue=generationSettingsIssue(generationSettings);
+    if(issue){setGenerationIssue(issue);return;}
+    const text=draft.trim();
+    if(!text&&!pendingImages.length&&!pendingFiles.length&&!hasProductInfo){setGenerationIssue('请输入图片需求或上传商品图片。');return;}
+    initialBusy.current=true;setStarting(true);setGenerationIssue('');
+    try{
+      const sessionId=ensureSession();
+      if(pendingFiles.length)appendMessage(sessionId,{id:uuid(),role:'user',content:'【已上传文件】\n'+pendingFiles.map(f=>f.name).join('\n'),createdAt:Date.now()});
+      if(pendingImages.length)await importAssets(pendingImages);
+      if(pendingFiles.length)setGenerationIssue('已接收文件；请在需求中写明需要用于图片的商品信息。');
+      pendingInitial.current=text||'根据已提供的商品信息和图片，生成一张商品展示图。';
+      setPendingImages([]);setPendingFiles([]);setDraft('');setStage('workbench');
+    }catch(e){setGenerationIssue(e instanceof Error?e.message:'素材载入失败，请重试。');}
+    finally{initialBusy.current=false;setStarting(false);}
+  },[draft,generationSettings,ensureSession,hasProductInfo,importAssets,pendingFiles,pendingImages,appendMessage]);
 
   const [chatInput, setChatInput] = useState('');
   const [isWorkbenchAiRunning, setIsWorkbenchAiRunning] = useState(false);
@@ -780,13 +789,16 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
     chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
   }, [activeSession?.messages.length, stage]);
 
-  const handleSendInWorkbench = useCallback(() => {
-    if (isWorkbenchAiRunning) return;
-    const text = chatInput.trim();
-    if (!text) return;
+  const handleSendInWorkbench = useCallback((requestedText?:string) => {
+    if (isWorkbenchAiRunning || workbenchAbortRef.current) return;
+    const issue=generationSettingsIssue(generationSettings);
+    if(issue){setGenerationIssue(issue);return;}
+    const text = (requestedText??chatInput).trim();
+    if (!text){setGenerationIssue('请输入本次图片需求。');return;}
+    setGenerationIssue('');
     const sessionId = ensureSession();
     const fullPrompt = composeInput(text);
-    lastWorkbenchSendRef.current = { text: chatInput };
+    lastWorkbenchSendRef.current = { text };
     appendMessage(sessionId, { id: uuid(), role: 'user', content: fullPrompt, createdAt: Date.now() });
     setChatInput('');
     const assistantId = uuid();
@@ -811,12 +823,14 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
         taskMessages.push({ role: 'user', content: fullPrompt });
 
         const modelText = await taskChatWithGemini(taskMessages, {
-          retry: { signal: abortController.signal }
+          retry: { signal: abortController.signal },
+          generationOptions:generationSettings
         });
         const parsed = tryParseJsonFromText(modelText);
 
         if (!parsed || typeof parsed !== 'object') {
           updateMessage(sessionId, assistantId, (m) => ({ ...m, content: modelText }));
+          setGenerationIssue('需求理解未完成，请查看上方回复后重新发送。');
           return;
         }
 
@@ -824,11 +838,12 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
         if (type === 'clarify') {
           const question = String((parsed as any).question || '').trim() || modelText;
           updateMessage(sessionId, assistantId, (m) => ({ ...m, content: question }));
+          setGenerationIssue(question);setChatInput(text);
           return;
         }
 
         const nextPrompt = String((parsed as any).prompt || '').trim() || fullPrompt;
-        const aspectRatio = String((parsed as any).aspect_ratio || '').trim() || '3:4';
+        const aspectRatio = generationSettings.aspectRatio;
 
         updateMessage(sessionId, assistantId, (m) => ({ ...m, content: '收到，正在生成中…' }));
 
@@ -865,6 +880,7 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
         }
         const message = error instanceof Error ? error.message : String(error);
         updateMessage(sessionId, assistantId, (m) => ({ ...m, content: `生成失败：${message}` }));
+        setGenerationIssue(`生成失败：${message}`);setChatInput(text);
       } finally {
         if (workbenchRunIdRef.current !== runId) return;
         if (workbenchAbortRef.current === abortController) workbenchAbortRef.current = null;
@@ -875,6 +891,7 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
     activeSession?.messages,
     appendMessage,
     chatInput,
+    generationSettings,
     commit,
     composeInput,
     ensureSession,
@@ -884,6 +901,14 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
     tryParseJsonFromText,
     updateMessage
   ]);
+
+  useEffect(()=>{
+    if(stage!=='workbench'||isWorkbenchAiRunning||!pendingInitial.current)return;
+    const text=pendingInitial.current;pendingInitial.current=null;
+    handleSendInWorkbench(text);
+  },[stage,isWorkbenchAiRunning,handleSendInWorkbench]);
+
+  const generationOptions=<GenerationOptions compact={stage==='workbench'} value={generationSettings} onChange={value=>{setGenerationSettings(value);setGenerationIssue('');}} disabled={starting||isWorkbenchAiRunning} error={generationIssue}/>;
 
   const [panelCollapsed, setPanelCollapsed] = useState(() => userStorage.getItem('ql_home_panel_collapsed') === '1');
   const [panelWidth, setPanelWidth] = useState(() => Number(userStorage.getItem('ql_home_panel_width')) || 360);
@@ -1807,7 +1832,7 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
                 </div>
                 <div className="min-w-0">
                   <div className="text-xl font-extrabold text-slate-900">量子AI设计</div>
-                  <div className="text-sm text-slate-600">上传素材，描述需求，发送后进入画布工作台。</div>
+                  <div className="text-sm text-slate-600">上传素材，选择风格和比例，点击生成后在画布查看结果。</div>
                 </div>
               </div>
 
@@ -1948,6 +1973,7 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
                 </div>
               )}
 
+              {generationOptions}
               <div className="mt-4 flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
                   <button
@@ -1972,9 +1998,9 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
                   type="button"
                   onClick={handleSendFromInit}
                   className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-extrabold shadow-lg shadow-blue-500/20 hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  disabled={!draft.trim() && pendingImages.length === 0 && pendingFiles.length === 0 && !hasProductInfo}
+                  disabled={starting}
                 >
-                  <span>发送</span>
+                  <span>{starting?'正在载入素材…':'生成图片'}</span>
                 </button>
               </div>
 
@@ -2624,7 +2650,7 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
                 title="拖拽调整对话输入区高度"
               />
 
-              <div className="p-3 bg-white/60 flex flex-col gap-2 min-h-0" style={{ height: chatComposerHeight }}>
+              <div className="p-3 bg-white/60 flex flex-col gap-2 min-h-0 shrink-0 overflow-y-auto" style={{ height: Math.min(Math.max(280,chatComposerHeight),Math.max(220,panelOuterHeight-100)) }}>
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <button
@@ -2763,7 +2789,8 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
                   </div>
                 )}
 
-                <div className="flex items-end gap-2 mt-auto">
+                {generationOptions}
+                <div className="flex items-end gap-2 mt-auto shrink-0">
                   <textarea
                     value={chatInput}
                     onChange={(e) => setChatInput(e.target.value)}
@@ -2774,7 +2801,7 @@ export const HomeView: React.FC<{ onStageChange?: (stage: 'init' | 'workbench') 
                   />
                   <button
                     type="button"
-                    onClick={isWorkbenchAiRunning ? cancelWorkbenchAi : handleSendInWorkbench}
+                    onClick={isWorkbenchAiRunning ? cancelWorkbenchAi : ()=>handleSendInWorkbench()}
                     className={`px-4 py-2 rounded-xl text-white text-sm font-extrabold transition-colors ${
                       isWorkbenchAiRunning ? 'bg-slate-700 hover:bg-slate-800' : 'bg-blue-600 hover:bg-blue-700'
                     }`}

@@ -3,16 +3,16 @@ import { userStorage } from './services/browserStorage';
 
 import './index.css';
 
-import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback, lazy, Suspense } from 'react';
 import { Header } from './components/Header';
-import { AnalysisView } from './components/AnalysisView';
-import { GenerationView } from './components/GenerationView';
-import { KnowledgeBaseView } from './components/KnowledgeBaseView';
-import { SmartRetouchView } from './components/SmartRetouchView';
-import { ImageReplicationView } from './components/ImageReplicationView';
+const AnalysisView=lazy(()=>import('./components/AnalysisView').then(m=>({default:m.AnalysisView})));
+const GenerationView=lazy(()=>import('./components/GenerationView').then(m=>({default:m.GenerationView})));
+const KnowledgeBaseView=lazy(()=>import('./components/KnowledgeBaseView').then(m=>({default:m.KnowledgeBaseView})));
+const SmartRetouchView=lazy(()=>import('./components/SmartRetouchView').then(m=>({default:m.SmartRetouchView})));
+const ImageReplicationView=lazy(()=>import('./components/ImageReplicationView').then(m=>({default:m.ImageReplicationView})));
 import { Copy } from 'lucide-react';
 import { BookOpenIcon, HomeIcon, MagicWandIcon, PlayIcon, RefreshIcon } from './components/IconComponents';
-import { HomeView } from './components/HomeView';
+const HomeView=lazy(()=>import('./components/HomeView').then(m=>({default:m.HomeView})));
 import { AnalysisResult } from './types';
 import { LoginView } from './components/LoginView';
 
@@ -23,17 +23,19 @@ const App: React.FC = () => {
   const [identity, setIdentity] = useState<{ mode: string; user: { id: string; username: string } | null } | null>(null);
   const [authError, setAuthError] = useState(false);
   useEffect(() => {
-    fetch('/api/auth/me').then(r => { if (!r.ok) throw new Error(); return r.json(); }).then(identity => { setStorageUser(identity.user?.id || null); setIdentity(identity); }).catch(() => setAuthError(true));
+    fetch('/api/auth/me').then(r => { if (!r.ok) throw new Error(); return r.json(); }).then(identity => { setStorageUser(identity.user?.id || null); const saved=userStorage.getItem('currentView') as View; setCurrentViewState(['home','analyze','generate','retouch','replicate','knowledge'].includes(saved)?saved:'analyze'); setIdentity(identity); }).catch(() => setAuthError(true));
   }, []);
   const [currentView, setCurrentViewState] = useState<View>(() => {
       return (userStorage.getItem('currentView') as View) || 'analyze';
   });
+  const [visited,setVisited]=useState<Set<View>>(()=>new Set());
+  useEffect(()=>{if(identity)setVisited(previous=>new Set([...previous,currentView]));},[identity,currentView]);
   const [homeStage, setHomeStage] = useState<'init' | 'workbench'>(() => {
     const raw = userStorage.getItem('ql_home_stage');
     return raw === 'workbench' ? 'workbench' : 'init';
   });
   const isWorkbench = currentView === 'home' && homeStage === 'workbench';
-  
+
   const setCurrentView = (view: View) => {
       setCurrentViewState(view);
       userStorage.setItem('currentView', view);
@@ -151,7 +153,7 @@ const App: React.FC = () => {
       ro.disconnect();
       window.removeEventListener('resize', syncNarrowFlag);
     };
-  }, []);
+  }, [identity, currentView === 'home']);
 
   if (authError) return <main className="p-8">无法连接服务。<button onClick={() => window.location.reload()}>重试</button></main>;
   if (!identity) return <main className="p-8">正在连接工作室…</main>;
@@ -188,28 +190,30 @@ const App: React.FC = () => {
         <div className="ql-scroll-area">
           <main className="flex-1 min-h-0">
             {currentView === 'home' ? (
-              <HomeView onStageChange={setHomeStage} />
+              <Suspense fallback={<div className="p-8" role="status">正在打开页面…</div>}><HomeView onStageChange={setHomeStage} /></Suspense>
             ) : (
               <div className="ql-content-outer" ref={contentOuterRef}>
                 <div className="ql-content-sizer ql-edit">
                   <div className="ql-content-scale">
+                    <Suspense fallback={<div className="p-8" role="status">正在打开页面…</div>}>
                     <div className="transition-opacity duration-500 ease-in-out">
                       <div style={{ display: currentView === 'analyze' ? 'block' : 'none' }}>
-                        <AnalysisView onAnalysisComplete={handleAnalysisComplete} />
+                        {(currentView === 'analyze' || visited.has('analyze')) && <AnalysisView onAnalysisComplete={handleAnalysisComplete} />}
                       </div>
                       <div style={{ display: currentView === 'generate' ? 'block' : 'none' }}>
-                        <GenerationView initialAnalysisResult={analysisResult} />
+                        {(currentView === 'generate' || visited.has('generate')) && <GenerationView initialAnalysisResult={analysisResult} />}
                       </div>
                       <div style={{ display: currentView === 'retouch' ? 'block' : 'none' }}>
-                        <SmartRetouchView />
+                        {(currentView === 'retouch' || visited.has('retouch')) && <SmartRetouchView />}
                       </div>
                       <div style={{ display: currentView === 'knowledge' ? 'block' : 'none' }}>
-                        <KnowledgeBaseView />
+                        {(currentView === 'knowledge' || visited.has('knowledge')) && <KnowledgeBaseView />}
                       </div>
                       <div style={{ display: currentView === 'replicate' ? 'block' : 'none' }}>
-                        <ImageReplicationView />
+                        {(currentView === 'replicate' || visited.has('replicate')) && <ImageReplicationView />}
                       </div>
                     </div>
+                    </Suspense>
                   </div>
                 </div>
               </div>

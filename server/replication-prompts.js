@@ -50,7 +50,7 @@ export function parseProductAnalysis(output, referenceCount) {
   const instances = data.scene.old_product_instances;
   if (!Array.isArray(instances) || instances.length > 12 || new Set(instances.map(i => i?.instance_id)).size !== instances.length) bad();
   for (const i of instances) if (!obj(i) || !str(i.instance_id, 80) || !/^[a-zA-Z0-9_-]+$/.test(i.instance_id) ||
-    !str(i.location, 500) || !str(i.visible_view, 500) || !strings(i.occluders) || !validSubjectBox(i.bbox) || typeof i.selection_required !== 'boolean') bad();
+    !str(i.location, 500) || !str(i.visible_view, 500) || !strings(i.occluders) || typeof i.selection_required !== 'boolean') bad();
   if (!obj(data.scene.lighting) || !str(data.scene.lighting.direction, 500) || !str(data.scene.lighting.temperature, 500) || !strings(data.warnings)) bad();
   if (!Array.isArray(data.old_new_differences) || data.old_new_differences.length > 40 ||
     !data.old_new_differences.every(d => obj(d) && str(d.attribute, 100) && str(d.observation))) bad();
@@ -59,7 +59,7 @@ export function parseProductAnalysis(output, referenceCount) {
     schema_version:'1.0', new_product:{category:n.category,brand:n.brand,colors:n.colors,
       observed_features:n.observed_features.map(f=>({name:f.name,evidence_refs:f.evidence_refs,certainty:f.certainty})),uncertainties:n.uncertainties},
     reference_views:views.map(v=>({ref_index:v.ref_index,view:v.view,visible_features:v.visible_features})),
-    scene:{old_product_instances:instances.map(i=>({instance_id:i.instance_id,location:i.location,visible_view:i.visible_view,occluders:i.occluders,bbox:[...i.bbox],selection_required:true})),
+    scene:{old_product_instances:instances.map(i=>({instance_id:i.instance_id,location:i.location,visible_view:i.visible_view,occluders:i.occluders,bbox:validSubjectBox(i.bbox)?[...i.bbox]:null,selection_required:true})),
       lighting:{direction:data.scene.lighting.direction,temperature:data.scene.lighting.temperature}},
     old_new_differences:data.old_new_differences.map(d=>({attribute:d.attribute,observation:d.observation})), warnings:data.warnings
   };

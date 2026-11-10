@@ -68,6 +68,17 @@ test('text-only frontend POST timeout sends once even when callers request three
   const s=loadStudioServices({fetchImpl:async()=>{creates++;throw new TypeError('simulated lost response');}});
   await assert.rejects(s.runVisionAnalysis(file(),'describe',{retries:3}));assert.equal(creates,1);
 });
+
+test('explicit generation settings survive the frontend and override an unnecessary model clarification',async()=>{
+  const h=await harness({output:JSON.stringify({type:'clarify',missing_slots:['style','aspect_ratio'],question:'什么风格和比例？'})});
+  try{
+    const result=JSON.parse(await h.service.taskChatWithGemini([{role:'user',content:'白色鞋子商品图'}],{generationOptions:{style:'极简',aspectRatio:'9:16'}}));
+    assert.equal(result.type,'generate');assert.equal(result.aspect_ratio,'9:16');assert.match(result.prompt,/白色鞋子/);assert.match(result.prompt,/极简/);
+    assert.equal(h.calls.length,1);assert.match(h.calls[0].input.prompt,/用户已在界面明确选择/);
+    const missing=JSON.parse(await h.service.taskChatWithGemini([{role:'user',content:'商品图'}],{generationOptions:{style:'',aspectRatio:''}}));
+    assert.equal(missing.type,'clarify');assert.deepEqual(missing.missing_slots,['style','aspect_ratio']);assert.match(missing.question,/生成设置/);assert.equal(h.calls.length,1,'missing options never incur a model call');
+  }finally{await h.close();}
+});
 test('text adapter rejects image-model output and preserves the original prediction ID on failure',async()=>{
   const analyze=createTextAnalyzer({providerFactory:()=>({create:async()=>({id:'wrong-model-prediction',status:'succeeded',model:'google/nano-banana-2',output:'image-url'})})});
   await assert.rejects(analyze('fake',{prompt:'test',system:'test'}),e=>e.code==='PREDICTION_MODEL_MISMATCH'&&e.predictionId==='wrong-model-prediction');

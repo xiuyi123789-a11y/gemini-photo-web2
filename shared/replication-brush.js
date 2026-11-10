@@ -20,7 +20,11 @@ export const brushSvg=(brush,width,height)=>`<svg xmlns="http://www.w3.org/2000/
 // This grid matches selection to instance IDs only. Neither it nor the full-size
 // selection raster is a final composition boundary; vision supplies object contours.
 export function matchBrushSubjects(brush,subjects,sourceWidth,sourceHeight){
-  const scale=192/Math.max(sourceWidth,sourceHeight),width=Math.max(1,Math.round(sourceWidth*scale)),height=Math.max(1,Math.round(sourceHeight*scale));
+  // Keep the smallest stroke at least two samples wide, including a single
+  // click. A fixed 192px grid used to discard real paint on large images.
+  const minSize=Math.min(.06,...brush.strokes.map(s=>s.size));
+  const scale=Math.min(1,Math.max(192/Math.max(sourceWidth,sourceHeight),2/(minSize*Math.min(sourceWidth,sourceHeight))));
+  const width=Math.max(1,Math.round(sourceWidth*scale)),height=Math.max(1,Math.round(sourceHeight*scale));
   const pixels=new Uint8Array(width*height),unit=Math.min(width,height);
   for(const s of brush.strokes){
     const r=s.size*unit/2,value=s.tool==='erase'?0:1;

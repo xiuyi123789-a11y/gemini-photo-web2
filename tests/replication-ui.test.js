@@ -251,9 +251,9 @@ test('paint/erase/undo/clear automatically recheck one or two subjects and inval
   assert(h.button('开始替换').props.disabled);assert.equal(h.counts().remoteCreates,1);
 });
 
-test('background painting alone cannot bypass target confirmation; zoom keeps normalized coordinates and creates no prediction',async()=>{
+test('painting outside AI boxes needs only fee consent; zoom keeps normalized coordinates',async()=>{
   const h=harness('normal');await h.upload();await h.click('识别产品与替换位置');h.change('画布缩放',300);
-  await h.paint([{x:.5,y:.02},{x:.9,y:.02}]);assert(h.button('开始替换').props.disabled);assert(h.label().includes('AI定位与涂抹有差异'));
+  await h.paint([{x:.5,y:.02},{x:.9,y:.02}]);assert(h.button('开始替换').props.disabled);assert(!h.label().includes('AI定位与涂抹有差异'));
   await h.click('清空涂抹');await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);h.change('确认本次替换费用',true);await h.click('开始替换');
   const body=h.calls.find(c=>c.url.endsWith('/generation')).body;assert(Math.abs(body.brush.strokes[0].points[0].x-.2)<1e-6);assert(Math.abs(body.brush.strokes[0].points[0].y-.4)<1e-6);
 });
@@ -385,11 +385,11 @@ async function completedWorkbench(){
   return {analysis,generation,storage:new Map(original.storage),jobs:{[analysis.id]:analysis,[generation.id]:generation}};
 }
 
-test('fee checkbox remains usable before painting or with a mismatched brush, but cannot bypass target confirmation',async()=>{
+test('fee checkbox remains usable and user brush is accepted outside AI boxes',async()=>{
   const h=harness('normal');await h.upload();await h.click('识别产品与替换位置');
   h.change('确认本次替换费用',true);assert(h.button('开始替换').props.disabled);
   await h.paint([{x:.5,y:.02},{x:.9,y:.02}]);h.change('确认本次替换费用',true);
-  assert(h.button('开始替换').props.disabled);assert(h.label().includes('AI定位与涂抹有差异'));assert.equal(h.counts().remoteCreates,1);
+  assert(!h.button('开始替换').props.disabled);assert(!h.label().includes('AI定位与涂抹有差异'));assert.equal(h.counts().remoteCreates,1);
   await h.click('清空涂抹');await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);h.change('确认本次替换费用',true);
   assert(!h.button('开始替换').props.disabled);assert(!h.calls.some(c=>c.url.endsWith('/generation')));
 });
@@ -459,7 +459,7 @@ test('an unresolved older marker cannot hide the saved latest image or release i
 test('a private thumbnail failure falls back to the complete saved result and stays there after load',async()=>{
   const f=await completedWorkbench();f.generation.results[0].raw.url='/api/replication/assets/'+f.generation.id+'/raw-1.png?owner=owner-incident';
   const h=harness('normal',new Map(),{...f,workbenchJobs:[f.analysis,f.generation]});await h.mountEffects();
-  const image=()=>h.nodes().find(n=>n.type==='img'&&n.props.alt==='生成结果');assert(image().props.src.includes('preview=canvas'));
+  const image=()=>h.nodes().find(n=>n.type==='img'&&n.props.alt==='生成结果');assert(image().props.src.includes('preview=1'));
   image().props.onError();h.render();assert(!image().props.src.includes('preview='));assert(image().props.src.includes('raw-1.png'));
   image().props.onLoad();h.render();assert(!image().props.src.includes('preview='));assert(!h.button('重新加载图片'));
   assert(!h.calls.some(c=>c.method==='POST'));assert.equal(h.counts().remoteCreates,0);
@@ -550,37 +550,32 @@ test('legacy missing output exposes an explicit read/download recovery action, r
   assert.equal(h.counts().remoteCreates,0);
 });
 
-test('AI mismatch is advisory: explicit brush and fee confirmations enable one generation, including a double click',async()=>{
+test('user brush overrides AI mismatch without an extra checkbox and double click submits once',async()=>{
   const h=harness('normal');await h.upload();await h.click('识别产品与替换位置');await h.paint([{x:.5,y:.04},{x:.9,y:.04}]);
-  assert(h.label().includes('AI定位与涂抹有差异'));assert(!h.label().includes('与产品位置不匹配'));
-  h.change('确认本次替换费用',true);assert(h.button('开始替换').props.disabled);
-  await h.button('开始替换').props.onClick();h.render();assert(!h.calls.some(c=>c.url.endsWith('/generation')));
-  h.change('确认以当前涂抹为准',true);assert(h.button('开始替换').props.disabled,'target confirmation must reset the fee checkbox');
+  assert(!h.label().includes('AI定位与涂抹有差异'));assert(!h.nodes().some(n=>n.props['aria-label']==='确认以当前涂抹为准'));
   h.change('确认本次替换费用',true);assert(!h.button('开始替换').props.disabled);
   const click=h.button('开始替换').props.onClick;await Promise.all([click(),click()]);h.render();
   const posts=h.calls.filter(c=>c.url.endsWith('/generation'));assert.equal(posts.length,1);
-  assert.equal(posts[0].body.selectionMode,'user-brush');assert.equal(posts[0].body.selectionOverrideConfirmed,true);
+  assert.equal(posts[0].body.selectionMode,'user-brush');assert.equal(posts[0].body.selectionOverrideConfirmed,undefined);
   assert.equal(posts[0].body.outputMode,'model');assert.deepEqual(posts[0].body.selectedInstances,[]);assert.equal(posts[0].body.brush.strokes.length,1);
 });
 
-test('editing a mismatched brush revokes both confirmations, and an erased/empty brush cannot generate',async()=>{
+test('editing user paint requires fresh fee consent; empty or erased brushes cannot generate',async()=>{
   const h=harness('normal');await h.upload();await h.click('识别产品与替换位置');await h.paint([{x:.6,y:.02},{x:.8,y:.02}]);
-  h.change('确认以当前涂抹为准',true);h.change('确认本次替换费用',true);assert(!h.button('开始替换').props.disabled);
+  h.change('确认本次替换费用',true);assert(!h.button('开始替换').props.disabled);
   await h.paint([{x:.55,y:.03},{x:.9,y:.03}]);assert(h.button('开始替换').props.disabled);
-  for(const name of ['确认以当前涂抹为准','确认本次替换费用'])assert.equal(h.nodes().find(n=>n.props['aria-label']===name).props.checked,false);
-  h.change('确认以当前涂抹为准',true);h.change('确认本次替换费用',true);await h.click('撤销一笔');
-  assert(h.button('开始替换').props.disabled);assert.equal(h.nodes().find(n=>n.props['aria-label']==='确认以当前涂抹为准').props.checked,false);
-  await h.click('清空涂抹');assert(h.button('开始替换').props.disabled);assert(!h.nodes().some(n=>n.props['aria-label']==='确认以当前涂抹为准'));
-  assert(!h.calls.some(c=>c.url.endsWith('/generation')));
+  assert.equal(h.nodes().find(n=>n.props['aria-label']==='确认本次替换费用').props.checked,false);
+  h.change('确认本次替换费用',true);await h.click('撤销一笔');assert(h.button('开始替换').props.disabled);
+  await h.click('清空涂抹');assert(h.button('开始替换').props.disabled);assert(!h.calls.some(c=>c.url.endsWith('/generation')));
 });
 
 test('an analysis without AI instances still permits user painting and explicitly confirmed generation, with refresh requiring fresh confirmations',async()=>{
   const h=harness('no-targets');await h.upload();await h.click('识别产品与替换位置');await h.paint([{x:.2,y:.4},{x:.6,y:.4}]);
-  h.change('确认以当前涂抹为准',true);h.change('确认本次替换费用',true);await h.click('开始替换');
+  h.change('确认本次替换费用',true);await h.click('开始替换');
   const generation=h.snapshot().currentJob;
   const analysis={...structuredClone(generation),id:generation.analysisJobId,kind:'analysis',requestId:JSON.parse(h.storage.get('replication_v2_analysis')).requestId,
     status:'succeeded',createdAt:generation.createdAt-1,analysis:{data:{new_product:{category:'鞋'},scene:{old_product_instances:[]}},text:'new product',revisionHash:'confirmed-h',confirmedAt:1},results:[],input:null};
   const refreshed=harness('normal',h.storage,{currentJob:generation,jobs:{[analysis.id]:analysis,[generation.id]:generation},workbenchJobs:[analysis,generation]});await refreshed.mountEffects();
-  for(const name of ['确认以当前涂抹为准','确认本次替换费用'])assert.equal(refreshed.nodes().find(n=>n.props['aria-label']===name).props.checked,false);
+  for(const name of ['确认本次替换费用'])assert.equal(refreshed.nodes().find(n=>n.props['aria-label']===name).props.checked,false);
   assert(refreshed.button('开始替换').props.disabled);assert(!refreshed.calls.some(c=>c.method==='POST'));
 });

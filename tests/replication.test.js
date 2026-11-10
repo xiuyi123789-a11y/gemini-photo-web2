@@ -72,13 +72,12 @@ async function waitFor(h,id,predicate=j=>isFinalJob(j)||['submission_unknown','c
 async function analyze(h){const r=await h.request('/analysis',analysisBody());assert.equal(r.status,202);return waitFor(h,(await r.json()).id);}
 async function approved(h){const j=await analyze(h);const response=await h.request('/jobs/'+j.id+'/revision',{text:j.analysis.text,previousHash:j.analysis.revisionHash});assert.equal(response.status,200);return response.json();}
 
-test('user brush outside all AI boxes requires target consent, then generates once with the full guide and no invented instance IDs',async()=>{
+test('user brush outside AI boxes generates once without target consent and preserves the full guide',async()=>{
   const h=await harness();try{
     const a=await approved(h),brush={version:1,strokes:[{tool:'paint',size:.12,points:[{x:.25,y:.08},{x:.85,y:.08}]}]};
     const input=generationBody(a,{outputMode:'model',selectionMode:'user-brush',selectionOverrideConfirmed:false,selectedInstances:[],masks:[],protectMasks:[],brush});
     assert.equal(matchBrushSubjects(brush,a.analysis.data.scene.old_product_instances,96,64).outsideFraction,1);
-    const blocked=await h.request('/generation',input);assert.equal(blocked.status,422);assert.equal((await blocked.json()).errorCode,'BRUSH_CONFIRMATION_REQUIRED');assert.equal(h.created.length,1);
-    const accepted={...input,selectionOverrideConfirmed:true};
+    const accepted=input;
     const r=await h.request('/generation',accepted);assert.equal(r.status,202);const g=await waitFor(h,(await r.json()).id);
     assert.equal(g.status,'completed_needs_review');assert.equal(h.created.length,2);assert.equal(h.created[1].model,REPLICATION_MODELS.generation);
     assert.equal(h.created[1].input.image_input.length,4);assert.match(h.created[1].input.prompt,/用户确认：以区域指引图中的蓝色涂抹/);assert(!h.created[1].input.prompt.includes('"bbox":'));
@@ -88,12 +87,12 @@ test('user brush outside all AI boxes requires target consent, then generates on
   }finally{await h.close();}
 });
 
-test('manual selection cannot bypass empty brushes, target consent, image mode, identity, or fee validation',async()=>{
+test('manual selection cannot bypass empty brushes, image mode, identity, or fee validation',async()=>{
   const h=await harness();try{
     const a=await approved(h),brush={version:1,strokes:[{tool:'paint',size:.12,points:[{x:.3,y:.08},{x:.8,y:.08}]}]};
     const input=generationBody(a,{outputMode:'model',selectionMode:'user-brush',selectionOverrideConfirmed:true,selectedInstances:[],masks:[],protectMasks:[],brush});
     const erased={version:1,strokes:[...brush.strokes,{...brush.strokes[0],tool:'erase'}]};
-    for(const patch of [{brush:{version:1,strokes:[]}},{brush:erased},{selectionOverrideConfirmed:false},{selectionOverrideConfirmed:'true'},{outputMode:'adaptive'},{selectedInstances:['left']},{confirmedPredictions:0},{maskSpace:{...input.maskSpace,sourceHash:'0'.repeat(64)}}]){
+    for(const patch of [{brush:{version:1,strokes:[]}},{brush:erased},{selectionOverrideConfirmed:'true'},{outputMode:'adaptive'},{selectedInstances:['left']},{confirmedPredictions:0},{maskSpace:{...input.maskSpace,sourceHash:'0'.repeat(64)}}]){
       const r=await h.request('/generation',{...input,...patch});assert(r.status>=400,'invalid input must be rejected');
     }
     assert.equal((await h.request('/generation',input,'bob')).status,404);assert.equal(h.created.length,1);
@@ -698,7 +697,7 @@ test('formal prompt keeps the supplied requirements; placeholders are filled onc
 test('analysis localizes corresponding categories independently of old/new color and can explicitly report no target',async()=>{
   const noTarget=fixture();noTarget.scene.old_product_instances=[];noTarget.warnings=['原图没有对应产品'];
   const h=await harness({analysisOutput:JSON.stringify(noTarget)});try{const a=await analyze(h);assert.equal(a.status,'succeeded');assert.equal(a.analysis.data.scene.old_product_instances.length,0);assert.equal(h.created.length,1);
-    const bad=fixture();bad.scene.old_product_instances[0].bbox=[.9,.2,.5,.3];assert.throws(()=>parseProductAnalysis(JSON.stringify(bad),2));
+    const bad=fixture();bad.scene.old_product_instances[0].bbox=[.9,.2,.5,.3];assert.equal(parseProductAnalysis(JSON.stringify(bad),2).data.scene.old_product_instances[0].bbox,null);
     assert.match(h.created[0].input.prompt,/不要求新旧产品颜色、品牌或外形相似/);assert.match(h.created[0].input.prompt,/归一化坐标/);
   }finally{await h.close();}
 });
@@ -732,5 +731,25 @@ test('server rejects wrong subject IDs, background strokes, all-erased strokes a
       {...valid,brush:brushSelection(Array.from({length:301},()=>paintStroke()))}];
     for(const body of cases)assert.equal((await h.request('/generation',{...body,requestId:randomUUID()})).status,422);
     assert.equal(h.created.length,1);assert(!validBrush({version:1,strokes:[]}));
+  }finally{await h.close();}
+});
+
+
+test('small visible brush dots survive selection sampling and fully erased dots remain empty',async()=>{
+  const dot={tool:'paint',size:.005,points:[{x:.5,y:.5}]};
+  for(const [w,h] of [[2048,2048],[4096,1024]]){
+    assert(matchBrushSubjects({version:1,strokes:[dot]},[],w,h).painted>0);
+    assert.equal(matchBrushSubjects({version:1,strokes:[dot,{...dot,tool:'erase'}]},[],w,h).painted,0);
+    const mask=await prepareMasks(w,h,[],[],{brush:{version:1,strokes:[dot]},userBrush:true});assert(mask.instances[0].count>=4);
+  }
+});
+
+test('missing or invalid AI coordinates do not prevent user-directed generation',async()=>{
+  const data=fixture();delete data.scene.old_product_instances[0].bbox;data.scene.old_product_instances[1].bbox=[.9,.9,.5,.5];
+  const h=await harness({analysisOutput:JSON.stringify(data)});try{
+    const a=await approved(h);assert.equal(a.status,'succeeded');
+    assert(a.analysis.data.scene.old_product_instances.every(s=>s.bbox===null));
+    const input=generationBody(a,{outputMode:'model',selectionMode:'user-brush',selectedInstances:[],masks:[],protectMasks:[],brush:{version:1,strokes:[{tool:'paint',size:.1,points:[{x:.5,y:.5}]}]}});
+    const r=await h.request('/generation',input);assert.equal(r.status,202);assert.equal((await waitFor(h,(await r.json()).id)).status,'completed_needs_review');assert.equal(h.created.length,2);
   }finally{await h.close();}
 });

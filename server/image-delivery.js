@@ -33,8 +33,8 @@ export function createImageDelivery(dataDir,{render=async(file,options)=>sharp(f
   }
   return {preview,async serve(req,res,{file,owner,identity,versioned=false,downloadName}){
     const start=performance.now(),download=req.query.download==='1',variant=!download&&typeof req.query.preview==='string'&&Object.hasOwn(variants,req.query.preview)?req.query.preview:null;
-    const target=variant?await preview(file,owner,identity,variant):file;
-    const etag='"'+sha(identity+(variant?':'+variant+':webp-v2':':original'))+'"';
+    const metadata=!download&&req.query.metadata==='1';
+    const etag='"'+sha(identity+(metadata?':metadata':variant?':'+variant+':webp-v2':':original'))+'"';
     // Caller authenticates and checks ownership first. Cookie/identity variants
     // prevent a fresh private response from being reused by a different account.
     res.vary('Cookie');res.vary('x-user-id');
@@ -50,6 +50,8 @@ export function createImageDelivery(dataDir,{render=async(file,options)=>sharp(f
       res.attachment(name);
     }
     if(!download&&req.get('If-None-Match')?.split(',').map(v=>v.trim().replace(/^W\//,'')).some(v=>v===etag||v==='*')){res.status(304).end();return;}
+    if(metadata){const {width,height}=await sharp(file).metadata();res.json({width,height});return;}
+    const target=variant?await preview(file,owner,identity,variant):file;
     res.set('Server-Timing',`image;dur=${(performance.now()-start).toFixed(1)}`);
     await new Promise((resolve,reject)=>res.sendFile(target,{cacheControl:false,lastModified:false,etag:!download,dotfiles:'allow'},e=>{
       if(e&&!res.headersSent&&e.code!=='ECONNABORTED')reject(e);else resolve();

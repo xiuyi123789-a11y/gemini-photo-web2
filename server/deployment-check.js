@@ -94,7 +94,9 @@ async function checkBundles(publicOrigin) {
   const scripts = [...html.matchAll(/<script\b[^>]*\bsrc="(\/assets\/[^"?#]+\.js)"/g)].map(match => match[1]);
   check(scripts.length > 0, 'BUILD_SCRIPTS_MISSING');
   let text = '';
-  for (const script of scripts) {
+  // Views are lazy-loaded. Verify every emitted JS chunk, not just the entry.
+  const chunks=(await fs.readdir('dist/assets')).filter(name=>name.endsWith('.js')).map(name=>'/assets/'+name);
+  for (const script of chunks) {
     const bytes = await fs.readFile('dist' + script);
     text += bytes.toString('utf8');
     if (publicOrigin) {
@@ -102,7 +104,7 @@ async function checkBundles(publicOrigin) {
       check(response.status === 200 && hash(Buffer.from(await response.arrayBuffer())) === hash(bytes), 'PUBLIC_BUNDLE_MISMATCH');
     }
   }
-  for (const marker of ['v1.5.6', 'Gemini 2.5 Flash', 'replication_v2_', '识别产品与替换位置', '开始替换', '安全结束本次提交', '重新加载图片', '取回已生成图片', '确认以当前涂抹为准', '刷新结果', '已发起下载', 'replication_preview_v1']) check(text.includes(marker), 'V2_UI_MARKER_MISSING_' + marker);
+  for (const marker of ['v1.5.7', '生成设置（必选）', 'Gemini 2.5 Flash', 'replication_v2_', '识别产品与替换位置', '开始替换', '安全结束本次提交', '重新加载图片', '取回已生成图片', '最终以你的涂抹为准', '刷新结果', '已发起下载', 'replication_preview_v1']) check(text.includes(marker), 'V2_UI_MARKER_MISSING_' + marker);
   if (publicOrigin) {
     const response = await get(publicOrigin);
     const publicHtml = await response.text();

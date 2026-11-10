@@ -73,13 +73,12 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
       const s=analysisJob.assets.source;
       if(input.maskSpace.width!==s.width||input.maskSpace.height!==s.height||input.maskSpace.sourceHash!==s.sha256)throw fail('TARGET_SELECTION_REQUIRED',422);
       const subjects=analysisJob.analysis.data.scene.old_product_instances;
-      if(input.brush){
+      if(input.brush&&input.selectionMode!=='user-brush'){
         const match=matchBrushSubjects(input.brush,subjects,s.width,s.height);
-        if(input.selectionMode==='user-brush'){
-          if(!match.painted)throw fail('TARGET_SELECTION_REQUIRED',422);
-          if(!match.valid&&input.selectionOverrideConfirmed!==true)throw fail('BRUSH_CONFIRMATION_REQUIRED',422);
-        }else if(!match.valid||canonicalJson([...match.selectedInstances].sort())!==canonicalJson([...input.selectedInstances].sort()))throw fail('TARGET_SELECTION_REQUIRED',422);
+        if(!match.valid||canonicalJson([...match.selectedInstances].sort())!==canonicalJson([...input.selectedInstances].sort()))throw fail('TARGET_SELECTION_REQUIRED',422);
       }
+      // Direct-model requests are governed by the user's actual paint. The
+      // full-resolution raster below still rejects empty/fully erased input.
       await prepareMasks(s.width,s.height,input.masks,input.protectMasks,{brush:input.brush,subjects,userBrush:input.selectionMode==='user-brush'});
     }
     const provider=getProvider(req);

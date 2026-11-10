@@ -47,8 +47,22 @@ test('native download streams the complete original with attachment, length and 
     assert(full.headers.get('etag'));assert.equal(full.headers.get('cache-control'),'private, no-store');assert.deepEqual(Buffer.from(await full.arrayBuffer()),f.bytes);
     const partial=await fetch(url+'?download=1',{headers:{Range:'bytes=0-63'}});assert.equal(partial.status,206);assert.deepEqual(Buffer.from(await partial.arrayBuffer()),f.bytes.subarray(0,64));
     const legacy=await fetch(url);assert.match(legacy.headers.get('cache-control'),/must-revalidate/);await legacy.arrayBuffer();
+    const info=await fetch(url+'?metadata=1');assert.equal(info.status,200);assert.deepEqual(await info.json(),{width:2200,height:1800});assert.notEqual(info.headers.get('etag'),preview.headers.get('etag'));
     const retry=await fetch(url+'?v=fixture-sha&preview=canvas&retry=1');assert.equal(retry.headers.get('cache-control'),'private, no-store');await retry.arrayBuffer();
   }finally{if(server)await new Promise(r=>server.close(r));await f.close();}
+});
+
+test('small preview stays visible until detail loads; a stale completion cannot replace a different image',async()=>{
+  const pending=[];
+  class MockImage{set src(value){this.url=value;pending.push(this);}}
+  const context=vm.createContext({URL,Image:MockImage,location:{origin:'https://studio.example'},exports:{}});
+  const source=await readFile(new URL('../services/imageDelivery.ts',import.meta.url),'utf8');
+  vm.runInContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,context);
+  const props=context.exports.imagePreviewProps('/api/images/alice/image.png','canvas');
+  let currentSrc=props.src;const image={getAttribute:()=>currentSrc,set src(value){currentSrc=value;}};
+  assert.match(currentSrc,/preview=1/);props.onLoad({currentTarget:image});assert.equal(pending.length,1);assert.match(pending[0].url,/preview=canvas/);assert.equal(currentSrc,props.src);
+  pending[0].onload();assert.equal(currentSrc,pending[0].url);props.onLoad({currentTarget:image});assert.equal(pending.length,1);
+  currentSrc=props.src;props.onLoad({currentTarget:image});currentSrc='/another-image.png';pending[1].onload();assert.equal(currentSrc,'/another-image.png');
 });
 test('download click stays synchronous, uses an attached anchor and requests original bytes; display URLs never alter stored originals',async()=>{
   let attached=false,clicked=false,fetches=0;

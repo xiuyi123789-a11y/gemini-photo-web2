@@ -53,6 +53,7 @@ export function createReplicationAssets(dataDir,{download=downloadModelImage}={}
     const target=path.join(directory(job),filename(name));await fs.mkdir(path.dirname(target),{recursive:true});
     const metadata=await sharp(bytes,{limitInputPixels:64*1024*1024}).metadata();
     await fs.writeFile(target,bytes,{mode:0o600});
+    if(/^(source|ref-\d+|raw-\d+)\.png$/.test(name))await delivery.preview(target,job.ownerId,sha256(bytes),'1').catch(()=>{});
     return {name,url:`/api/replication/assets/${job.id}/${name}?owner=${encodeURIComponent(job.ownerId)}`,width:metadata.width,height:metadata.height,
       sha256:sha256(bytes),bytes:bytes.length,mime:'image/png',colourspace:metadata.space||'srgb'};
   }

@@ -18,7 +18,7 @@ function viewer(){
   const source=readFileSync('components/ReplicationImageViewer.tsx','utf8');
   const code=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React,esModuleInterop:true}}).outputText;
   const module={exports:{}};
-  const require=name=>name==='react'?{__esModule:true,default:react,...react}:name==='react-dom'?{createPortal:node=>node}:name==='lucide-react'?{X:'X',RotateCcw:'RotateCcw'}:{};
+  const require=name=>name==='react'?{__esModule:true,default:react,...react}:name.endsWith('imageDelivery')?{imagePreviewProps:src=>({src})}:name==='react-dom'?{createPortal:node=>node}:name==='lucide-react'?{X:'X',RotateCcw:'RotateCcw'}:{};
   vm.runInContext('(function(require,module,exports){'+code+'\n})',context)(require,module,module.exports);
   function nodes(n){return !n?[]:Array.isArray(n)?n.flatMap(nodes):typeof n==='object'?[n,...nodes(n.props?.children)]:[];}
   function render(){cursor=0;tree=module.exports.ReplicationImageViewer({src:'/local-image.png',label:'产品参考',onClose:()=>closed++});

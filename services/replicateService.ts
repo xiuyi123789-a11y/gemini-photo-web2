@@ -337,6 +337,7 @@ type TaskChatMessage = {
 };
 
 type TaskChatOptions = {
+    generationOptions?: {style:string;aspectRatio:string};
     maxOutputTokens?: number;
     retry?: RetryOptions;
 };
@@ -344,6 +345,7 @@ type TaskChatOptions = {
 export const taskChatWithGemini = async (messages: TaskChatMessage[], options?: TaskChatOptions): Promise<string> => {
     const payload = {
         messages,
+        ...(options?.generationOptions?{generationOptions:options.generationOptions}:{}),
         max_output_tokens: options?.maxOutputTokens ?? 1200
     };
 
