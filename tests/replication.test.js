@@ -87,12 +87,12 @@ test('user brush outside AI boxes generates once without target consent and pres
   }finally{await h.close();}
 });
 
-test('manual selection cannot bypass empty brushes, image mode, identity, or fee validation',async()=>{
+test('manual selection still validates nonempty brushes, image mode and source identity',async()=>{
   const h=await harness();try{
     const a=await approved(h),brush={version:1,strokes:[{tool:'paint',size:.12,points:[{x:.3,y:.08},{x:.8,y:.08}]}]};
     const input=generationBody(a,{outputMode:'model',selectionMode:'user-brush',selectionOverrideConfirmed:true,selectedInstances:[],masks:[],protectMasks:[],brush});
     const erased={version:1,strokes:[...brush.strokes,{...brush.strokes[0],tool:'erase'}]};
-    for(const patch of [{brush:{version:1,strokes:[]}},{brush:erased},{selectionOverrideConfirmed:'true'},{outputMode:'adaptive'},{selectedInstances:['left']},{confirmedPredictions:0},{maskSpace:{...input.maskSpace,sourceHash:'0'.repeat(64)}}]){
+    for(const patch of [{brush:{version:1,strokes:[]}},{brush:erased},{selectionOverrideConfirmed:'true'},{outputMode:'adaptive'},{selectedInstances:['left']},{maskSpace:{...input.maskSpace,sourceHash:'0'.repeat(64)}}]){
       const r=await h.request('/generation',{...input,...patch});assert(r.status>=400,'invalid input must be rejected');
     }
     assert.equal((await h.request('/generation',input,'bob')).status,404);assert.equal(h.created.length,1);
@@ -155,6 +155,7 @@ test('legacy OUTPUT_INVALID download failures can recover their existing success
     h.assets.saveRaw=async(...args)=>{if(!failed){failed=true;throw new Error('old download failure');}return save(...args);};
     const r=await h.request('/generation',generationBody(a,{outputMode:'model'})),g=await waitFor(h,(await r.json()).id);
     assert.equal(g.status,'quality_failed');assert.equal(g.outputRecoveryAvailable,true);assert.equal(g.errorCode,'OUTPUT_INVALID');const count=h.created.length;
+    await h.store.create({...await h.store.get(a.id),id:randomUUID(),requestId:randomUUID(),status:'submission_unknown'});
     assert.equal((await h.request('/jobs/'+g.id+'/resume',{},'alice','wrong')).status,409);
     assert.equal((await h.request('/jobs/'+g.id+'/resume',{})).status,200);const done=await waitFor(h,g.id);
     assert.equal(done.status,'completed_needs_review');assert.equal(done.outputRecoveryAvailable,false);assert(done.results[0].raw.url);assert.equal(h.created.length,count);
@@ -195,10 +196,10 @@ test('Gemini analysis only: source plus all references, correct native parameter
     for(let i=0;i<stored.assets.references.length;i++)assert.equal(input.images[i+1],await h.assets.dataUri(stored,stored.assets.references[i]));
     const persisted=await readFile(path.join(h.directory,'replication-jobs-v2.json'),'utf8');assert(!persisted.includes('data:image'));assert(!persisted.includes('system_prompt'));assert(!JSON.stringify(h.logs).includes('image_input'));}finally{await h.close();}
 });
-test('analysis schema rejects empty, invalid JSON, non-string, invalid evidence and duplicate instances without generation',async()=>{
+test('incomplete analysis becomes advisory fallback without automatically generating',async()=>{
   const invalid=fixture();invalid.new_product.observed_features[0].evidence_refs=[3];assert.throws(()=>parseProductAnalysis(JSON.stringify(invalid),2));
   const duplicate=fixture();duplicate.scene.old_product_instances[1].instance_id='left';assert.throws(()=>parseProductAnalysis(JSON.stringify(duplicate),2));
-  for(const output of ['', 'not JSON', {x:1}, JSON.stringify(invalid)]){const h=await harness({analysisOutput:output});try{const j=await analyze(h);assert.equal(j.status,'failed');assert.equal(j.errorCode,'ANALYSIS_SCHEMA_INVALID');assert.deepEqual(j.images,[]);assert.equal(h.created.length,1);}finally{await h.close();}}
+  for(const output of ['', 'not JSON', {x:1}, JSON.stringify(invalid)]){const h=await harness({analysisOutput:output});try{const j=await analyze(h);assert.equal(j.status,'succeeded');assert.equal(j.errorCode,null);assert(j.analysis.warnings.length);assert.deepEqual(j.images,[]);assert.equal(h.created.length,1);}finally{await h.close();}}
 });
 test('provider model_not_found is a terminal model-availability error; reads, resume and restart never create a replacement prediction',async()=>{
   const h=await harness({remoteFailure:"Error code: 404 - model `o4-mini` has been deprecated; code: model_not_found; PRIVATE_PROVIDER_SENTINEL"});
@@ -211,12 +212,12 @@ test('provider model_not_found is a terminal model-availability error; reads, re
     assert.equal((await h.store.attempts(id)).length,1);
   }finally{await h.close();}
 });
-test('Gemini provider success with truncated JSON fails business validation, preserves evidence and blocks paid generation',async()=>{
+test('truncated optional analysis preserves evidence and supplies usable guidance',async()=>{
   const output=['```json\n{"schema_version":"1.0","new_product":{"category":"运动鞋",','"observed_features":[{"name":"低帮设计","evidence_refs":[1],"certainty":"observed"},{'];
   const h=await harness({analysisOutput:output});try{
     const response=await h.request('/analysis',analysisBody()),id=(await response.json()).id,job=await waitFor(h,id);
-    assert.equal(job.status,'failed');assert.equal(job.errorCode,'ANALYSIS_SCHEMA_INVALID');assert.match(job.error,/返回不完整/);
-    assert.equal(job.analysis.rawText,output.join(''));assert.equal(job.analysis.data,null);assert.deepEqual(job.images,[]);
+    assert.equal(job.status,'succeeded');assert.equal(job.errorCode,null);assert(job.analysis.warnings.length);
+    assert.equal(job.analysis.rawText,output.join(''));assert(job.analysis.data);assert.deepEqual(job.images,[]);
     assert.equal(job.predictions[0].remoteStatus,'succeeded');assert.equal((await h.request('/generation',generationBody(job))).status,409);
     await h.restart();await h.request('/jobs/'+id);await h.request('/jobs/'+id+'/resume',{});
     assert.equal(h.created.length,1);assert.equal(h.created[0].model,'google/gemini-2.5-flash');
@@ -258,7 +259,7 @@ test('unchanged source and wrong aspect ratio never get a successful business st
 });
 test('creation lost response/429 becomes unknown and never resubmits through refresh or backend restart',async()=>{
   for(const createError of [Object.assign(new Error('secret-token raw-body'),{uncertain:true,code:'SUBMISSION_UNKNOWN'}),Object.assign(new Error('429'),{uncertain:true,code:'SUBMISSION_UNKNOWN',status:429})]){
-    const h=await harness({createError});try{const body=analysisBody();const r=await h.request('/analysis',body);const j=await waitFor(h,(await r.json()).id);assert.equal(j.status,'submission_unknown');await h.restart();await h.request('/jobs/'+j.id);await h.request('/analysis',body);await pause(20);assert.equal(h.created.length,1);assert.equal((await h.request('/analysis',analysisBody())).status,409);assert(!JSON.stringify(j).includes('secret-token'));}finally{await h.close();}
+    const h=await harness({createError});try{const body=analysisBody();const r=await h.request('/analysis',body);const j=await waitFor(h,(await r.json()).id);assert.equal(j.status,'submission_unknown');await h.restart();await h.request('/jobs/'+j.id);await h.request('/analysis',body);await pause(20);assert.equal(h.created.length,1);assert.equal((await h.request('/analysis',analysisBody())).status,202);assert(!JSON.stringify(j).includes('secret-token'));}finally{await h.close();}
   }
 });
 test('reconcile unknown attempt requires exact input evidence and never creates a new prediction',async()=>{
@@ -307,8 +308,8 @@ test('batch cancellation stops later samples and partial failure retains complet
     assert.equal(g.status,'failed');assert.equal(g.results.length,1);assert.equal(g.images.length,1);assert.equal(partial.created.length,3);
   }finally{await partial.close();}
 });
-test('expired unresolved submissions remain available for audit and still block a fresh charge',async()=>{
-  const h=await harness({createError:{uncertain:true,code:'SUBMISSION_UNKNOWN'}});try{const j=await analyze(h);await h.store.update(j.id,x=>({...x,expiresAt:Date.now()-1}));await h.cleanup();assert(await h.store.get(j.id));assert.equal((await h.request('/analysis',analysisBody())).status,409);}finally{await h.close();}
+test('expired unresolved submissions remain available without blocking a new explicit task',async()=>{
+  const h=await harness({createError:{uncertain:true,code:'SUBMISSION_UNKNOWN'}});try{const j=await analyze(h);await h.store.update(j.id,x=>({...x,expiresAt:Date.now()-1}));await h.cleanup();assert(await h.store.get(j.id));assert.equal((await h.request('/analysis',analysisBody())).status,202);}finally{await h.close();}
 });
 test('feature flag blocks new tasks; connectivity does not call predictions; advanced outputs gated',async()=>{
   const h=await harness({disabled:true});try{assert.equal((await h.request('/analysis',analysisBody())).status,503);assert.equal((await h.request('/connectivity',{})).status,200);assert.equal(h.created.length,0);}finally{await h.close();}
@@ -400,7 +401,7 @@ test('new generation keeps canonical scene, raw and masks through expiry cleanup
   }finally{await h.close();}
 });
 test('orientation normalization is persisted before mask coordinates, and expires cleanup preserves unresolved jobs',async()=>{
-  const h=await harness();try{const j=await analyze(h);const job=await h.store.get(j.id);await h.store.update(j.id,x=>({...x,expiresAt:Date.now()-1}));await h.cleanup();assert.equal(await h.store.get(j.id),null);
+  const h=await harness();try{const j=await analyze(h);const job=await h.store.get(j.id);await h.store.update(j.id,x=>({...x,expiresAt:Date.now()-1}));await h.cleanup();assert(await h.store.get(j.id));
     const image=await sharp({create:{width:40,height:24,channels:3,background:'red'}}).jpeg().withMetadata({orientation:6}).toBuffer();const assets=await h.assets.prepare({...job,id:randomUUID()},{sourceImage:'data:image/jpeg;base64,'+image.toString('base64'),references:[{image:dataUri,angle:'front'}]});assert.equal(assets.source.width,24);assert.equal(assets.source.height,40);
   }finally{await h.close();}
 });
@@ -437,12 +438,12 @@ test('valid high-resolution JPEGs remain accepted when lossless PNG expands beyo
     assert.equal((await h.request('/assets/'+job.id+'/model-source.png',undefined,'bob')).status,404);
   }finally{await h.close();}
 });
-test('PostgreSQL store has additive tables, unique request/active user/attempt constraints, CAS and durable rereads',async()=>{
+test('PostgreSQL store has additive tables, unique request/attempt constraints, CAS and durable rereads',async()=>{
   // pg-mem's AST coverage checker flags skipped IF NOT EXISTS definitions on the second init.
   const {Pool}=newDb({noAstCoverageCheck:true}).adapters.createPg(),pool=new Pool(),db=createStore(pool);await db.init();await db.init();
   const user=await db.createUser('replication-user','test-hash'),store=createPgReplicationStore(pool);
   const job={id:randomUUID(),ownerId:user.id,requestId:randomUUID(),kind:'analysis',payloadHash:'hash',status:'queued',revision:0,createdAt:Date.now(),updatedAt:Date.now()};
-  try{await store.create(job);assert.equal((await store.byRequest(user.id,job.requestId)).id,job.id);await assert.rejects(store.create({...job,id:randomUUID(),requestId:randomUUID()}),/TASK_BUSY/);
+  try{await store.create(job);assert.equal((await store.byRequest(user.id,job.requestId)).id,job.id);assert(await store.create({...job,id:randomUUID(),requestId:randomUUID()}));
     const attempt={id:randomUUID(),jobId:job.id,attemptNo:1,predictionId:null};assert.equal(await store.claimAttempt(attempt),true);assert.equal(await store.claimAttempt({...attempt,id:randomUUID()}),false);
     await Promise.all([store.update(job.id,j=>({...j,a:1})),store.update(job.id,j=>({...j,b:2}))]);const reread=await createPgReplicationStore(pool).get(job.id);assert.equal(reread.a,1);assert.equal(reread.b,2);
     await store.updateAttempt({...attempt,predictionId:'prediction-persisted'});assert.equal((await store.attempts(job.id))[0].predictionId,'prediction-persisted');
@@ -609,10 +610,10 @@ test('intake survives restart; GET is read-only; sealing a 404 request fences al
     assert.equal((await h.request('/requests',{...identity,inputFingerprint:'b'.repeat(64)})).status,409);
   }finally{await h.close();}
 });
-test('two concurrent reservations for one account accept only one; closing the rejected identity never releases the accepted one',async()=>{
+test('separate explicit intents can coexist; closing one never seals the other',async()=>{
   const h=await harness();try{
     const a=requestIdentity(analysisBody()),b=requestIdentity(analysisBody()),r=await Promise.all([h.request('/requests',a),h.request('/requests',b)]);
-    assert.deepEqual(r.map(x=>x.status).sort(),[202,409]);const accepted=r[0].status===202?a:b,rejected=r[0].status===202?b:a;
+    assert.deepEqual(r.map(x=>x.status).sort(),[202,202]);const accepted=r[0].status===202?a:b,rejected=r[0].status===202?b:a;
     assert.equal((await (await h.request('/requests/'+rejected.requestId+'/close',rejected)).json()).closed,true);
     assert.equal((await h.store.getRequest('alice',accepted.requestId)).state,'reserved');assert.equal(h.created.length,0);
   }finally{await h.close();}
@@ -640,13 +641,13 @@ test('sealing while worker reads images fences its later attempt insertion, so a
     assert.equal((await h.store.get(job.id)).status,'failed');
   }finally{release();await h.close();}
 });
-test('once an attempt exists, safe-end cannot clear the fee guard, including a lost provider acknowledgment',async()=>{
+test('safe-end preserves attempted requests while allowing a separate explicit intent',async()=>{
   const h=await harness({createDelayMs:70,createError:{uncertain:true,code:'SUBMISSION_UNKNOWN'}});try{
     const body=analysisBody(),r=await h.request('/analysis',body),job=await r.json();await waitFor(h,job.id,j=>j.predictions.length===1);
     const sealed=await (await h.request('/requests/'+body.requestId+'/close',requestIdentity(body))).json();assert.equal(sealed.closed,false);
     const unknown=await waitFor(h,job.id);assert.equal(unknown.status,'submission_unknown');
     await h.restart();await h.request('/jobs/'+job.id+'/resume',{});await h.request('/analysis',body);await pause(20);
-    assert.equal(h.created.length,1);assert.equal((await h.request('/analysis',analysisBody())).status,409);
+    assert.equal(h.created.length,1);assert.equal((await h.request('/analysis',analysisBody())).status,202);
   }finally{await h.close();}
 });
 test('PostgreSQL receipt sealing and attempt fencing are durable and reject a stale worker lease',async()=>{
@@ -752,4 +753,45 @@ test('missing or invalid AI coordinates do not prevent user-directed generation'
     const input=generationBody(a,{outputMode:'model',selectionMode:'user-brush',selectedInstances:[],masks:[],protectMasks:[],brush:{version:1,strokes:[{tool:'paint',size:.1,points:[{x:.5,y:.5}]}]}});
     const r=await h.request('/generation',input);assert.equal(r.status,202);assert.equal((await waitFor(h,(await r.json()).id)).status,'completed_needs_review');assert.equal(h.created.length,2);
   }finally{await h.close();}
+});
+
+const directBrushBody=(job,patch={})=>generationBody(job,{outputMode:'model',selectionMode:'user-brush',selectedInstances:[],masks:[],protectMasks:[],brush:{version:1,strokes:[{tool:'paint',size:.1,points:[{x:.5,y:.5}]}]},analysisRevisionHash:undefined,confirmedPredictions:undefined,...patch});
+
+test('local material preparation needs no model credentials; one explicit click generates without analysis or cost checkbox',async()=>{
+  const options={noProvider:true},h=await harness(options);try{
+    const input=analysisBody(),prepared=await h.request('/materials',input);assert.equal(prepared.status,202);const material=await prepared.json();
+    assert.equal(material.origin,'local_materials');assert.equal(h.created.length,0);assert.equal((await h.store.attempts(material.id)).length,0);
+    assert.equal((await(await h.request('/materials',input)).json()).id,material.id);
+    options.noProvider=false;const body=directBrushBody(material,{analysisSummary:''}),r=await h.request('/generation',body);assert.equal(r.status,202);
+    const job=await waitFor(h,(await r.json()).id);assert(job.results[0].raw);assert.equal(h.created.length,1);assert.equal(h.created[0].model,REPLICATION_MODELS.generation);
+    await h.request('/generation',body);await h.restart();await h.request('/workbench');assert.equal(h.created.length,1);
+  }finally{await h.close();}
+});
+
+test('missing auxiliary analysis fields, long summaries, and empty user summary never gate direct generation',async()=>{
+  const data=fixture();delete data.scene.lighting;data.scene.old_product_instances[0].instance_id='左侧鞋';
+  const h=await harness({analysisOutput:JSON.stringify(data)});try{const a=await analyze(h);assert.equal(a.status,'succeeded');assert(a.analysis.warnings.length);
+    const revision=await h.request('/jobs/'+a.id+'/revision',{text:'x'.repeat(18000),previousHash:a.analysis.revisionHash});assert.equal(revision.status,200);assert.equal((await revision.json()).analysis.text.length,16000);
+    const r=await h.request('/generation',directBrushBody(a,{analysisSummary:''}));assert.equal(r.status,202);await waitFor(h,(await r.json()).id);assert.equal(h.created.length,2);
+  }finally{await h.close();}
+});
+
+test('legacy failed or expired analysis remains usable by the owner for direct generation, including stale summary hash',async()=>{
+  const h=await harness();try{const a=await analyze(h);await h.store.update(a.id,j=>({...j,status:'failed',stage:'failed',errorCode:'ANALYSIS_SCHEMA_INVALID',retainOriginals:false,expiresAt:1,analysis:{data:null,text:'',revisionHash:null}}));
+    assert.equal((await h.request('/jobs/'+a.id)).status,200);const r=await h.request('/generation',directBrushBody(a,{analysisRevisionHash:'old-summary'}));assert.equal(r.status,202);await waitFor(h,(await r.json()).id);
+    await h.cleanup();assert(await h.store.get(a.id));assert.equal((await h.request('/generation',directBrushBody(a),'bob')).status,404);
+  }finally{await h.close();}
+});
+
+test('historical unknown tasks stay discoverable but do not exhaust a global twenty-record gate',async()=>{
+  const h=await harness();try{const a=await analyze(h),stored=await h.store.get(a.id);for(let i=0;i<20;i++)await h.store.create({...stored,id:randomUUID(),ownerId:i?'other-'+i:'alice',requestId:randomUUID(),status:'submission_unknown',createdAt:1,expiresAt:1});
+    const r=await h.request('/generation',directBrushBody(a));assert.equal(r.status,202);await waitFor(h,(await r.json()).id);
+    const snapshot=await(await h.request('/workbench')).json();assert.equal(snapshot.pendingJobs.length,1);assert(snapshot.pendingJobs.every(j=>j.ownerId==='alice'));assert.equal(h.created.length,2);
+  }finally{await h.close();}
+});
+
+test('small nonempty user dots pass full-size validation; fully erased input still fails',async()=>{
+  const brush={version:1,strokes:[{tool:'paint',size:.005,points:[{x:200.5/400,y:150.5/300}]}]};
+  assert(matchBrushSubjects(brush,[],400,300).painted>0);assert.equal((await prepareMasks(400,300,[],[],{brush,userBrush:true})).instances[0].count,1);
+  await assert.rejects(()=>prepareMasks(400,300,[],[],{brush:{version:1,strokes:[...brush.strokes,{...brush.strokes[0],tool:'erase'}]},userBrush:true}),{code:'TARGET_SELECTION_REQUIRED'});
 });

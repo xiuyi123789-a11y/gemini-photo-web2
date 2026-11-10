@@ -11,8 +11,8 @@ CREATE TABLE IF NOT EXISTS replication_jobs (
   status TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0, document JSONB NOT NULL,
   UNIQUE(user_id, request_id)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS replication_one_active_user ON replication_jobs(user_id)
-  WHERE status IN ('queued','submitting','running','postprocessing','submission_unknown','cancel_requested','cancel_unknown');
+DROP INDEX IF EXISTS replication_one_active_user;
+CREATE INDEX IF NOT EXISTS replication_jobs_owner_status ON replication_jobs(user_id,status);
 CREATE TABLE IF NOT EXISTS replication_predictions (
   local_attempt_id UUID PRIMARY KEY, job_id UUID NOT NULL REFERENCES replication_jobs(job_id) ON DELETE CASCADE,
   attempt_no INTEGER NOT NULL, prediction_id TEXT UNIQUE, document JSONB NOT NULL,
@@ -23,8 +23,7 @@ CREATE TABLE IF NOT EXISTS replication_requests (
   state TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0, document JSONB NOT NULL,
   PRIMARY KEY(user_id,request_id)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS replication_one_intake_user ON replication_requests(user_id)
-  WHERE state IN ('reserved','preparing');`;
+DROP INDEX IF EXISTS replication_one_intake_user;`;
 
 const clone = v => v == null ? v : structuredClone(v);
 const busy = () => Object.assign(new Error('TASK_BUSY'), { code:'TASK_BUSY',status:409 });
@@ -140,7 +139,7 @@ export function createFileReplicationStore(directory) {
     getRequest:(owner,id)=>transaction(d=>d.requests.find(r=>r.ownerId===owner&&r.requestId===id)||null,false),
     activeRequests:(owner,kind)=>transaction(d=>d.requests.filter(r=>r.ownerId===owner&&r.kind===kind&&['reserved','preparing'].includes(r.state)),false),
     reserveRequest:r=>transaction(d=>{const old=d.requests.find(x=>x.ownerId===r.ownerId&&x.requestId===r.requestId);
-      if(old){checkRequest(old,r);return old;}if(d.requests.some(x=>x.ownerId===r.ownerId&&['reserved','preparing'].includes(x.state)))throw busy();
+      if(old){checkRequest(old,r);return old;}
       d.requests.push({...r,revision:0});return r;}),
     updateRequest:(owner,id,mutate)=>transaction(d=>{const i=d.requests.findIndex(r=>r.ownerId===owner&&r.requestId===id);if(i<0)return null;
       const next=mutate(clone(d.requests[i]));if(next){next.revision=d.requests[i].revision+1;next.updatedAt=Date.now();d.requests[i]=next;}return d.requests[i];}),
@@ -158,7 +157,6 @@ export function createFileReplicationStore(directory) {
     list:owner=>transaction(d=>owner?d.jobs.filter(j=>j.ownerId===owner):d.jobs,false),
     create:job=>transaction(d=>{
       const old=d.jobs.find(j=>j.ownerId===job.ownerId&&j.requestId===job.requestId);if(old)return old;
-      if(d.jobs.some(j=>j.ownerId===job.ownerId&&!isFinalJob(j)))throw busy();
       d.jobs.push({...job,revision:0});return job;
     }),
     update:(id,mutate)=>transaction(d=>{const i=d.jobs.findIndex(j=>j.id===id);if(i<0)return null;const next=mutate(clone(d.jobs[i]));

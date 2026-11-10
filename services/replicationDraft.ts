@@ -1,7 +1,8 @@
 // Browser-only drafts keep fresh uploads through a local server restart.
 // They never submit a model task or contain API credentials.
-type DraftImage={file:File;width:number;height:number;angle?:string};
-export type ReplicationDraft={version:1;source:DraftImage;references:DraftImage[];savedAt:number};
+type DraftImage={file:File|null;url?:string;width:number;height:number;angle?:string};
+export type ReplicationDraft={version:1;source:DraftImage;references:DraftImage[];savedAt:number;fingerprint?:string;
+  edits?:{strokes:Array<{tool:'paint'|'erase';size:number;points:Array<{x:number;y:number}>}>;notes:string;resolution:string;count:number;analysisText:string}};
 let database:Promise<IDBDatabase>|undefined;
 async function bounded<T>(work:Promise<T>,fallback:T):Promise<T>{
   let timer:ReturnType<typeof setTimeout>;
@@ -28,7 +29,8 @@ export async function loadReplicationDraft(owner:string):Promise<ReplicationDraf
   try{return await bounded((async()=>{const db=await open();return await new Promise<ReplicationDraft|null>((resolve,reject)=>{
     const r=db.transaction('drafts','readonly').objectStore('drafts').get(owner);
     r.onsuccess=()=>{const d=r.result;
-      resolve(d?.version===1&&d.source?.file instanceof Blob&&Array.isArray(d.references)&&d.references.every(i=>i.file instanceof Blob)?d:null);};
+      const usable=i=>i&&Number.isFinite(i.width)&&Number.isFinite(i.height)&&i.width>0&&i.height>0&&(i.file instanceof Blob||typeof i.url==='string'&&i.url.startsWith('/api/replication/assets/'));
+      resolve(d?.version===1&&usable(d.source)&&Array.isArray(d.references)&&d.references.every(usable)?d:null);};
     r.onerror=()=>reject(r.error);
   });})(),null);}catch{return null;}
 }

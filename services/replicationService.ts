@@ -2,6 +2,7 @@ import { userStorage, getStorageUser } from './browserStorage';
 import { getUserId } from './userIdentity';
 import { fileToBase64 } from './replicateService';
 import {imageDisplayUrl} from './imageDelivery';
+import {validBrush} from '../shared/replication-brush.js';
 import { canonicalJson, materialIdentity, recoveryKey, matchesOperation, ERROR_MESSAGES, isFinalJob, MAX_REFERENCES } from '../shared/replication-contract.js';
 
 export type ReferenceAngle = 'front'|'side'|'back'|'detail'|'other';
@@ -12,7 +13,7 @@ export type EditMask = {instanceId:string;points:Point[]};
 export type BrushStroke = {tool:'paint'|'erase';size:number;points:Point[]};
 export type BrushSelection = {version:1;strokes:BrushStroke[]};
 export type Asset = {name:string;url:string;width:number;height:number;sha256:string;angle?:ReferenceAngle};
-export type Analysis = {data:any;text:string;rawText:string;revision:number;revisionHash:string;confirmedAt:number|null};
+export type Analysis = {data:any;text:string;rawText:string;revision:number;revisionHash:string;confirmedAt:number|null;warnings?:string[]};
 export type Quality = {status:string;mechanism?:string;reasons?:string[];instances?:Array<{instanceId:string;meanDifference:number;changedFraction:number}>};
 export type ContourHint={image:'source'|'generated';instanceId:string;kind:'foreground'|'background'|'occlusion';x:number;y:number};
 export type JobResult = {raw:Asset;composite:Asset|null;compositeMasks?:Record<string,Asset>;quality:Quality;predictionId:string};
@@ -27,13 +28,13 @@ export type ReplicationJob = {
   recoveryNeeded?:boolean;
   outputRecoveryAvailable?:boolean;
   origin?:string|null;derivedFrom?:string|null;
-  input?:{masks:EditMask[];protectMasks:Point[][];brush?:BrushSelection;selectedInstances:string[];resolution:string;contourHints?:ContourHint[];selectionMode?:'user-brush';selectionOverrideConfirmed?:boolean};
+  input?:{masks:EditMask[];protectMasks:Point[][];brush?:BrushSelection;selectedInstances:string[];resolution:string;count?:number;notes?:string;analysisSummary?:string;contourHints?:ContourHint[];selectionMode?:'user-brush';selectionOverrideConfirmed?:boolean};
   predictions:Array<{model:string;predictionId:string|null;remoteStatus:string;reconciliationState:string}>;
 };
 export type Operation = {jobId?:string;requestId:string;kind:ReplicationKind;inputFingerprint:string;ownerId:string;localOnly?:boolean;sourceJobId?:string};
 export type RequestReceipt = {ownerId:string;requestId:string;kind:ReplicationKind;inputFingerprint:string;state:'reserved'|'preparing'|'accepted'|'closed';jobId:string|null;revision:number};
 export type GenerationInput = {
-  inputFingerprint:string;analysisJobId:string;analysisRevisionHash:string;
+  inputFingerprint:string;analysisJobId:string;analysisRevisionHash?:string;analysisSummary?:string;
   selectedInstances:string[];masks:EditMask[];protectMasks:Point[][];
   brush?:BrushSelection;
   maskSpace:{width:number;height:number;sourceHash:string};resolution:string;count:number;
@@ -44,8 +45,7 @@ export type GenerationInput = {
 export const ownerId = () => getStorageUser() || getUserId();
 const previewKey='replication_preview_v1';
 export type ReplicationPreview={ownerId:string;source:Asset;references:Asset[];raw:Asset};
-// Presentation only: never restore task authority, submission state, masks or
-// fee confirmation from this cache. The authenticated GET remains authoritative.
+// Presentation only: the authenticated GET remains authoritative for owned assets.
 export function readReplicationPreview():ReplicationPreview|null {
   try{
     const raw=userStorage.getItem(previewKey);if(!raw||raw.length>131072)return null;
@@ -116,14 +116,15 @@ function validToken():string|null {
 export const getReplicationJob=(id:string):Promise<ReplicationJob>=>request('/jobs/'+encodeURIComponent(id));
 export const findReplicationRequest=(id:string):Promise<ReplicationJob>=>request('/request/'+encodeURIComponent(id));
 export const listActiveJobs=(kind:ReplicationKind):Promise<{jobs:ReplicationJob[];requests?:RequestReceipt[]}>=>request('/active?kind='+kind);
-export async function getReplicationWorkbench():Promise<{jobs:ReplicationJob[];requests:RequestReceipt[]}>{
-  let snapshot:{jobs:ReplicationJob[];requests:RequestReceipt[]};
+export async function getReplicationWorkbench():Promise<{jobs:ReplicationJob[];requests:RequestReceipt[];pendingJobs?:ReplicationJob[]}>{
+  let snapshot:{jobs:ReplicationJob[];requests:RequestReceipt[];pendingJobs?:ReplicationJob[]};
   try{snapshot=await request('/workbench');}catch(e){if((e as any).status!==404)throw e;
     const lists=await Promise.all([listActiveJobs('analysis'),listActiveJobs('generation')]);
     snapshot={jobs:lists.flatMap(l=>l.jobs),requests:lists.flatMap(l=>l.requests||[])};
   }
   if(!Array.isArray(snapshot?.jobs)||!Array.isArray(snapshot.requests))throw contextMismatch();
   snapshot.jobs.forEach(job=>operationFromServerJob(job));
+  snapshot.pendingJobs?.forEach(job=>operationFromServerJob(job));
   if(snapshot.requests.some(receipt=>receipt.ownerId!==ownerId()||!['analysis','generation'].includes(receipt.kind)))throw contextMismatch();
   return snapshot;
 }
@@ -169,15 +170,8 @@ export async function closeOperation(operation:Operation):Promise<{closed:boolea
 
 async function submit(kind:ReplicationKind,payload:any):Promise<ReplicationJob> {
   validToken(); // Header failures are known to occur before HTTP; create no orphan marker.
-  for(const k of ['analysis','generation'] as const){
-    const previous=readOperation(k);
-    if(previous){
-      let existing:ReplicationJob;
-      try{const result=await lookupOperation(previous);if(result.closed){forgetIfCurrent(previous);continue;}if(!result.job)throw new Error('REQUEST_UNRESOLVED');existing=result.job;}
-      catch{throw new Error('先前请求尚未核对，请重新连接查询；已阻止新的收费提交。');}
-      if(!isFinalJob(existing))throw new Error('已有任务运行或提交待核对，请先处理该任务。');
-    }
-  }
+  // A fresh explicit click is a new intent. Historical unknown requests remain
+  // queryable on the server, but cannot indefinitely block this new intent.
   const operation:Operation={kind,requestId:crypto.randomUUID(),ownerId:ownerId(),inputFingerprint:payload.inputFingerprint};
   // Persist before POST. Cross-tab recovery is separate for each kind.
   saveOperation(operation);
@@ -201,14 +195,36 @@ async function submit(kind:ReplicationKind,payload:any):Promise<ReplicationJob> 
     try{sealed=await closeOperation(operation);}catch{}
     if(sealed?.closed)throw closedFailure();
     if(sealed?.job)return sealed.job;
-    throw Object.assign(new Error('提交结果尚未确认。已停止页面等待；请查询原请求或安全结束本次提交，勿重复提交。'),{code:'SUBMISSION_UNKNOWN'});
+    throw Object.assign(new Error('上次提交结果尚未确认，可能仍会计费。可以查询原任务，也可以主动发起新任务；系统不会自动重发。'),{code:'SUBMISSION_UNKNOWN'});
   }
 }
-export async function startAnalysis(source:File,references:Array<{file:File;angle:ReferenceAngle}>,target:string):Promise<ReplicationJob> {
+async function materialPayload(source:File,references:Array<{file:File;angle:ReferenceAngle}>,target:string) {
   const sourceHash=await digest(await source.arrayBuffer());
   const refs=await Promise.all(references.map(async r=>({hash:await digest(await r.file.arrayBuffer()),angle:r.angle})));
   const inputFingerprint=await digest(canonicalJson(materialIdentity(sourceHash,refs,target)));
   const images=await Promise.all([fileToBase64(source),...references.map(r=>fileToBase64(r.file))]);
-  return submit('analysis',{inputFingerprint,target:target.trim(),sourceImage:images[0],references:references.map((r,i)=>({image:images[i+1],angle:r.angle}))});
+  return {inputFingerprint,target:target.trim(),sourceImage:images[0],references:references.map((r,i)=>({image:images[i+1],angle:r.angle}))};
 }
+export async function startAnalysis(source:File,references:Array<{file:File;angle:ReferenceAngle}>,target:string):Promise<ReplicationJob> {
+  return submit('analysis',await materialPayload(source,references,target));
+}
+export async function prepareReplicationMaterials(source:File,references:Array<{file:File;angle:ReferenceAngle}>):Promise<ReplicationJob> {
+  const payload=await materialPayload(source,references,'');
+  return request('/materials',{...payload,requestId:crypto.randomUUID()},true);
+}
+export async function materialFile(material:{file:File|null;preview:string},name:string):Promise<File> {
+  if(material.file)return material.file;
+  // Recover only authenticated local assets, never an arbitrary remote URL.
+  const url=new URL(material.preview,'http://localhost');
+  if(!material.preview.startsWith('/api/replication/assets/')||url.origin!=='http://localhost')throw new Error('请重新上传无法读取的素材。');
+  const response=await fetch(material.preview,{credentials:'same-origin',headers:{'x-user-id':getUserId()},signal:AbortSignal.timeout(30000)});
+  if(!response.ok)throw new Error('素材暂时无法读取，请重新加载或上传。');
+  const blob=await response.blob();return new File([blob],name,{type:blob.type||'image/png'});
+}
+export type ReplicationEdits={fingerprint:string;strokes:BrushStroke[];notes:string;resolution:string;count:number;analysisText:string;savedAt:number};
+export function saveReplicationEdits(edits:ReplicationEdits){try{userStorage.setItem('replication_edits_v1',JSON.stringify({...edits,ownerId:ownerId()}));}catch{}}
+export function readReplicationEdits(fingerprint:string):ReplicationEdits|null {
+  try{const value=JSON.parse(userStorage.getItem('replication_edits_v1')||'null');return value?.ownerId===ownerId()&&value.fingerprint===fingerprint&&Array.isArray(value.strokes)&&(!value.strokes.length||validBrush({version:1,strokes:value.strokes}))&&typeof value.notes==='string'&&value.notes.length<=4000&&typeof value.analysisText==='string'&&value.analysisText.length<=16000&&['1K','2K','4K'].includes(value.resolution)&&[1,2,4].includes(value.count)&&Number.isFinite(value.savedAt)?value:null;}catch{return null;}
+}
+export function clearReplicationEdits(){try{userStorage.removeItem('replication_edits_v1');}catch{}}
 export const startGeneration=(input:GenerationInput):Promise<ReplicationJob>=>submit('generation',input);

@@ -6,6 +6,7 @@ import { createReplicationWorker } from './replication-worker.js';
 import { prepareMasks, createRegionGuide } from './replication-composite.js';
 import { matchBrushSubjects } from '../shared/replication-brush.js';
 import {createLocalVision,localVisionConfigured} from './replication-vision.js';
+import {usableProductAnalysis} from './replication-prompts.js';
 import { validateAnalysisInput, validateGenerationInput, validateRequestIdentity, validateContourHints, payloadHash, fail, UUID } from './replication-validation.js';
 export { REPLICATION_MODELS };
 
@@ -36,7 +37,7 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
   async function own(req,id) {
     if(!UUID.test(id||''))throw fail('JOB_NOT_FOUND',404);
     const j=await store.get(id);if(!j||j.ownerId!==req.userId)throw fail('JOB_NOT_FOUND',404);
-    if(!j.retainOriginals&&j.expiresAt<Date.now()&&isFinalJob(j))throw fail('JOB_EXPIRED',410);return j;
+    return j; // Existing owned assets remain usable until explicitly cleaned up.
   }
   const error=(res,e)=>res.status(e.status&&e.status<600?e.status:500).json({errorCode:e.code||'INTERNAL_ERROR',error:ERROR_MESSAGES[e.code]||'请求未完成，请核对任务状态。'});
   const route=handler=>async(req,res)=>{try{await handler(req,res);}catch(e){error(res,e);}};
@@ -50,14 +51,13 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
   async function reserve(identity) {
     const old=await store.getRequest(identity.ownerId,identity.requestId);
     if(old){if(old.kind!==identity.kind||old.inputFingerprint!==identity.inputFingerprint)throw fail('IDEMPOTENCY_CONFLICT',409);return old;}
-    if((await store.list()).some(j=>j.ownerId===identity.ownerId&&!isFinalJob(j)))throw fail('TASK_BUSY',409);
     return store.reserveRequest({...identity,state:'reserved',jobId:null,revision:0,createdAt:Date.now(),updatedAt:Date.now()});
   }
   function same(old,kind,hash) {
     if(old.kind!==kind||old.payloadHash!==hash)throw fail('IDEMPOTENCY_CONFLICT',409);return old;
   }
-  async function create(req,res,kind) {
-    if(!enabled()||!canSubmit(kind,req))throw fail('FEATURE_DISABLED',503);
+  async function create(req,res,kind,materialsOnly=false) {
+    if(!enabled()||!canSubmit(materialsOnly?'generation':kind,req))throw fail('FEATURE_DISABLED',503);
     const input=kind==='analysis'?validateAnalysisInput(req.body,{maxReferences}):validateGenerationInput(req.body,{advancedOutputs});
     const identity={ownerId:req.userId,requestId:input.requestId,kind,inputFingerprint:input.inputFingerprint};
     const hash=payloadHash(input),old=await store.byRequest(req.userId,input.requestId);
@@ -66,13 +66,15 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
     if(kind==='generation') {
       if(input.outputMode!=='model')await requireVision(); // Historical adaptive requests still require reliable local composition.
       analysisJob=await own(req,input.analysisJobId);
-      if(analysisJob.kind!=='analysis'||analysisJob.status!=='succeeded'||!analysisJob.analysis?.data||!analysisJob.analysis.confirmedAt)throw fail('ANALYSIS_REQUIRED',409);
-      if(analysisJob.inputFingerprint!==input.inputFingerprint||analysisJob.analysis.revisionHash!==input.analysisRevisionHash)throw fail('ANALYSIS_STALE',409);
-      const ids=analysisJob.analysis.data.scene.old_product_instances.map(i=>i.instance_id);
+      const userBrush=input.selectionMode==='user-brush';
+      if(!userBrush&&(analysisJob.kind!=='analysis'||analysisJob.status!=='succeeded'||!analysisJob.analysis?.data||!analysisJob.analysis.confirmedAt))throw fail('ANALYSIS_REQUIRED',409);
+      if(!analysisJob.assets?.source||!analysisJob.assets.references?.length)throw fail('INPUT_INVALID',422);
+      if(analysisJob.inputFingerprint!==input.inputFingerprint||!userBrush&&analysisJob.analysis.revisionHash!==input.analysisRevisionHash)throw fail('ANALYSIS_STALE',409);
+      const ids=(analysisJob.analysis?.data?.scene?.old_product_instances||[]).map(i=>i.instance_id);
       if(input.selectedInstances.some(i=>!ids.includes(i)))throw fail('TARGET_SELECTION_REQUIRED',422);
       const s=analysisJob.assets.source;
       if(input.maskSpace.width!==s.width||input.maskSpace.height!==s.height||input.maskSpace.sourceHash!==s.sha256)throw fail('TARGET_SELECTION_REQUIRED',422);
-      const subjects=analysisJob.analysis.data.scene.old_product_instances;
+      const subjects=analysisJob.analysis?.data?.scene?.old_product_instances||[];
       if(input.brush&&input.selectionMode!=='user-brush'){
         const match=matchBrushSubjects(input.brush,subjects,s.width,s.height);
         if(!match.valid||canonicalJson([...match.selectedInstances].sort())!==canonicalJson([...input.selectedInstances].sort()))throw fail('TARGET_SELECTION_REQUIRED',422);
@@ -81,10 +83,7 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
       // full-resolution raster below still rejects empty/fully erased input.
       await prepareMasks(s.width,s.height,input.masks,input.protectMasks,{brush:input.brush,subjects,userBrush:input.selectionMode==='user-brush'});
     }
-    const provider=getProvider(req);
-    const active=(await store.list()).filter(j=>!isFinalJob(j));
-    if(active.some(j=>j.ownerId===req.userId))throw fail('TASK_BUSY',409);
-    if(active.length>=20)throw fail('QUEUE_BUSY',503);
+    const provider=materialsOnly?{accountRef:'local'}:getProvider(req);
     const receipt=await reserve(identity);
     if(receipt.state==='closed')throw fail('REQUEST_CLOSED',410);
     const intakeId=randomUUID();
@@ -92,12 +91,16 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
     if(claimed?.state==='closed')throw fail('REQUEST_CLOSED',410);
     if(claimed?.payloadHash!==hash)throw fail('IDEMPOTENCY_CONFLICT',409);
     if(claimed?.intakeId!==intakeId)throw fail('REQUEST_PROCESSING',409);
+    const fallback=usableProductAnalysis('',kind==='analysis'?input.references.length:analysisJob.assets.references.length);
+    const analysis=materialsOnly?{...fallback,revision:1,revisionHash:sha256(fallback.text),confirmedAt:null}:null;
+    const approved=kind==='generation'?analysisJob.analysis?.data?analysisJob.analysis:analysisJob.approvedAnalysis||fallback:null;
     const job={id:randomUUID(),ownerId:req.userId,requestId:input.requestId,kind,payloadHash:hash,inputFingerprint:input.inputFingerprint,
       sourceHash:kind==='analysis'?input.sourceHash:analysisJob.sourceHash,referenceHashes:kind==='analysis'?input.referenceHashes:analysisJob.referenceHashes,
-      target:kind==='analysis'?input.target:analysisJob.target,providerAccountRef:provider.accountRef,status:'queued',stage:'queued',revision:0,
-      createdAt:Date.now(),updatedAt:Date.now(),expiresAt:Date.now()+retentionDays*86400000,results:[],images:[],analysis:null,
+      target:kind==='analysis'?input.target:analysisJob.target,providerAccountRef:provider.accountRef,status:materialsOnly?'succeeded':'queued',stage:materialsOnly?'succeeded':'queued',revision:0,
+      createdAt:Date.now(),updatedAt:Date.now(),expiresAt:Date.now()+retentionDays*86400000,results:[],images:[],analysis,retainOriginals:true,
+      ...(materialsOnly?{origin:'local_materials'}:{}),
       total:kind==='analysis'?1:input.count,errorCode:null,workerLease:null,cancelRequested:false,
-      ...(kind==='generation'?{retainOriginals:true,analysisJobId:analysisJob.id,approvedAnalysis:{text:analysisJob.analysis.text,revisionHash:analysisJob.analysis.revisionHash,revision:analysisJob.analysis.revision,subjects:analysisJob.analysis.data.scene.old_product_instances},input}:{}),assets:null};
+      ...(kind==='generation'?{analysisJobId:analysisJob.id,approvedAnalysis:{text:input.selectionMode==='user-brush'?(input.analysisSummary||approved.text||fallback.text).slice(0,16000):approved.text,revisionHash:approved.revisionHash,revision:approved.revision,subjects:approved.data?.scene?.old_product_instances||approved.subjects||[]},input}:{}),assets:null};
     try {
       job.assets=kind==='analysis'?await assets.prepare(job,input):await assets.cloneMaterials(job,analysisJob);
       if(kind==='generation')job.assets.guide=await assets.saveGuide(job,await createRegionGuide(await assets.read(job,job.assets.source),input,job.approvedAnalysis.subjects));
@@ -105,7 +108,7 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
       if(stored.id!==job.id){await assets.remove(job);same(stored,kind,hash);return res.status(202).json(await view(stored));}
       const accepted=await store.updateRequest(req.userId,input.requestId,r=>r.state==='preparing'&&r.intakeId===intakeId?{...r,state:'accepted',jobId:job.id}:null);
       if(accepted?.state!=='accepted'||accepted.jobId!==job.id){await store.closeRequest(identity);throw fail('REQUEST_CLOSED',410);}
-      res.status(202).json(await view(job));worker.wake(job,provider);
+      res.status(202).json(await view(job));if(!materialsOnly)worker.wake(job,provider);
     } catch(e){
       // No worker has been dispatched until the accepted receipt is durable.
       // Preserve a tombstone so a delayed body cannot be accepted later.
@@ -116,7 +119,7 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
   }
   router.get('/capabilities',route(async(req,res)=>res.json({version:2,enabled:enabled(),maxReferences,
     submission:{analysis:enabled()&&canSubmit('analysis',req),generation:enabled()&&canSubmit('generation',req)},
-    counts:advancedOutputs?[1,2,4]:[1],resolutions:advancedOutputs?['1K','2K','4K']:['1K','2K'],models:REPLICATION_MODELS,retentionDays,adaptiveComposition:{configured:!!vision||localVisionConfigured()}})));
+    counts:[1,2,4],resolutions:['1K','2K','4K'],models:REPLICATION_MODELS,retentionDays,adaptiveComposition:{configured:!!vision||localVisionConfigured()}})));
   router.post('/connectivity',route(async(req,res)=>res.json({success:true,models:await getProvider(req).connectivity()})));
   router.post('/requests',route(async(req,res)=>{
     if(!enabled())throw fail('FEATURE_DISABLED',503);
@@ -134,19 +137,20 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
     const result=await store.closeRequest(identity);res.json({closed:result.closed,receipt:receiptView(result.receipt),job:result.job?await view(result.job):null});
   }));
   router.post('/analysis',route((req,res)=>create(req,res,'analysis')));
+  router.post('/materials',route((req,res)=>create(req,res,'analysis',true)));
   router.post('/generation',route((req,res)=>create(req,res,'generation')));
   router.get('/workbench',route(async(req,res)=>{
     // Completed outputs remain discoverable if local browser markers are lost.
     // This endpoint only reads records, never wakes a worker or provider.
     const started=performance.now();
-    const jobs=(await store.list(req.userId)).filter(j=>j.ownerId===req.userId&&(j.retainOriginals||!isFinalJob(j)||j.expiresAt>=Date.now()))
+    const jobs=(await store.list(req.userId)).filter(j=>j.ownerId===req.userId)
       .sort((a,b)=>b.createdAt-a.createdAt||b.updatedAt-a.updatedAt);
     const latest=jobs[0],context=latest?jobs.filter(j=>j.inputFingerprint===latest.inputFingerprint):[];
     const newestAnalysis=context.find(j=>j.kind==='analysis');
     const generation=context.find(j=>j.kind==='generation'&&(!newestAnalysis||j.createdAt>=newestAnalysis.createdAt));
     const analysis=context.find(j=>j.kind==='analysis'&&(!generation||j.id===generation.analysisJobId))||newestAnalysis;
     const intakes=await Promise.all(['analysis','generation'].map(kind=>store.activeRequests(req.userId,kind)));
-    const result={jobs:await Promise.all([analysis,generation].filter(Boolean).map(view)),requests:intakes.flat().map(receiptView)};
+    const result={jobs:await Promise.all([analysis,generation].filter(Boolean).map(view)),pendingJobs:await Promise.all(jobs.filter(j=>!isFinalJob(j)).map(view)),requests:intakes.flat().map(receiptView)};
     res.set('Server-Timing',`workbench;dur=${(performance.now()-started).toFixed(1)}`);res.json(result);
   }));
   router.get('/active',route(async(req,res)=>{
@@ -167,7 +171,6 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
       const attempts=await store.attempts(job.id);
       if(attempts.some(a=>a.predictionId&&a.model===REPLICATION_MODELS.generation&&a.remoteStatus==='succeeded')){
         const provider=getProvider(req);if(provider.accountRef!==job.providerAccountRef)throw fail('PROVIDER_ACCOUNT_MISMATCH',409);
-        if((await store.list()).some(j=>j.ownerId===job.ownerId&&j.id!==job.id&&!isFinalJob(j)))throw fail('TASK_BUSY',409);
         // Reopen only this legacy download failure. resumeOnly below cannot
         // create any missing prediction or charge for an additional sample.
         job=await store.update(job.id,j=>j.status==='quality_failed'&&j.errorCode==='OUTPUT_INVALID'&&!j.results.length?
@@ -193,9 +196,10 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
   router.post('/jobs/:id/revision',route(async(req,res)=>{
     const job=await own(req,req.params.id),{text,previousHash}=req.body||{};
     if(job.kind!=='analysis'||job.status!=='succeeded'||!job.analysis?.data)throw fail('ANALYSIS_REQUIRED',409);
-    if(typeof text!=='string'||!text.trim()||text.length>16000)throw fail('INPUT_INVALID');
+    if(typeof text!=='string')throw fail('INPUT_INVALID');
+    const summary=text.trim().slice(0,16000)||usableProductAnalysis('',job.assets.references.length).text;
     let conflict=false;
-    const next=await store.update(job.id,j=>{if(j.analysis.revisionHash!==previousHash){conflict=true;return null;}return {...j,analysis:{...j.analysis,text:text.trim(),revision:j.analysis.revision+1,revisionHash:sha256(text.trim()),confirmedAt:Date.now()}};});
+    const next=await store.update(job.id,j=>{if(j.analysis.revisionHash!==previousHash){conflict=true;return null;}return {...j,analysis:{...j.analysis,text:summary,revision:j.analysis.revision+1,revisionHash:sha256(summary),confirmedAt:Date.now()}};});
     if(conflict)throw fail('ANALYSIS_STALE',409);res.json(await view(next));
   }));
   router.post('/jobs/:id/review',route(async(req,res)=>{
@@ -218,7 +222,6 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
     const hash=sha256(canonicalJson({derivedFrom:previous.id,raw:raw.sha256,hints}));
     const existing=await store.byRequest(req.userId,req.body.requestId);
     if(existing){same(existing,'generation',hash);return res.status(202).json(await view(existing));}
-    if((await store.list()).some(j=>j.ownerId===req.userId&&!isFinalJob(j)))throw fail('TASK_BUSY',409);
     const job={...previous,id:randomUUID(),requestId:req.body.requestId,origin:'local_recomposition',derivedFrom:previous.id,retainOriginals:true,
       payloadHash:hash,providerAccountRef:'local',status:'queued',stage:'queued',revision:0,total:1,createdAt:Date.now(),updatedAt:Date.now(),
       input:{...previous.input,requestId:req.body.requestId,contourHints:hints},results:[],images:[],pendingRaw:null,quality:null,errorCode:null,workerLease:null,cancelRequested:false,
@@ -252,7 +255,7 @@ export function createReplicationRouter({store,assets,getProvider,vision,pollMs,
   }));
   // Cleanup is local-only, explicit, and never removes unresolved remote attempts.
   router.cleanup=async()=>{for(const job of await store.list())if(!job.retainOriginals&&isFinalJob(job)&&job.expiresAt<Date.now()){
-    const dependents=(await store.list()).some(j=>j.analysisJobId===job.id&&(!isFinalJob(j)||j.expiresAt>Date.now()));
+    const dependents=(await store.list()).some(j=>j.analysisJobId===job.id&&(j.retainOriginals||!isFinalJob(j)||j.expiresAt>Date.now()));
     if(!dependents){await assets.remove(job);await store.remove(job.id);}
   }};
   router.worker=worker;

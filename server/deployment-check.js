@@ -22,7 +22,7 @@ async function checkHttp(origin) {
   for (const [method, pathname] of [
     ['GET', '/capabilities'], ['GET', '/active?kind=analysis'],
     ['GET', '/jobs/' + fakeId], ['GET', '/requests/' + fakeId], ['GET', '/assets/' + fakeId + '/source.png?owner=' + fakeId],
-    ['POST', '/connectivity'], ['POST', '/analysis'], ['POST', '/generation'],
+    ['POST', '/connectivity'], ['POST', '/analysis'], ['POST', '/materials'], ['POST', '/generation'],
     ['POST', '/requests'], ['POST', '/requests/' + fakeId + '/close'], ['POST', '/jobs/' + fakeId + '/resume']
   ]) {
     const response = await get(origin + '/api/replication' + pathname, {
@@ -45,8 +45,8 @@ async function checkDatabase() {
       const result = await client.query('SELECT to_regclass($1) AS relation', [name]);
       check(result.rows[0]?.relation, 'MISSING_TABLE_' + name);
     }
-    const index = await client.query("SELECT indexdef FROM pg_indexes WHERE schemaname=current_schema() AND indexname='replication_one_active_user'");
-    check(index.rows[0]?.indexdef.includes('UNIQUE INDEX') && index.rows[0]?.indexdef.includes('submission_unknown'), 'ACTIVE_JOB_INDEX_MISSING');
+    const index = await client.query("SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND indexname IN ('replication_one_active_user','replication_one_intake_user')");
+    check(index.rows.length===0, 'OBSOLETE_ACCOUNT_BLOCKING_INDEX');
     // All fixtures are private to this uncommitted transaction. No worker can see
     // them; ROLLBACK removes the fixture user, jobs and prediction rows together.
     await client.query('BEGIN');
@@ -69,8 +69,7 @@ async function checkDatabase() {
       await client.query('ROLLBACK TO SAVEPOINT deployment_unique');
       check(code === '23505', 'UNIQUENESS_GUARD_FAILED');
     }
-    await mustBeUnique('INSERT INTO replication_jobs(job_id,user_id,kind,request_id,payload_hash,status,document) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)',
-      [randomUUID(), ownerId, 'analysis', randomUUID(), 'deployment-check', 'queued', '{}']);
+    await store.create({...job,id:randomUUID(),requestId:randomUUID(),status:'submission_unknown'});
     await mustBeUnique('INSERT INTO replication_jobs(job_id,user_id,kind,request_id,payload_hash,status,document) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)',
       [randomUUID(), ownerId, 'analysis', requestId, 'deployment-check', 'failed', '{}']);
     const attempt = { id: randomUUID(), jobId, attemptNo: 0, model: REPLICATION_MODELS.analysis };
@@ -104,7 +103,7 @@ async function checkBundles(publicOrigin) {
       check(response.status === 200 && hash(Buffer.from(await response.arrayBuffer())) === hash(bytes), 'PUBLIC_BUNDLE_MISMATCH');
     }
   }
-  for (const marker of ['v1.5.7', '生成设置（必选）', 'Gemini 2.5 Flash', 'replication_v2_', '识别产品与替换位置', '开始替换', '安全结束本次提交', '重新加载图片', '取回已生成图片', '最终以你的涂抹为准', '刷新结果', '已发起下载', 'replication_preview_v1']) check(text.includes(marker), 'V2_UI_MARKER_MISSING_' + marker);
+  for (const marker of ['v1.5.8', '生成设置（必选）', 'Gemini 2.5 Flash', 'replication_v2_', '识别产品与替换位置（可选）', '开始替换', '安全结束本次提交', '重新加载图片', '取回已生成图片', '最终以你的涂抹为准', '刷新结果', '已发起下载', 'replication_preview_v1']) check(text.includes(marker), 'V2_UI_MARKER_MISSING_' + marker);
   if (publicOrigin) {
     const response = await get(publicOrigin);
     const publicHtml = await response.text();

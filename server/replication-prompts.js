@@ -70,3 +70,20 @@ export function parseProductAnalysis(output, referenceCount) {
     ...data.old_new_differences.map(d=>`旧/新差异：${d.attribute}：${d.observation}`), ...data.warnings.map(w=>'提示：'+w)].join('\n');
   return { data:accepted, text, rawText:raw };
 }
+
+// Analysis is optional guidance. Incomplete auxiliary fields must never decide
+// whether the user's images and painted region can be sent to the image model.
+export function usableProductAnalysis(output, referenceCount) {
+  try {
+    const analysis=parseProductAnalysis(output,referenceCount);
+    return {...analysis,text:analysis.text.slice(0,16000),warnings:analysis.text.length>16000?['分析较长，已自动精简；生成仍以参考图为准。']:[]};
+  } catch {
+    const raw=(typeof output==='string'?output:Array.isArray(output)?output.filter(s=>typeof s==='string').join(''):'').slice(0,24000);
+    let parsed;try{parsed=JSON.parse(raw.trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,''));}catch{}
+    const n=parsed?.new_product;
+    const features=Array.isArray(n?.observed_features)?n.observed_features.filter(f=>f&&typeof f.name==='string'&&f.certainty==='observed'&&Array.isArray(f.evidence_refs)&&f.evidence_refs.length&&f.evidence_refs.every(i=>Number.isInteger(i)&&i>=1&&i<=referenceCount)).slice(0,40).map(f=>({...f,name:f.name.slice(0,1000)})):[];
+    const category=typeof n?.category==='string'&&n.category.trim()&&n.category!=='unknown'?n.category.slice(0,100):'以产品参考图为准';
+    const data={schema_version:'1.0',new_product:{category,brand:null,colors:[],observed_features:features,uncertainties:[]},reference_views:[],scene:{old_product_instances:[],lighting:{direction:'unknown',temperature:'unknown'}},old_new_differences:[],warnings:[]};
+    return {data,text:[`新产品：${category}。外观、结构、颜色和标记以用户上传的产品参考图为准，不补造无法辨认的细节。`,...features.map(f=>'• '+f.name),'替换位置以用户涂抹为准。'].join('\n').slice(0,16000),rawText:raw,warnings:[raw?'辅助分析不完整，已使用可确认的信息；可以直接按参考图和涂抹生成。':'未进行辅助分析，可以直接按参考图和涂抹生成。']};
+  }
+}

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as pause } from 'node:timers/promises';
 import { REPLICATION_MODELS, isFinalJob, canonicalJson } from '../shared/replication-contract.js';
 import { sha256 } from './replication-assets.js';
-import { analysisPrompt, ANALYSIS_SYSTEM, generationPrompt, parseProductAnalysis, PROMPT_VERSIONS } from './replication-prompts.js';
+import { analysisPrompt, ANALYSIS_SYSTEM, generationPrompt, usableProductAnalysis, PROMPT_VERSIONS } from './replication-prompts.js';
 import { compositeReplicationImage } from './replication-composite.js';
 
 const remoteFinal=new Set(['succeeded','failed','canceled']);
@@ -129,7 +129,7 @@ export function createReplicationWorker({store,assets,vision,pollMs=1500,budgetM
         if(job.kind==='analysis') {
           if(job.cancelRequested){await state(id,'canceled');return;}
           try {
-            const analysis=parseProductAnalysis(prediction.output,job.assets.references.length);
+            const analysis=usableProductAnalysis(prediction.output,job.assets.references.length);
             const revisionHash=sha256(analysis.text);
             await state(id,'succeeded',{analysis:{...analysis,revision:1,revisionHash,confirmedAt:null},images:[],errorCode:null});
           } catch {const raw=typeof prediction.output==='string'?prediction.output:Array.isArray(prediction.output)?prediction.output.filter(s=>typeof s==='string').join(''):'';

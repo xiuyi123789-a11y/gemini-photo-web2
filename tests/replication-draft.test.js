@@ -38,3 +38,10 @@ test('draft storage failures do not throw or lock the page and cannot erase the 
 test('blocked IndexedDB cannot hold task and result recovery indefinitely',async()=>{
   const s=service({blocked:true});assert.equal(await s.loadReplicationDraft('alice'),null);
 });
+
+test('drafts can retain owned server asset URLs and changed reference angles without original browser files',async()=>{
+  const s=service(),image={file:null,url:'/api/replication/assets/local-job/source.png',width:900,height:600};
+  const draft={version:1,source:image,references:[{...image,url:'/api/replication/assets/local-job/ref-1.png',angle:'side'}],fingerprint:'',savedAt:Date.now()};
+  await s.saveReplicationDraft('alice',draft);assert.equal((await s.loadReplicationDraft('alice')).references[0].angle,'side');assert.equal(await s.loadReplicationDraft('bob'),null);
+  await s.saveReplicationDraft('alice',{...draft,source:{...image,url:'https://other.example/private.png'}});assert.equal(await s.loadReplicationDraft('alice'),null);
+});

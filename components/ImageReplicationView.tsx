@@ -7,8 +7,9 @@ import {saveReplicationDraft,loadReplicationDraft,clearReplicationDraft} from '.
 import { MAX_REFERENCES, isFinalJob, REPLICATION_MODEL_NAMES } from '../shared/replication-contract.js';
 import { BRUSH_LIMITS, matchBrushSubjects } from '../shared/replication-brush.js';
 import { startAnalysis,startGeneration,getReplicationWorkbench,replicationImageUrl,cancelReplicationJob,getReplicationCapabilities,
-  reviseAnalysis,readOperation,saveOperation,forgetOperation,assertOperation,operationFromServerJob,ownerId,
+  readOperation,saveOperation,forgetOperation,assertOperation,operationFromServerJob,ownerId,
   lookupOperation,closeOperation,resumeReplicationJob,readReplicationPreview,cacheReplicationPreview,clearReplicationPreview,
+  prepareReplicationMaterials,materialFile,saveReplicationEdits,readReplicationEdits,clearReplicationEdits,getReplicationJob,
   type Operation,type ReplicationJob,type ReferenceAngle,type PreserveKey,type Point,type EditMask,type JobResult,type BrushStroke } from '../services/replicationService';
 import './ImageReplicationView.css';
 
@@ -37,7 +38,7 @@ export const ImageReplicationView:React.FC=()=>{
   const [operations,setOperations]=useState<{analysis:Operation|null;generation:Operation|null}>(()=>({analysis:readOperation('analysis'),generation:readOperation('generation')}));
   const [mode,setMode]=useState<'original'|'raw'|'compare'>(cachedPreview?'raw':'original'),[candidate,setCandidate]=useState<Candidate|null>(()=>cachedPreview?{job:{source:cachedPreview.source},result:{raw:cachedPreview.raw}}:null),[split,setSplit]=useState(50),[enlarged,setEnlarged]=useState<{src:string;label:string}|null>(null);
   const [downloadNotice,setDownloadNotice]=useState('');
-  const [costConfirmed,setCostConfirmed]=useState(false);
+  const [pendingJobs,setPendingJobs]=useState<ReplicationJob[]>([]);
   const [restoring,setRestoring]=useState(!!cachedPreview),[imageRetry,setImageRetry]=useState(0),[failedImages,setFailedImages]=useState<string[]>([]);
   const [fullImageFallbacks,setFullImageFallbacks]=useState<string[]>([]);
   const sourceInput=useRef<HTMLInputElement>(null),refsInput=useRef<HTMLInputElement>(null),mounted=useRef(true),urls=useRef(new Set<string>()),operationBusy=useRef(false);
@@ -46,22 +47,25 @@ export const ImageReplicationView:React.FC=()=>{
   const currentFingerprint=useRef(''),loops=useRef({analysis:0,generation:0});
   const latestRevisions=useRef(new Map<string,number>());
   const restoredInputs=useRef(new Set<string>());
+  const editsReady=useRef(false);
   const materialsJob=useRef<ReplicationJob|null>(null),restoreSerial=useRef(0);
   const latestKinds=useRef(new Map<string,ReplicationJob>());
   const activeJob=[analysisJob,generationJob].find(j=>j&&!isFinalJob(j));
   const unresolved=(Object.values(operations) as Array<Operation|null>).filter((op):op is Operation=>!!op&&![analysisJob,generationJob].some(j=>j?.requestId===op.requestId&&isFinalJob(j)));
-  const feeLocked=!!activeJob||unresolved.length>0;
-  const locked=restoring||reading||!!pendingKind||feeLocked;
+  const locked=restoring||reading||!!pendingKind||operationBusy.current;
   const syncOperations=()=>setOperations({analysis:readOperation('analysis'),generation:readOperation('generation')});
   const instances=analysisJob?.analysis?.data?.scene?.old_product_instances||NO_INSTANCES;
   const brush={version:1 as const,strokes};
   const selection=useMemo(()=>matchBrushSubjects({version:1,strokes},NO_INSTANCES,source?.width||1,source?.height||1),[strokes,instances,source?.width,source?.height]);
   const validAnalysis=analysisJob?.status==='succeeded'&&analysisJob.inputFingerprint===fingerprint&&!!analysisJob.analysis?.data;
+  const materialsReady=!!source&&references.length>0;
   const sourceFailed=!!source&&failedImages.includes(source.preview+'#canvas');
   function apply(next:ReplicationJob,restore=false){
     if(!mounted.current)return;
     const latest=latestKinds.current.get(next.kind);
     if(latest&&latest.id!==next.id&&latest.createdAt>next.createdAt)return;
+    if(latest&&latest.id!==next.id&&!isFinalJob(latest))setPendingJobs(list=>list.some(j=>j.id===latest.id)?list:[latest,...list]);
+    setPendingJobs(list=>list.map(j=>j.id===next.id?next:j));
     if(next.revision<(latestRevisions.current.get(next.id)??-1))return;
     latestRevisions.current.set(next.id,next.revision);
     latestKinds.current.set(next.kind,next);
@@ -76,7 +80,8 @@ export const ImageReplicationView:React.FC=()=>{
       currentFingerprint.current=next.inputFingerprint;setFingerprint(next.inputFingerprint);
     }
     if(restore&&next.kind==='generation'&&next.input&&currentFingerprint.current===next.inputFingerprint&&!restoredInputs.current.has(next.id)){
-      setSelectedIds(next.input.selectedInstances);setMasks(next.input.masks);setProtectMasks(next.input.protectMasks);setStrokes(next.input.brush?.strokes||[]);restoredInputs.current.add(next.id);
+      setSelectedIds(next.input.selectedInstances);setMasks(next.input.masks);setProtectMasks(next.input.protectMasks);setStrokes(next.input.brush?.strokes||[]);
+      setNotes(next.input.notes||'');setResolution(next.input.resolution||'2K');setCount(next.input.count||1);restoredInputs.current.add(next.id);
     }
     if((restore||next.kind==='analysis'&&next.status==='succeeded')&&(!currentFingerprint.current||currentFingerprint.current===next.inputFingerprint)&&
       (!materialsJob.current||next.createdAt>materialsJob.current.createdAt||next.id===materialsJob.current.id)){
@@ -88,7 +93,7 @@ export const ImageReplicationView:React.FC=()=>{
     }
     const rawFromHistoricalComposition=next.kind==='generation'&&next.status==='quality_failed'&&next.results.some(r=>r.raw)&&next.errorCode==='QUALITY_FAILED';
     if(next.error&&!rawFromHistoricalComposition)setError(next.error);else setError('');
-    if(isFinalJob(next))setNotice(next.kind==='analysis'?(next.status==='succeeded'?'识别完成。请在右侧涂抹想替换的产品；不会自动生图。':'产品识别未完成，请查看提示。'):
+    if(isFinalJob(next))setNotice(next.kind==='analysis'?(next.status==='succeeded'?(next.analysis?.warnings?.join(' ')||'辅助识别完成，可以按你的涂抹直接生成。'):'辅助识别未完成，仍可按参考图和涂抹直接生成。'):
       next.results.length?'图片已生成，可查看、对比和下载。':stages[next.status]||next.status);
   }
   async function track(operation:Operation,recover=false,initial?:Awaited<ReturnType<typeof lookupOperation>>){
@@ -130,6 +135,7 @@ export const ImageReplicationView:React.FC=()=>{
     try{
       const snapshot=await getReplicationWorkbench();
       if(!mounted.current||serial!==restoreSerial.current)return;
+      setPendingJobs(snapshot.pendingJobs||[]);
       // Do not let an obsolete GET repopulate presentation storage after the
       // component or material context was superseded.
       cacheReplicationPreview(snapshot.jobs);
@@ -138,8 +144,7 @@ export const ImageReplicationView:React.FC=()=>{
       const newest=[...snapshot.jobs].sort((a,b)=>b.createdAt-a.createdAt||b.updatedAt-a.updatedAt)[0];
       if(newest&&!currentFingerprint.current){currentFingerprint.current=newest.inputFingerprint;setFingerprint(newest.inputFingerprint);materialsJob.current=newest;
         setSource(materialFrom(newest.source));setReferences(newest.references.map(materialFrom));}
-      // Display an authenticated saved result even if an unrelated old browser
-      // intent is unresolved. That old intent and its fee lock remain untouched.
+      // Display the latest owned result independently of historical requests.
       const saved=snapshot.jobs.find(j=>j.kind==='generation'&&j.results.some(r=>r.raw?.url));
       if(saved&&saved.inputFingerprint===currentFingerprint.current){
         setCandidate({job:saved,result:saved.results[saved.results.length-1]});setMode('raw');
@@ -152,11 +157,9 @@ export const ImageReplicationView:React.FC=()=>{
           op=operationFromServerJob(job,op);saveOperation(op);syncOperations();
         }
         if(op&&job&&job.requestId!==op.requestId){
-          // Another tab may have finished a newer task. Verify the old marker's
-          // terminal state before replacing it; 404 alone never releases a fee lock.
-          const old=await lookupOperation(op);
-          if(old.closed||old.job&&isFinalJob(old.job)){forgetOperation(kind);op=null;}
-          else job=undefined;
+          // Old requests are retained server-side. The newest owned context is
+          // usable even if an unrelated historical acknowledgment was lost.
+          forgetOperation(kind);op=null;
         }
         if(!op){const receipt=snapshot.requests.find(r=>r.kind===kind);if(!job&&!receipt)return;
           op=job?{kind,jobId:job.id,requestId:job.requestId,inputFingerprint:job.inputFingerprint,ownerId:ownerId()}:
@@ -164,7 +167,7 @@ export const ImageReplicationView:React.FC=()=>{
         return track(op,true,job?{job,receipt:null,closed:false}:undefined);
       });
       // Polling may last minutes; it must not keep the refresh spinner locked.
-      setRestoring(false);await Promise.all(tracks);
+      setRestoring(false);void Promise.all(tracks).catch(e=>{if(mounted.current)setError(issue(e));});
     }finally{if(mounted.current&&serial===restoreSerial.current)setRestoring(false);}
   }
   const refreshCapabilities=()=>getReplicationCapabilities().then(c=>{if(mounted.current)setCaps(c);}).catch(()=>{});
@@ -174,15 +177,28 @@ export const ImageReplicationView:React.FC=()=>{
     const initialize=async()=>{
       const recovering=restoreAll().catch(e=>{if(mounted.current)setError(issue(e));});
       const draft=await loadReplicationDraft(ownerId());
+      await recovering;
       if(!mounted.current)return;
-      if(draft&&!currentFingerprint.current&&!materialsJob.current&&!source&&!references.length&&urls.current.size===0&&!readOperation('analysis')&&!readOperation('generation')){
-        const material=(image:{file:File;width:number;height:number;angle?:string}):Material=>{
-          const url=URL.createObjectURL(image.file);urls.current.add(url);
+      const serverUpdated=Math.max(0,...[...latestKinds.current.values()].map(j=>j.updatedAt));
+      if(draft&&(!currentFingerprint.current||!draft.fingerprint&&draft.savedAt>serverUpdated)&&urls.current.size===0){
+        if(currentFingerprint.current)stale();
+        const material=(image:{file:File|null;url?:string;width:number;height:number;angle?:string}):Material=>{
+          const url=image.file?URL.createObjectURL(image.file):image.url!;if(image.file)urls.current.add(url);
           return {id:crypto.randomUUID(),file:image.file,preview:url,width:image.width,height:image.height,angle:(image.angle||'other') as ReferenceAngle};
         };
-        setSource(material(draft.source));setReferences(draft.references.map(material));setNotice('已恢复未提交的素材，请点击识别产品与替换位置。');
+        setSource(material(draft.source));setReferences(draft.references.map(material));setNotice('已恢复素材与编辑，可以涂抹后直接生成。');
+        if(draft.edits){setStrokes(draft.edits.strokes);setNotes(draft.edits.notes);setResolution(draft.edits.resolution);setCount(draft.edits.count);setAnalysisText(draft.edits.analysisText);}
+      }else if(draft?.fingerprint===currentFingerprint.current){
+        setSource(previous=>previous?{...previous,file:draft.source.file||previous.file}:previous);
+        setReferences(previous=>previous.map((r,i)=>({...r,file:draft.references[i]?.file||r.file})));
       }
-      await recovering;
+      const edits=readReplicationEdits(currentFingerprint.current);
+      const submitted=latestKinds.current.get('generation')?.input;
+      const changedSinceSubmit=!submitted||!!edits&&(JSON.stringify(edits.strokes)!==JSON.stringify(submitted.brush?.strokes||[])||edits.notes!==(submitted.notes||'')||edits.resolution!==submitted.resolution||edits.count!==(submitted.count||1));
+      if(edits&&changedSinceSubmit&&edits.savedAt>=Math.max(0,...[...latestKinds.current.values()].map(j=>j.updatedAt))){
+        setStrokes(edits.strokes);setNotes(edits.notes);setResolution(edits.resolution);setCount(edits.count);setAnalysisText(edits.analysisText);setMode('original');
+      }
+      editsReady.current=true;
     };
     void initialize().catch(e=>{if(mounted.current)setError(issue(e));});
     window.addEventListener?.('focus',refreshCapabilities);
@@ -190,19 +206,26 @@ export const ImageReplicationView:React.FC=()=>{
     return()=>{mounted.current=false;restoreSerial.current++;loops.current.analysis++;loops.current.generation++;window.removeEventListener?.('focus',refreshCapabilities);window.setTimeout(()=>{if(!mounted.current)urls.current.forEach(u=>URL.revokeObjectURL(u));},0);};
   },[]);
   useEffect(()=>{
-    if(!currentFingerprint.current&&source?.file&&references.every(r=>r.file))void saveReplicationDraft(ownerId(),{version:1,source:{file:source.file,width:source.width,height:source.height},references:references.map(r=>({file:r.file!,width:r.width,height:r.height,angle:r.angle})),savedAt:Date.now()}).then(saved=>{
-      if(saved&&mounted.current&&!currentFingerprint.current&&!operationBusy.current&&!readOperation('analysis')&&!readOperation('generation'))setNotice('素材已在本机保存，请点击识别产品与替换位置。');
-    });
+    if(editsReady.current&&fingerprint&&!restoring&&!locked)saveReplicationEdits({fingerprint,strokes,notes,resolution,count,analysisText,savedAt:Date.now()});
+  },[fingerprint,strokes,notes,resolution,count,analysisText,restoring,locked]);
+  useEffect(()=>{
+    if(!editsReady.current||locked||!source)return;
+    const draftImage=(image:Material)=>({file:image.file,url:image.preview.startsWith('/api/replication/assets/')?image.preview:undefined,width:image.width,height:image.height,angle:image.angle});
+    const timer=setTimeout(()=>{void saveReplicationDraft(ownerId(),{version:1,source:draftImage(source),references:references.map(draftImage),fingerprint,savedAt:Date.now(),edits:{strokes,notes,resolution,count,analysisText}});},250);
+    return()=>clearTimeout(timer);
+  },[source,references,fingerprint,strokes,notes,resolution,count,analysisText,locked]);
+  useEffect(()=>{
     const element=viewport.current;if(!element||!source)return;
     const fit=()=>setCanvasWidth(Math.max(1,Math.min(element.clientWidth,element.clientHeight*source.width/source.height)));
     fit();if(typeof ResizeObserver==='undefined')return;
     const observer=new ResizeObserver(fit);observer.observe(element);return()=>observer.disconnect();
   },[source?.width,source?.height,source?.file,references]);
-  function stale(){
-    if(feeLocked)return;
+  function stale(keepPaint=false){
+    loops.current.analysis++;loops.current.generation++;
+    clearReplicationEdits();
     clearReplicationPreview();showingCache.current=false;setDownloadNotice('');
     setAnalysisJob(null);setGenerationJob(null);setAnalysisText('');setFingerprint('');currentFingerprint.current='';
-    setSelectedIds([]);setMasks([]);setProtectMasks([]);setStrokes([]);paintRef.current=null;panRef.current=null;setZoom(100);setCandidate(null);setMode('original');setCostConfirmed(false);setError('');setNotice('素材已改变，请重新识别产品。');
+    setSelectedIds([]);setMasks([]);setProtectMasks([]);if(!keepPaint)setStrokes([]);paintRef.current=null;panRef.current=null;setZoom(100);setCandidate(null);setMode('original');setError('');setNotice('素材已更新，可以按涂抹直接生成；辅助识别可选。');
     materialsJob.current=null;latestKinds.current.clear();setFailedImages([]);setFullImageFallbacks([]);forgetOperation('analysis');forgetOperation('generation');
     syncOperations();
   }
@@ -221,16 +244,17 @@ export const ImageReplicationView:React.FC=()=>{
         if(img.naturalWidth*img.naturalHeight>32*1024*1024)throw new Error('图片最多支持3200万像素。');
         added.push({id:crypto.randomUUID(),file,preview:url,width:img.naturalWidth,height:img.naturalHeight,angle:'other'});
       }
-      stale();if(kind==='source')setSource(added[0]);else setReferences(prev=>[...prev,...added]);
+      stale(kind==='refs');if(kind==='source')setSource(added[0]);else setReferences(prev=>[...prev,...added]);
     }catch(e){setError(issue(e));}finally{setReading(false);}
   }
   async function analyze(){
     if(locked||operationBusy.current)return;
-    if(!source?.file||!references.length||references.some(r=>!r.file)){setError('请上传场景原图和产品参考。已恢复的分析可直接确认并复刻；重新分析需重新上传素材。');return;}
+    if(!materialsReady){setError('请上传场景原图和产品参考。');return;}
     loops.current.analysis++;operationBusy.current=true;setPendingKind('analysis');setError('');setNotice(`仅执行 ${REPLICATION_MODEL_NAMES.analysis} 产品文字分析，不会生成图片。`);
     try{
-      setMasks([]);setProtectMasks([]);setSelectedIds([]);setStrokes([]);setCostConfirmed(false);setMode('original');
-      const next=await startAnalysis(source.file,references.map(r=>({file:r.file!,angle:r.angle})), '');
+      setMode('original');
+      const files=await Promise.all([materialFile(source!,'source.png'),...references.map((r,i)=>materialFile(r,`ref-${i+1}.png`))]);
+      const next=await startAnalysis(files[0],references.map((r,i)=>({file:files[i+1],angle:r.angle})), '');
       currentFingerprint.current=next.inputFingerprint;setFingerprint(next.inputFingerprint);apply(next);
       await track(operationFromServerJob(next));
     }catch(e){setError(issue(e));}
@@ -239,20 +263,24 @@ export const ImageReplicationView:React.FC=()=>{
   async function generate(){
     if(locked||operationBusy.current)return;
     if(sourceFailed){setError('请先重新加载场景图片，再确认替换范围。');return;}
-    if(!validAnalysis||!analysisJob){setError('请先识别产品与替换位置。');return;}
+    if(!materialsReady){setError('请上传场景原图和至少一张产品参考图。');return;}
     if(!selection.painted){setError('请先涂抹想替换的产品。');return;}
-    if(!costConfirmed){setError(`请确认本次会请求${count}个图像预测，费用以供应商记录为准。`);return;}
-    loops.current.generation++;operationBusy.current=true;setPendingKind('generation');setError('');setCostConfirmed(false);
+    loops.current.analysis++;loops.current.generation++;operationBusy.current=true;setPendingKind('generation');setError('');
     try{
-      // User's explicit generation click confirms the visible analysis and brush
-      // together. Revision is a local write and cannot create a prediction.
-      let approved=analysisJob;
-      if(!approved.analysis!.confirmedAt||approved.analysis!.text!==analysisText){approved=await reviseAnalysis(approved,analysisText);setAnalysisJob(approved);}
-      const next=await startGeneration({inputFingerprint:fingerprint,analysisJobId:approved.id,analysisRevisionHash:approved.analysis!.revisionHash,
+      // Optional analysis never gates a direct image request. Upload/normalize
+      // materials locally if this is the first generation for these images.
+      let approved=materialsJob.current;
+      if(!approved||approved.inputFingerprint!==fingerprint){
+        const files=await Promise.all([materialFile(source!,'source.png'),...references.map((r,i)=>materialFile(r,`ref-${i+1}.png`))]);
+        approved=await prepareReplicationMaterials(files[0],references.map((r,i)=>({file:files[i+1],angle:r.angle})));
+        currentFingerprint.current=approved.inputFingerprint;setFingerprint(approved.inputFingerprint);apply(approved);
+      }
+      saveReplicationEdits({fingerprint:approved.inputFingerprint,strokes,notes,resolution,count,analysisText,savedAt:Date.now()});
+      const next=await startGeneration({inputFingerprint:approved.inputFingerprint,analysisJobId:approved.id,analysisSummary:analysisText,
         selectedInstances:[],masks:[],protectMasks:[],brush,selectionMode:'user-brush',
-        maskSpace:{width:analysisJob.source.width,height:analysisJob.source.height,sourceHash:analysisJob.source.sha256},
+        maskSpace:{width:approved.source.width,height:approved.source.height,sourceHash:approved.source.sha256},
         resolution,count,preserve,notes,confirmedPredictions:count,outputMode:'model'});
-      apply(next);await track(operationFromServerJob(next));
+      clearReplicationEdits();apply(next);await track(operationFromServerJob(next));
     }catch(e){setError(issue(e));}
     finally{operationBusy.current=false;setPendingKind(null);syncOperations();}
   }
@@ -262,13 +290,13 @@ export const ImageReplicationView:React.FC=()=>{
     return {x:Math.min(1,Math.max(0,p.x/source.width)),y:Math.min(1,Math.max(0,p.y/source.height))};
   }
   function beginBrush(event:React.PointerEvent<SVGSVGElement>){
-    if(locked||!validAnalysis||sourceFailed||event.button!==0||paintRef.current||panRef.current)return;
+    if(locked||!source||sourceFailed||event.button!==0||paintRef.current||panRef.current)return;
     event.preventDefault();event.currentTarget.setPointerCapture(event.pointerId);
     if(tool==='pan'){if(viewport.current)panRef.current={x:event.clientX,y:event.clientY,left:viewport.current.scrollLeft,top:viewport.current.scrollTop};return;}
     const p=brushPoint(event);if(!p)return;
     if(strokes.length>=BRUSH_LIMITS.strokes||strokes.reduce((n,s)=>n+s.points.length,0)>=BRUSH_LIMITS.points){setError('笔画较多，请撤销部分笔画或清空后重画。');return;}
     const stroke:BrushStroke={tool,size:brushSize,points:[p]};paintRef.current={pointerId:event.pointerId,stroke};
-    setStrokes(previous=>[...previous,stroke]);setPainting(true);setMasks([]);setProtectMasks([]);setCostConfirmed(false);setError('');setCursor(p);
+    setStrokes(previous=>[...previous,stroke]);setPainting(true);setMasks([]);setProtectMasks([]);setError('');setCursor(p);
   }
   function moveBrush(event:React.PointerEvent<SVGSVGElement>){
     if(panRef.current&&viewport.current){viewport.current.scrollLeft=panRef.current.left+panRef.current.x-event.clientX;viewport.current.scrollTop=panRef.current.top+panRef.current.y-event.clientY;return;}
@@ -309,17 +337,21 @@ export const ImageReplicationView:React.FC=()=>{
       else setNotice('该请求已有预测记录，费用保护仍保留；请查询或取消原任务，不会重新创建预测。');
     }catch(e){setError(issue(e));}finally{setPendingKind(null);syncOperations();}
   }
+  async function checkHistorical(job:ReplicationJob,cancelTask=false){
+    try{const next=cancelTask?await cancelReplicationJob(job.id,job.origin==='local_recomposition'):await getReplicationJob(job.id);
+      setPendingJobs(list=>list.map(j=>j.id===next.id?next:j));
+    }catch(e){setError(issue(e));}
+  }
   function download(url:string,label:string){try{startImageDownload(url,`图像复刻_${label}_${Date.now()}.png`);setDownloadNotice('已发起下载，请查看浏览器下载列表。');}catch(e){setError(issue(e));}}
   const originalUrl=candidate&&mode!=='original'?candidate.job.source.url:source?.preview;
   const preview=mode==='raw'?candidate?.result.raw.url:originalUrl;
   const polygonPoints=(p:Point[])=>p.map(v=>`${v.x*(source?.width||1)},${v.y*(source?.height||1)}`).join(' ');
-  const feeReady=validAnalysis&&!locked&&caps.enabled&&caps.submission?.generation!==false;
-  const generationReady=feeReady&&selection.painted>0&&!sourceFailed;
+  const generationReady=materialsReady&&!locked&&selection.painted>0&&!sourceFailed;
   const generatingAgain=!!generationJob?.results.length;
-  const unavailable=!caps.enabled||!validAnalysis&&caps.submission?.analysis===false;
+  const unavailable=!caps.enabled||caps.submission?.generation===false;
   const statusText=error||(failedImages.length?'图片加载失败，任务和生成结果已保留，请重新加载图片。':restoring?cachedPreview?'已显示上次图片，正在同步任务状态…':'正在恢复素材与生成结果…':pendingKind?pendingKind==='analysis'?'正在提交分析素材…':'正在提交生图任务…':activeJob?
     `${activeJob.kind==='analysis'?'产品分析':'图片生成'} · ${stages[activeJob.status]||'处理中'}`:unresolved.length?'提交结果待确认，请重新连接查询。':
-    downloadNotice|| (candidate?'图片已生成 · 可预览、对比和下载':unavailable?`产品分析入口暂未开放 · ${notice||'已保留上传素材。'}`:notice||(validAnalysis?'识别完成，请涂抹要替换的物品。':'上传场景与产品图片，识别后涂抹替换。')));
+    downloadNotice|| (candidate?`图片已生成 · 可预览、对比和下载${unavailable?' · 生图服务暂未开放':''}`:unavailable?'生图服务暂未开放，素材与涂抹已保留。':notice||'上传场景与产品图片，涂抹后直接替换。'));
   const enlarge=(src:string|undefined,label:string)=>{if(src)setEnlarged({src,label});};
   const imageProps=(url:string,thumbnail:boolean|'canvas'=false)=>{
     const key=url+(thumbnail===true?'#thumbnail':thumbnail==='canvas'?'#canvas':'');
@@ -339,6 +371,9 @@ export const ImageReplicationView:React.FC=()=>{
         {unresolved.filter(op=>![analysisJob,generationJob].some(j=>j?.requestId===op.requestId&&!['submission_unknown','cancel_unknown'].includes(j.status))).map(op=><button key={op.requestId} className="rp-button" disabled={!!pendingKind} onClick={()=>safelyEnd(op)}>安全结束本次提交</button>)}
         {activeJob&&<button className="rp-button" onClick={cancel}>请求取消任务</button>}</div>}
     </header>
+    {(unresolved.length>0||activeJob||pendingJobs.some(j=>!isFinalJob(j)))&&<div className="rp-hint" role="status">历史任务可能仍在运行或计费。你可以继续新任务；每次点击生成会单独计费，系统不会自动重复提交。
+      {pendingJobs.length>0&&<details><summary>查看历史任务状态</summary>{pendingJobs.map(job=><div key={job.id}>{new Date(job.createdAt).toLocaleString()} · {stages[job.status]||job.status} <button className="rp-text" onClick={()=>checkHistorical(job)}>查询</button>{!isFinalJob(job)&&<button className="rp-text" onClick={()=>checkHistorical(job,true)}>请求取消</button>}</div>)}</details>}
+    </div>}
     <div className="rp-layout"><aside className="rp-card rp-materials">
       <div className="rp-card-title"><h2><Layers/>输入素材</h2><button className="rp-text" disabled={locked} onClick={()=>{if(window.confirm('清空本次素材与编辑？已保存的任务不会删除。')){stale();setSource(null);setReferences([]);void clearReplicationDraft(ownerId());}}}><Trash2/>清空</button></div>
       <div className="rp-section-label">场景原图{source&&<button className="rp-text" disabled={locked} onClick={()=>sourceInput.current?.click()}>更换</button>}</div>
@@ -347,36 +382,36 @@ export const ImageReplicationView:React.FC=()=>{
         <input ref={sourceInput} type="file" hidden accept="image/jpeg,image/png,image/webp" onChange={e=>{if(e.target.files)void upload(e.target.files,'source');e.target.value='';}}/></div>
       <div className="rp-section-label">新产品参考图<small>{references.length}/{caps.maxReferences}</small></div>
       <div className="rp-references" onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();void upload(e.dataTransfer.files,'refs');}}>
-        {references.map((r,i)=><div className="rp-reference" key={r.id}><button aria-label={`放大产品参考${i+1}`} onClick={()=>enlarge(r.preview,`产品参考${i+1}`)}><img {...imageProps(r.preview,true)} alt={`产品参考${i+1}`}/></button><button className="rp-remove" disabled={locked} aria-label={`移除参考${i+1}`} onClick={()=>{stale();setReferences(list=>list.filter(item=>item.id!==r.id));}}><X/></button><select aria-label={`参考${i+1}角度`} disabled={locked} value={r.angle} onChange={e=>{stale();setReferences(list=>list.map(item=>item.id===r.id?{...item,angle:e.target.value as ReferenceAngle}:item));}}>{Object.entries(angles).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></div>)}
+        {references.map((r,i)=><div className="rp-reference" key={r.id}><button aria-label={`放大产品参考${i+1}`} onClick={()=>enlarge(r.preview,`产品参考${i+1}`)}><img {...imageProps(r.preview,true)} alt={`产品参考${i+1}`}/></button><button className="rp-remove" disabled={locked} aria-label={`移除参考${i+1}`} onClick={()=>{stale(true);setReferences(list=>list.filter(item=>item.id!==r.id));}}><X/></button><select aria-label={`参考${i+1}角度`} disabled={locked} value={r.angle} onChange={e=>{stale(true);setReferences(list=>list.map(item=>item.id===r.id?{...item,angle:e.target.value as ReferenceAngle}:item));}}>{Object.entries(angles).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></div>)}
         {references.length<caps.maxReferences&&<button disabled={locked} className="rp-add-ref" aria-label="添加产品参考" onClick={()=>refsInput.current?.click()}><Plus/>添加参考</button>}
         <input ref={refsInput} type="file" hidden multiple accept="image/jpeg,image/png,image/webp" onChange={e=>{if(e.target.files)void upload(e.target.files,'refs');e.target.value='';}}/></div>
       <p className="rp-hint">JPG / PNG / WEBP · 单张20 MB · 合计32 MB</p>
-      <button className="rp-button rp-primary rp-wide" disabled={locked||!caps.enabled||caps.submission?.analysis===false} onClick={analyze}><ScanEye/>{pendingKind==='analysis'?'正在提交分析素材…':analysisJob&&!isFinalJob(analysisJob)?(['submission_unknown','cancel_unknown'].includes(analysisJob.status)?'分析任务待核对':'正在分析产品…'):unresolved.some(op=>op.kind==='analysis')?'分析提交待核对':'识别产品与替换位置'}</button>
-      {validAnalysis&&<p className="rp-recognition">识别到：{analysisJob!.analysis!.data.new_product.category}</p>}
-      {validAnalysis&&<details className="rp-advanced"><summary>产品特征（可选调整）</summary><textarea aria-label="产品分析摘要" value={analysisText} disabled={locked} maxLength={16000} onChange={e=>{setAnalysisText(e.target.value);setCostConfirmed(false);}}/></details>}
+      <button className="rp-button rp-wide" disabled={locked||!materialsReady} onClick={analyze}><ScanEye/>{pendingKind==='analysis'?'正在提交分析素材…':'识别产品与替换位置（可选）'}</button>
+      <p className="rp-hint">可跳过识别直接生成。辅助识别会调用文字模型，按供应商规则计费。</p>
+      {validAnalysis&&analysisJob?.origin!=='local_materials'&&<p className="rp-recognition">识别到：{analysisJob!.analysis!.data.new_product.category}</p>}
+      {materialsReady&&<details className="rp-advanced"><summary>产品特征（可选调整）</summary><textarea aria-label="产品分析摘要" value={analysisText} disabled={locked} maxLength={16000} placeholder="留空时直接以产品参考图为准" onChange={e=>setAnalysisText(e.target.value)}/></details>}
       {analysisJob?.status==='failed'&&!!analysisJob.analysis?.rawText&&<details className="rp-advanced"><summary>查看未完成的分析返回（未启动生图）</summary><pre className="rp-json">{analysisJob.analysis.rawText}</pre></details>}
       <section className="rp-settings" aria-label="生成设置"><div className="rp-card-title"><h2><Sparkles/>生成图片</h2></div>
-        <p className="rp-selection-summary">{!validAnalysis?'识别后，在原图上涂抹要替换的物品。':!selection.painted?'请在原图上涂抹想换掉的物品。':'已涂抹选择产品，最终以你的涂抹为准。'}</p>
-        <textarea className="rp-notes" aria-label="补充要求" disabled={locked} value={notes} maxLength={4000} onChange={e=>{setNotes(e.target.value);setCostConfirmed(false);}} placeholder="补充要求（可选）"/>
-        <div className="rp-output"><select aria-label="模型分辨率" disabled={locked} value={resolution} onChange={e=>{setResolution(e.target.value);setCostConfirmed(false);}}>{caps.resolutions.map(v=><option key={v}>{v}</option>)}</select><select aria-label="生成数量" disabled={locked} value={count} onChange={e=>{setCount(Number(e.target.value));setCostConfirmed(false);}}>{caps.counts.map(v=><option key={v} value={v}>{v} 张</option>)}</select></div>
-        <label className="rp-cost" title="金额以供应商实际记录为准；失败或取消也可能计费。"><input aria-label="确认本次替换费用" type="checkbox" disabled={!feeReady} checked={costConfirmed} onChange={e=>setCostConfirmed(e.target.checked)}/>确认本次 {count} 张生图费用</label>
-        <button className="rp-button rp-primary rp-wide" title={!caps.enabled?'当前新生图入口已关闭，已有图片仍可查看和下载。':generationReady&&!costConfirmed?'请先勾选费用确认。':undefined} disabled={!generationReady||!costConfirmed||painting} onClick={generate}><Sparkles/>{generatingAgain?'重新生成一张':'开始替换'}</button>
-        {generationReady&&!costConfirmed&&<p className="rp-hint">勾选费用确认后即可生成。</p>}
-        {feeReady&&!generationReady&&<p className="rp-hint">{sourceFailed?'请先重新加载场景图片，再涂抹确认。':'请先在场景原图上涂抹要替换的商品。'}</p>}
+        <p className="rp-selection-summary">{!selection.painted?'请在原图上涂抹想换掉的物品。':'已涂抹选择产品，最终以你的涂抹为准。'}</p>
+        <textarea className="rp-notes" aria-label="补充要求" disabled={locked} value={notes} maxLength={4000} onChange={e=>setNotes(e.target.value)} placeholder="补充要求（可选）"/>
+        <div className="rp-output"><select aria-label="模型分辨率" disabled={locked} value={resolution} onChange={e=>setResolution(e.target.value)}>{caps.resolutions.map(v=><option key={v}>{v}</option>)}</select><select aria-label="生成数量" disabled={locked} value={count} onChange={e=>setCount(Number(e.target.value))}>{caps.counts.map(v=><option key={v} value={v}>{v} 张</option>)}</select></div>
+        <p className="rp-cost">点击生成将提交 {count} 张图片，按供应商实际规则计费；失败或取消也可能计费。</p>
+        <button className="rp-button rp-primary rp-wide" disabled={!generationReady||painting} onClick={generate}><Sparkles/>{pendingKind==='generation'?'正在提交生图任务…':generatingAgain?'重新生成一张':'开始替换'}</button>
+        {!locked&&!generationReady&&<p className="rp-hint">{!source?'请上传场景原图。':!references.length?'请上传至少一张产品参考图。':sourceFailed?'请先重新加载场景图片，再涂抹确认。':'请先在场景原图上涂抹要替换的商品。'}</p>}
       </section>
     </aside><section className="rp-card rp-preview">
       <div className="rp-preview-head"><div className="rp-tabs" role="tablist" aria-label="预览模式">{([['original','场景原图'],['raw','生成结果'],['compare','滑动对比']] as const).map(([key,label])=><button role="tab" aria-selected={mode===key} key={key} disabled={key!=='original'&&!candidate} className={mode===key?'rp-tab-active':''} onClick={()=>{setMode(key);setZoom(100);}}>{label}</button>)}</div>
         <div className="rp-actions"><button className="rp-button" aria-label="放大当前预览" disabled={!preview} onClick={()=>enlarge(mode==='compare'?candidate?.result.raw.url:preview,mode==='original'?'场景原图':'生成结果')}><Expand/>放大</button><button className="rp-button" disabled={!candidate} onClick={()=>candidate&&download(candidate.result.raw.url,'生成结果')}><Download/>下载图片</button></div></div>
-      <div className="rp-brush-toolbar" aria-label="涂抹工具">{mode==='original'?<><div className="rp-mask-tools">{([['paint','画笔'],['erase','橡皮擦'],['pan','拖动画面']] as const).map(([value,label])=><button className={'rp-button '+(tool===value?'rp-tool-active':'')} key={value} aria-pressed={tool===value} disabled={locked||painting||!validAnalysis} onClick={()=>setTool(value)}>{label}</button>)}<button className="rp-button" disabled={locked||painting||!strokes.length} onClick={()=>{setStrokes(s=>s.slice(0,-1));setCostConfirmed(false);}}>撤销一笔</button><button className="rp-button" disabled={locked||painting||!strokes.length} onClick={()=>{setStrokes([]);setCostConfirmed(false);}}>清空涂抹</button></div><label>画笔<input aria-label="画笔大小" type="range" min="0.005" max="0.2" step="0.005" value={brushSize} disabled={locked} onChange={e=>setBrushSize(Number(e.target.value))}/></label><label>缩放<input aria-label="画布缩放" type="range" min="100" max="400" step="25" value={zoom} onChange={e=>setZoom(Number(e.target.value))}/>{zoom}%</label></>:<span>{mode==='compare'?'拖动分割线，对比场景原图与生成结果。':'点击图片放大查看；滚轮缩放，按住拖动。'}</span>}</div>
+      <div className="rp-brush-toolbar" aria-label="涂抹工具">{mode==='original'?<><div className="rp-mask-tools">{([['paint','画笔'],['erase','橡皮擦'],['pan','拖动画面']] as const).map(([value,label])=><button className={'rp-button '+(tool===value?'rp-tool-active':'')} key={value} aria-pressed={tool===value} disabled={locked||painting||!source} onClick={()=>setTool(value)}>{label}</button>)}<button className="rp-button" disabled={locked||painting||!strokes.length} onClick={()=>{setStrokes(s=>s.slice(0,-1));}}>撤销一笔</button><button className="rp-button" disabled={locked||painting||!strokes.length} onClick={()=>{setStrokes([]);}}>清空涂抹</button></div><label>画笔<input aria-label="画笔大小" type="range" min="0.005" max="0.2" step="0.005" value={brushSize} disabled={locked} onChange={e=>setBrushSize(Number(e.target.value))}/></label><label>缩放<input aria-label="画布缩放" type="range" min="100" max="400" step="25" value={zoom} onChange={e=>setZoom(Number(e.target.value))}/>{zoom}%</label></>:<span>{mode==='compare'?'拖动分割线，对比场景原图与生成结果。':'点击图片放大查看；滚轮缩放，按住拖动。'}</span>}</div>
       <div className="rp-canvas-wrap" ref={viewport}><div className="rp-canvas-center"><div className="rp-canvas" style={{width:source?canvasWidth*zoom/100:'100%',height:source?canvasWidth*zoom/100*source.height/source.width:350}}>
-        {preview?<img className="rp-canvas-image" {...imageProps(preview,'canvas')} alt={mode==='original'||mode==='compare'?'场景原图':'生成结果'} onClick={mode==='raw'?()=>enlarge(preview,'生成结果'):undefined}/>:<div className="rp-canvas-empty"><ImagePlus/><p>上传场景与新产品图片</p><small>识别产品 → 涂抹确认 → 开始替换</small></div>}
+        {preview?<img className="rp-canvas-image" {...imageProps(preview,'canvas')} alt={mode==='original'||mode==='compare'?'场景原图':'生成结果'} onClick={mode==='raw'?()=>enlarge(preview,'生成结果'):undefined}/>:<div className="rp-canvas-empty"><ImagePlus/><p>上传场景与新产品图片</p><small>上传图片 → 涂抹范围 → 开始替换</small></div>}
         {mode==='compare'&&candidate&&<><img className="rp-canvas-image" {...imageProps(candidate.result.raw.url,'canvas')} alt="生成结果对比" style={{clipPath:`inset(0 0 0 ${split}%)`}}/><div className="rp-compare-line" style={{left:split+'%'}}><span><ArrowLeftRight/></span></div><input className="rp-compare-range" type="range" value={split} onChange={e=>setSplit(Number(e.target.value))} aria-label="原图与生成结果滑动对比"/></>}
-        {source&&mode==='original'&&<svg className={'rp-region-svg '+(validAnalysis&&!locked?'rp-region-selecting':'')+' rp-tool-'+tool} viewBox={`0 0 ${source.width} ${source.height}`} preserveAspectRatio="xMidYMid meet" onPointerDown={beginBrush} onPointerMove={moveBrush} onPointerUp={endBrush} onPointerCancel={endBrush} onLostPointerCapture={()=>{paintRef.current=null;panRef.current=null;setPainting(false);}} onPointerLeave={()=>setCursor(null)} aria-label="涂抹替换范围画布">
+        {source&&mode==='original'&&<svg className={'rp-region-svg '+(source&&!locked?'rp-region-selecting':'')+' rp-tool-'+tool} viewBox={`0 0 ${source.width} ${source.height}`} preserveAspectRatio="xMidYMid meet" onPointerDown={beginBrush} onPointerMove={moveBrush} onPointerUp={endBrush} onPointerCancel={endBrush} onLostPointerCapture={()=>{paintRef.current=null;panRef.current=null;setPainting(false);}} onPointerLeave={()=>setCursor(null)} aria-label="涂抹替换范围画布">
           <defs><mask id={brushMaskId.current} maskUnits="userSpaceOnUse" x="0" y="0" width={source.width} height={source.height}><rect width={source.width} height={source.height} fill="black"/>{strokes.map((s,i)=>s.points.length===1?<circle key={i} cx={s.points[0].x*source.width} cy={s.points[0].y*source.height} r={s.size*Math.min(source.width,source.height)/2} fill={s.tool==='erase'?'black':'white'}/>:<polyline key={i} points={polygonPoints(s.points)} fill="none" stroke={s.tool==='erase'?'black':'white'} strokeWidth={s.size*Math.min(source.width,source.height)} strokeLinecap="round" strokeLinejoin="round"/>)}</mask></defs>
           <rect width={source.width} height={source.height} fill="#3074ff" opacity=".45" mask={`url(#${brushMaskId.current})`}/>
           {!strokes.length&&masks.filter(m=>selectedIds.includes(m.instanceId)).map(m=><polygon key={m.instanceId} points={polygonPoints(m.points)} fill="#3b75ef40"/>)}
           {!strokes.length&&protectMasks.map((p,i)=><polygon key={i} points={polygonPoints(p)} fill="#e85c5740"/>)}
-          {cursor&&tool!=='pan'&&validAnalysis&&!locked&&<circle cx={cursor.x*source.width} cy={cursor.y*source.height} r={brushSize*Math.min(source.width,source.height)/2} fill="none" stroke={tool==='erase'?'#e55353':'#fff'} strokeWidth="1.5" vectorEffect="non-scaling-stroke"/>}
+          {cursor&&tool!=='pan'&&source&&!locked&&<circle cx={cursor.x*source.width} cy={cursor.y*source.height} r={brushSize*Math.min(source.width,source.height)/2} fill="none" stroke={tool==='erase'?'#e55353':'#fff'} strokeWidth="1.5" vectorEffect="non-scaling-stroke"/>}
         </svg>}
         {mode==='compare'&&<><span className="rp-image-label">场景原图</span><span className="rp-image-label rp-label-right">生成结果</span></>}
       </div></div></div>

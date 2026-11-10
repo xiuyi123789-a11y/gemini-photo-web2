@@ -17,7 +17,7 @@ export async function prepareMasks(width,height,masks,protectMasks,{brush,subjec
     // In the direct-model flow the guide is the user's selection. Incorrect AI
     // boxes may neither clip it nor turn its painted pixels into protected pixels.
     let count=0;for(let i=0;i<edit.length;i++)if(edit[i]>128&&!protect[i])count++;
-    if(count<4)throw Object.assign(new Error('TARGET_SELECTION_REQUIRED'),{code:'TARGET_SELECTION_REQUIRED',status:422});
+    if(count<1)throw Object.assign(new Error('TARGET_SELECTION_REQUIRED'),{code:'TARGET_SELECTION_REQUIRED',status:422});
     instances.push({instanceId:'user-brush',pixels:Buffer.from(edit),count});
   }else if(brush){
     const match=matchBrushSubjects(brush,subjects,width,height);

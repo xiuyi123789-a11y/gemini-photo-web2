@@ -49,14 +49,14 @@ function polygon(p) {
   return points;
 }
 export function validateGenerationInput(body,{advancedOutputs=false}={}) {
-  only(body,['requestId','inputFingerprint','analysisJobId','analysisRevisionHash','selectedInstances','masks','protectMasks','brush','maskSpace','resolution','count','preserve','notes','confirmedPredictions','outputMode','selectionMode','selectionOverrideConfirmed']);
+  only(body,['requestId','inputFingerprint','analysisJobId','analysisRevisionHash','analysisSummary','selectedInstances','masks','protectMasks','brush','maskSpace','resolution','count','preserve','notes','confirmedPredictions','outputMode','selectionMode','selectionOverrideConfirmed']);
   if(body.outputMode!==undefined&&!['model','adaptive'].includes(body.outputMode))throw fail('INPUT_INVALID');
   if((body.selectionMode!==undefined&&body.selectionMode!=='user-brush')||(body.selectionOverrideConfirmed!==undefined&&typeof body.selectionOverrideConfirmed!=='boolean'))throw fail('INPUT_INVALID');
   const userBrush=body.selectionMode==='user-brush';
   if(userBrush&&(body.outputMode!=='model'||!body.brush))throw fail('TARGET_SELECTION_REQUIRED',422);
   if(!userBrush&&body.selectionOverrideConfirmed!==undefined)throw fail('INPUT_INVALID');
   if(!UUID.test(body.requestId||'')||!HASH.test(body.inputFingerprint||''))throw fail('INPUT_INVALID');
-  if(!UUID.test(body.analysisJobId||'')||!HASH.test(body.analysisRevisionHash||''))throw fail('ANALYSIS_REQUIRED',409);
+  if(!UUID.test(body.analysisJobId||'')||!userBrush&&!HASH.test(body.analysisRevisionHash||''))throw fail('ANALYSIS_REQUIRED',409);
   const selected=body.selectedInstances;
   if(!Array.isArray(selected)||(userBrush?selected.length!==0:!selected.length)||selected.length>12||new Set(selected).size!==selected.length||!selected.every(s=>typeof s==='string'&&/^[a-zA-Z0-9_-]{1,80}$/.test(s)))throw fail('TARGET_SELECTION_REQUIRED',422);
   if(body.brush!==undefined&&!validBrush(body.brush))throw fail('TARGET_SELECTION_REQUIRED',422);
@@ -69,10 +69,11 @@ export function validateGenerationInput(body,{advancedOutputs=false}={}) {
   const s=body.maskSpace;
   if(!s||!Number.isInteger(s.width)||!Number.isInteger(s.height)||!HASH.test(s.sourceHash||''))throw fail('TARGET_SELECTION_REQUIRED',422);
   const count=body.count??1,resolution=body.resolution??'2K';
-  if(![1,2,4].includes(count)||!['1K','2K','4K'].includes(resolution)||(!advancedOutputs&&(count!==1||resolution==='4K')))throw fail('OUTPUT_OPTION_DISABLED',422);
-  if(body.confirmedPredictions!==count)throw fail('COST_CONFIRMATION_REQUIRED',422);
+  if(![1,2,4].includes(count)||!['1K','2K','4K'].includes(resolution)||(!userBrush&&!advancedOutputs&&(count!==1||resolution==='4K')))throw fail('OUTPUT_OPTION_DISABLED',422);
+  if(!userBrush&&body.confirmedPredictions!==count)throw fail('COST_CONFIRMATION_REQUIRED',422);
   if(!Array.isArray(body.preserve)||body.preserve.length>4||body.preserve.some(p=>!['background','composition','lighting','perspective'].includes(p)))throw fail('INPUT_INVALID');
   return {...body,...(brush?{brush}:{}),selectedInstances:[...selected],masks,protectMasks,maskSpace:{width:s.width,height:s.height,sourceHash:s.sourceHash},count,resolution,
-    preserve:[...new Set(body.preserve)],notes:text(body.notes??'',4000)};
+    preserve:[...new Set(body.preserve)],notes:userBrush?text(body.notes??'',100000).slice(0,4000):text(body.notes??'',4000),
+    ...(userBrush?{analysisSummary:typeof body.analysisSummary==='string'?body.analysisSummary.trim().slice(0,16000):undefined,confirmedPredictions:count}:{})};
 }
 export const payloadHash=input=>sha256(canonicalJson(Object.fromEntries(Object.entries(input).filter(([k])=>!['requestId','sourceImage','references'].includes(k)))));

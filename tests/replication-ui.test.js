@@ -34,6 +34,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
     assert.equal(typeof url,'string');assert(url.startsWith('/api/replication/')||url==='/fake-raw.png','Non-local fetch blocked');
     new Headers(options.headers); // Real browser Fetch header validation, before any request can reach a server.
     const method=options.method||'GET',body=options.body?JSON.parse(options.body):null;calls.push({method,url,requestId:body?.requestId,body});
+    if(url.startsWith('/api/replication/assets/'))return new Response(new Uint8Array([1,2,3]),{headers:{'Content-Type':'image/png'}});
     if(url==='/fake-raw.png')return new Response(new Uint8Array([1,2,3]),{headers:{'Content-Type':'image/png'}});
     if(url.endsWith('/capabilities'))return response(200,{enabled:!mode.startsWith('retry-'),maxReferences:6,counts:[1],resolutions:['1K','2K'],...(mode==='no-segmenter'?{adaptiveComposition:{configured:false}}:{}),...(mode==='generation-only'?{submission:{analysis:false,generation:true}}:{})});
     if(url.endsWith('/workbench')){if(serverSnapshot?.workbenchGate)await serverSnapshot.workbenchGate;return response(200,{jobs:serverSnapshot?.workbenchJobs||[],requests:receipt&&['reserved','preparing'].includes(receipt.state)?[receipt]:[]});}
@@ -51,6 +52,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
       if(mode==='offline')throw new TypeError('MOCK disconnected');
       return receipt?response(200,receipt):response(404,{errorCode:'JOB_NOT_FOUND'});
     }
+    if(method==='POST'&&url.endsWith('/materials')){currentJob={...makeJob(body,'succeeded'),origin:'local_materials'};return response(202,currentJob);}
     if(method==='POST'&&url.endsWith('/analysis')){
       if(mode==='preparation-failure'){
         receipt={...receipt,state:'closed',revision:receipt.revision+1};
@@ -97,7 +99,7 @@ function harness(mode,storage=new Map(),serverSnapshot=null){
   class FakePoint{constructor(x,y){this.x=x;this.y=y;}matrixTransform(){return this;}}
   const context=vm.createContext({crypto:webcrypto,TextEncoder,Uint8Array,ArrayBuffer,URL,File,Blob,DOMPoint:FakePoint,
     fetch:fakeFetch,AbortSignal:{timeout:ms=>{timeouts.push(ms);return AbortSignal.timeout(['timeout-before-accept','cannot-seal'].includes(mode)?15:ms);}},
-    window:{setTimeout:(fn)=>realSetTimeout(fn,1),confirm:()=>true},document:{body:{appendChild(a){a.attached=true;},removeChild(a){a.attached=false;}},createElement:()=>({href:'',download:'',style:{},click(){assert(this.attached,'download must be attached during the original click');downloads.push({href:this.href,download:this.download});}})},setTimeout:realSetTimeout,Image:FakeImage,console});
+    window:{setTimeout:(fn)=>realSetTimeout(fn,1),confirm:()=>true},document:{body:{appendChild(a){a.attached=true;},removeChild(a){a.attached=false;}},createElement:()=>({href:'',download:'',style:{},click(){assert(this.attached,'download must be attached during the original click');downloads.push({href:this.href,download:this.download});}})},setTimeout:realSetTimeout,Image:FakeImage,clearTimeout,console});
   function compile(relative){
     if(moduleCache.has(relative))return moduleCache.get(relative);
     const source=fs.readFileSync(path.join(root,relative),'utf8');
@@ -171,19 +173,19 @@ test('server-closed preparation failure keeps its real error and selected files;
   assert.notEqual(posts[1].requestId,first.requestId);assert.equal(posts[1].body.sourceImage,first.body.sourceImage);
   assert.deepEqual(posts[1].body.references,first.body.references);assert.equal(h.counts().remoteCreates,0);
 });
-test('404 alone keeps fee protection, but refresh always exposes reconnect and safe-end; a seal acknowledgment releases it',async()=>{
+test('an unresolved acknowledgment stays queryable without blocking new explicit requests',async()=>{
   const h=harness('cannot-seal');await h.upload();await h.click('识别产品与替换位置');
-  assert(h.storage.has('replication_v2_analysis'));assert(h.button('分析提交待核对').props.disabled);
+  assert(h.storage.has('replication_v2_analysis'));assert(!h.button('识别产品与替换位置').props.disabled);
   assert(!h.button('检查连接'));assert(!h.button('重新连接查询').props.disabled);assert(!h.label().includes('正在提交分析素材'));
   const refreshed=harness('legacy-orphan',h.storage);await refreshed.mountEffects();
-  assert(refreshed.button('重新连接查询'));assert(refreshed.button('安全结束本次提交'));assert(refreshed.button('分析提交待核对').props.disabled);
+  assert(refreshed.button('重新连接查询'));assert(refreshed.button('安全结束本次提交'));assert(refreshed.button('识别产品与替换位置').props.disabled);
   await refreshed.click('重新连接查询');assert(refreshed.storage.has('replication_v2_analysis'));
-  await refreshed.click('安全结束本次提交');assert(!refreshed.storage.has('replication_v2_analysis'));assert(!refreshed.button('识别产品与替换位置').props.disabled);
+  await refreshed.click('安全结束本次提交');assert(!refreshed.storage.has('replication_v2_analysis'));await refreshed.upload();assert(!refreshed.button('识别产品与替换位置').props.disabled);
   assert.equal(refreshed.calls.filter(c=>c.method==='POST'&&c.url.endsWith('/analysis')).length,0);
 });
-test('unknown provider submission is labeled pending reconciliation, keeps fee protection and never creates again',async()=>{
+test('unknown provider submission shows a billing reminder and never automatically creates again',async()=>{
   const h=harness('unknown');await h.upload();await h.click('识别产品与替换位置');
-  assert(h.label().includes('提交待核对'));assert(h.button('分析任务待核对').props.disabled);await h.click('重新连接查询');await h.click('安全结束本次提交');
+  assert(h.label().includes('提交待核对'));assert(!h.button('识别产品与替换位置').props.disabled);await h.click('重新连接查询');await h.click('安全结束本次提交');
   assert(h.storage.has('replication_v2_analysis'));assert.equal(h.counts().remoteCreates,1);assert.equal(h.calls.filter(c=>c.method==='POST'&&c.url.endsWith('/analysis')).length,1);
 });
 test('lost POST acknowledgment recovers the durable completed job with GET and fills text',async()=>{
@@ -191,9 +193,9 @@ test('lost POST acknowledgment recovers the durable completed job with GET and f
   assert(!h.button('识别产品与替换位置').props.disabled);assert(h.label().includes('识别完成'));
   assert.equal(h.counts().remoteCreates,1);assert.equal(h.calls.filter(c=>c.method==='POST'&&c.url.endsWith('/analysis')).length,1);
 });
-test('truncated analysis unlocks the page, exposes incomplete raw text for audit, and cannot enable generation after refresh',async()=>{
+test('legacy failed analysis exposes raw evidence and remains usable for direct generation after painting',async()=>{
   const h=harness('truncated-analysis');await h.upload();await h.click('识别产品与替换位置');
-  assert(h.label().includes('分析返回不完整'));assert(h.label().includes('查看未完成的分析返回（未启动生图）'));
+  assert(h.label().includes('辅助分析不完整'));assert(h.label().includes('查看未完成的分析返回（未启动生图）'));
   assert(h.label().includes('schema_version'));assert(!h.button('识别产品与替换位置').props.disabled);assert(h.button('开始替换').props.disabled);
   assert.equal(h.counts().remoteCreates,1);assert(!h.calls.some(c=>c.url.endsWith('/generation')));
   const refreshed=harness('normal',h.storage,h.snapshot());await refreshed.mountEffects();
@@ -218,7 +220,7 @@ test('invalid token header is rejected before reserving or saving an operation; 
 });
 test('complete network loss ends the UI spinner while preserving a visible, queryable fee guard',async()=>{
   const h=harness('offline');await h.upload();await h.click('识别产品与替换位置');
-  assert(h.storage.has('replication_v2_analysis'));assert(h.button('分析提交待核对').props.disabled);
+  assert(h.storage.has('replication_v2_analysis'));assert(!h.button('识别产品与替换位置').props.disabled);
   assert(!h.label().includes('正在提交分析素材'));assert(h.button('重新连接查询'));assert(h.button('安全结束本次提交'));
   assert.equal(h.counts().remoteCreates,0);
 });
@@ -226,7 +228,7 @@ test('lost local marker can discover the durable server intake after refresh and
   const h=harness('cannot-seal');await h.upload();await h.click('识别产品与替换位置');
   const refreshed=harness('normal',new Map(),h.snapshot());await refreshed.mountEffects();
   assert(refreshed.storage.has('replication_v2_analysis'));assert(refreshed.button('安全结束本次提交'));
-  await refreshed.click('安全结束本次提交');assert(!refreshed.button('识别产品与替换位置').props.disabled);
+  await refreshed.click('安全结束本次提交');await refreshed.upload();assert(!refreshed.button('识别产品与替换位置').props.disabled);
   assert.equal(refreshed.counts().remoteCreates,0);assert(!refreshed.calls.some(c=>c.url.endsWith('/analysis')));
 });
 
@@ -235,40 +237,40 @@ test('simplified workflow needs no target text, instance checkbox or separate an
   assert(h.label().includes('识别到：鞋'));assert(!h.label().includes('替换对象（'));assert(!h.button('确认分析内容'));assert(!h.button('绘制编辑范围'));
   assert(h.button('开始替换').props.disabled);await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);
   assert(h.label().includes('已涂抹选择产品'));assert.equal(h.counts().remoteCreates,1);
-  assert(!h.calls.some(c=>c.url.endsWith('/generation')));assert(h.button('开始替换').props.disabled);
-  h.change('确认本次替换费用',true);await h.click('开始替换');
+  assert(!h.calls.some(c=>c.url.endsWith('/generation')));assert(!h.button('开始替换').props.disabled);
+  await h.click('开始替换');
   const gen=h.calls.filter(c=>c.url.endsWith('/generation'));assert.equal(gen.length,1);assert.deepEqual(gen[0].body.selectedInstances,[]);assert.equal(gen[0].body.selectionMode,'user-brush');
   assert.equal(gen[0].body.brush.strokes.length,1);assert.equal(gen[0].body.masks.length,0);
-  assert.equal(h.calls.filter(c=>c.url.endsWith('/revision')).length,1);assert.equal(h.counts().remoteCreates,2);
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/revision')).length,0);assert.equal(h.counts().remoteCreates,2);
 });
 
-test('paint/erase/undo/clear automatically recheck one or two subjects and invalidate the previous fee confirmation',async()=>{
+test('paint/erase/undo/clear recompute nonempty selection without another confirmation',async()=>{
   const h=harness('normal');await h.upload();await h.click('识别产品与替换位置');
   await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);await h.paint([{x:.7,y:.4},{x:.8,y:.5}]);assert(h.label().includes('已涂抹选择产品'));
-  h.change('确认本次替换费用',true);await h.click('橡皮擦');h.change('画笔大小',.2);await h.paint([{x:.7,y:.4},{x:.8,y:.5}]);
-  assert(h.label().includes('已涂抹选择产品'));assert(h.button('开始替换').props.disabled);
+  await h.click('橡皮擦');h.change('画笔大小',.2);await h.paint([{x:.7,y:.4},{x:.8,y:.5}]);
+  assert(h.label().includes('已涂抹选择产品'));assert(!h.button('开始替换').props.disabled);
   await h.click('撤销一笔');assert(h.label().includes('已涂抹选择产品'));await h.click('清空涂抹');assert(!h.label().includes('已涂抹选择产品'));
   assert(h.button('开始替换').props.disabled);assert.equal(h.counts().remoteCreates,1);
 });
 
-test('painting outside AI boxes needs only fee consent; zoom keeps normalized coordinates',async()=>{
+test('painting outside AI boxes needs no additional consent; zoom keeps normalized coordinates',async()=>{
   const h=harness('normal');await h.upload();await h.click('识别产品与替换位置');h.change('画布缩放',300);
-  await h.paint([{x:.5,y:.02},{x:.9,y:.02}]);assert(h.button('开始替换').props.disabled);assert(!h.label().includes('AI定位与涂抹有差异'));
-  await h.click('清空涂抹');await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);h.change('确认本次替换费用',true);await h.click('开始替换');
+  await h.paint([{x:.5,y:.02},{x:.9,y:.02}]);assert(!h.button('开始替换').props.disabled);assert(!h.label().includes('AI定位与涂抹有差异'));
+  await h.click('清空涂抹');await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);await h.click('开始替换');
   const body=h.calls.find(c=>c.url.endsWith('/generation')).body;assert(Math.abs(body.brush.strokes[0].points[0].x-.2)<1e-6);assert(Math.abs(body.brush.strokes[0].points[0].y-.4)<1e-6);
 });
 
-test('restored images and analysis permit an explicit new generation under a generation-only grant, with a fresh fee confirmation',async()=>{
+test('restored images and analysis permit an explicit new generation under a generation-only grant, without a fee checkbox',async()=>{
   const original=harness('normal');await original.upload();await original.click('识别产品与替换位置');
   const analysis=structuredClone(original.snapshot().currentJob);analysis.analysis.confirmedAt=Date.now();analysis.analysis.revisionHash='confirmed-h';
-  await original.paint([{x:.2,y:.4},{x:.3,y:.5}]);original.change('确认本次替换费用',true);await original.click('开始替换');
+  await original.paint([{x:.2,y:.4},{x:.3,y:.5}]);await original.click('开始替换');
   const generation={...original.snapshot().currentJob,results:[{raw:{url:'/fake-raw.png'},composite:null,quality:{status:'failed',reasons:['CONTOUR_UNCERTAIN']}}]};
   const h=harness('generation-only',new Map(original.storage),{currentJob:generation,jobs:{[analysis.id]:analysis,[generation.id]:generation}});
-  await h.mountEffects();assert(h.button('识别产品与替换位置').props.disabled);
-  assert(h.label().includes('勾选费用确认后即可生成'));
-  assert(h.button('重新生成一张').props.disabled);assert.equal(h.counts().remoteCreates,0);
+  await h.mountEffects();assert(!h.button('识别产品与替换位置').props.disabled);
+  assert(h.label().includes('按供应商实际规则计费'));
+  assert(!h.button('重新生成一张').props.disabled);assert.equal(h.counts().remoteCreates,0);
   assert(!h.calls.some(c=>c.method==='POST'),'restoring the screen must be read-only');
-  h.change('确认本次替换费用',true);assert(!h.button('重新生成一张').props.disabled);
+  assert(!h.button('重新生成一张').props.disabled);
   await h.click('重新生成一张');
   assert.equal(h.calls.filter(c=>c.method==='POST'&&c.url.endsWith('/generation')).length,1);
   assert(!h.calls.some(c=>c.url.endsWith('/analysis')));assert.equal(h.counts().remoteCreates,1);
@@ -321,7 +323,7 @@ test('refresh paints cached completed images before slow HTTP, but restores no g
   const f=await cachedWorkbench();let release;const gate=new Promise(r=>{release=r;});
   const h=harness('normal',f.storage,{...f,workbenchJobs:[f.generation,f.analysis],workbenchGate:gate});
   assert.equal(h.calls.length,0);assert(h.nodes().some(n=>n.type==='img'&&n.props.alt==='生成结果'&&n.props.src.includes('raw-1.png')));
-  assert(h.button('开始替换').props.disabled);assert(h.nodes().find(n=>n.props['aria-label']==='确认本次替换费用').props.disabled);
+  assert(h.button('开始替换').props.disabled);assert(!h.nodes().some(n=>n.props['aria-label']==='确认本次替换费用'));
   await h.mountEffects();assert(h.label().includes('正在同步任务'));assert(h.button('开始替换').props.disabled);
   const before=h.calls.length;await h.click('下载图片');assert.equal(h.downloads.length,1);assert.equal(h.calls.length,before);assert(h.downloads[0].href.includes('download=1'));
   release();await h.waitFor(()=>h.label().includes('已发起下载'));
@@ -344,7 +346,7 @@ test('presentation cache rejects wrong account, expired, corrupted or external i
 });
 test('direct model output has no dependency on a configured local segmenter and generation double clicks submit once',async()=>{
   const h=harness('no-segmenter');await h.mountEffects();await h.upload();await h.click('识别产品与替换位置');
-  await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);h.change('确认本次替换费用',true);
+  await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);
   const onClick=h.button('开始替换').props.onClick;await Promise.all([onClick(),onClick()]);h.render();
   const calls=h.calls.filter(c=>c.url.endsWith('/generation'));assert.equal(calls.length,1);assert.equal(calls[0].body.outputMode,'model');
 });
@@ -353,15 +355,15 @@ test('after a completed round, new uploads allow a new analysis and explicit gen
   for(let round=0;round<2;round++){
     if(round)await h.click('清空');await h.upload();assert(!h.button('识别产品与替换位置').props.disabled);
     await h.click('识别产品与替换位置');await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);
-    assert(h.button('开始替换').props.disabled);h.change('确认本次替换费用',true);await h.click('开始替换');
+    assert(!h.button('开始替换').props.disabled);await h.click('开始替换');
   }
   const analyses=h.calls.filter(c=>c.method==='POST'&&c.url.endsWith('/analysis')),images=h.calls.filter(c=>c.method==='POST'&&c.url.endsWith('/generation'));
   assert.equal(analyses.length,2);assert.equal(images.length,2);assert.equal(h.counts().remoteCreates,4);
   assert.notEqual(analyses[0].requestId,analyses[1].requestId);assert.notEqual(images[0].requestId,images[1].requestId);
 });
-test('closed analysis capabilities explain the disabled button rather than telling the user to upload again',async()=>{
-  const h=harness('retry-normal');await h.mountEffects();await h.upload();assert(h.button('识别产品与替换位置').props.disabled);
-  assert(h.label().includes('产品分析入口暂未开放'));assert(!h.calls.some(c=>c.method==='POST'));
+test('closed service capabilities display an explanation without discarding uploads',async()=>{
+  const h=harness('retry-normal');await h.mountEffects();await h.upload();assert(!h.button('识别产品与替换位置').props.disabled);
+  assert(h.label().includes('生图服务暂未开放'));assert(!h.calls.some(c=>c.method==='POST'));
 });
 test('a reloaded unsubmitted draft restores usable files and all four references; analysis runs only after an explicit click',async()=>{
   const image={file:new File([new Uint8Array([1,2,3])],'scene.png',{type:'image/png'}),width:96,height:64};
@@ -380,17 +382,17 @@ test('local-only resume and cancel ignore an invalid stored model token',async()
 async function completedWorkbench(){
   const original=harness('normal');await original.upload();await original.click('识别产品与替换位置');
   const analysis=structuredClone(original.snapshot().currentJob);analysis.analysis.confirmedAt=1;analysis.createdAt=100;
-  await original.paint([{x:.2,y:.4},{x:.3,y:.5}]);original.change('确认本次替换费用',true);await original.click('开始替换');
+  await original.paint([{x:.2,y:.4},{x:.3,y:.5}]);await original.click('开始替换');
   const generation={...original.snapshot().currentJob,createdAt:200,results:[{raw:{url:'/fake-raw.png'},composite:null,quality:{status:'needs_review'}}]};
   return {analysis,generation,storage:new Map(original.storage),jobs:{[analysis.id]:analysis,[generation.id]:generation}};
 }
 
-test('fee checkbox remains usable and user brush is accepted outside AI boxes',async()=>{
+test('cost is an informational notice and user brush is accepted outside AI boxes',async()=>{
   const h=harness('normal');await h.upload();await h.click('识别产品与替换位置');
-  h.change('确认本次替换费用',true);assert(h.button('开始替换').props.disabled);
-  await h.paint([{x:.5,y:.02},{x:.9,y:.02}]);h.change('确认本次替换费用',true);
+  assert(h.button('开始替换').props.disabled);
+  await h.paint([{x:.5,y:.02},{x:.9,y:.02}]);
   assert(!h.button('开始替换').props.disabled);assert(!h.label().includes('AI定位与涂抹有差异'));assert.equal(h.counts().remoteCreates,1);
-  await h.click('清空涂抹');await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);h.change('确认本次替换费用',true);
+  await h.click('清空涂抹');await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);
   assert(!h.button('开始替换').props.disabled);assert(!h.calls.some(c=>c.url.endsWith('/generation')));
 });
 
@@ -400,7 +402,7 @@ test('refresh with lost local markers restores the completed model result from o
   assert(!h.button('下载图片').props.disabled);assert(h.label().includes('图片已生成'));
   assert.equal(h.calls.filter(c=>c.url.endsWith('/workbench')).length,1);
   assert.equal(h.calls.filter(c=>c.url.includes('/jobs/')||c.method==='POST').length,0);
-  assert(!h.nodes().find(n=>n.type==='input'&&n.props['aria-label']==='确认本次替换费用').props.checked);
+  assert(!h.nodes().some(n=>n.props['aria-label']==='确认本次替换费用'));
 });
 
 test('server-confirmed request repairs stale local job metadata and restores its saved image without a model POST',async()=>{
@@ -446,13 +448,13 @@ test('an old close acknowledgment cannot clear the marker protecting a newer int
   assert.equal(h.counts().remoteCreates,0);
 });
 
-test('an unresolved older marker cannot hide the saved latest image or release its fee guard',async()=>{
+test('an unresolved older marker cannot hide the saved latest image or block a new explicit generation',async()=>{
   const f=await completedWorkbench(),unknown={kind:'generation',ownerId:f.generation.ownerId,requestId:randomUUID(),jobId:randomUUID(),inputFingerprint:'unknown-intent'};
   f.storage.set('replication_v2_generation',JSON.stringify(unknown));
   const h=harness('normal',f.storage,{...f,workbenchJobs:[f.analysis,f.generation]});await h.mountEffects();
   assert.equal(h.nodes().find(n=>n.type==='img'&&n.props.alt==='生成结果')?.props.src,'/fake-raw.png');
-  assert(!h.button('下载图片').props.disabled);assert.deepEqual(JSON.parse(h.storage.get('replication_v2_generation')),unknown);
-  assert(h.nodes().find(n=>n.props['aria-label']==='确认本次替换费用').props.disabled);
+  assert(!h.button('下载图片').props.disabled);assert.equal(JSON.parse(h.storage.get('replication_v2_generation')).jobId,f.generation.id);assert(!h.button('重新生成一张').props.disabled);
+  assert(!h.nodes().some(n=>n.props['aria-label']==='确认本次替换费用'));
   assert(!h.calls.some(c=>c.method==='POST'));assert.equal(h.counts().remoteCreates,0);
 });
 
@@ -504,7 +506,7 @@ test('a stale analysis marker cannot replace the newer generation materials or b
   const h=harness('normal',f.storage,{...f,jobs:{...f.jobs,[old.id]:old},workbenchJobs:[f.analysis,f.generation]});await h.mountEffects();
   assert.equal(JSON.parse(h.storage.get('replication_v2_analysis')).jobId,f.analysis.id);
   assert.equal(h.nodes().find(n=>n.type==='img'&&n.props.alt==='生成结果').props.src,'/fake-raw.png');
-  h.change('确认本次替换费用',true);assert(!h.button('重新生成一张').props.disabled);
+  assert(!h.button('重新生成一张').props.disabled);
   assert(!h.calls.some(c=>c.method==='POST'));assert.equal(h.counts().remoteCreates,0);
 });
 
@@ -553,29 +555,69 @@ test('legacy missing output exposes an explicit read/download recovery action, r
 test('user brush overrides AI mismatch without an extra checkbox and double click submits once',async()=>{
   const h=harness('normal');await h.upload();await h.click('识别产品与替换位置');await h.paint([{x:.5,y:.04},{x:.9,y:.04}]);
   assert(!h.label().includes('AI定位与涂抹有差异'));assert(!h.nodes().some(n=>n.props['aria-label']==='确认以当前涂抹为准'));
-  h.change('确认本次替换费用',true);assert(!h.button('开始替换').props.disabled);
+  assert(!h.button('开始替换').props.disabled);
   const click=h.button('开始替换').props.onClick;await Promise.all([click(),click()]);h.render();
   const posts=h.calls.filter(c=>c.url.endsWith('/generation'));assert.equal(posts.length,1);
   assert.equal(posts[0].body.selectionMode,'user-brush');assert.equal(posts[0].body.selectionOverrideConfirmed,undefined);
   assert.equal(posts[0].body.outputMode,'model');assert.deepEqual(posts[0].body.selectedInstances,[]);assert.equal(posts[0].body.brush.strokes.length,1);
 });
 
-test('editing user paint requires fresh fee consent; empty or erased brushes cannot generate',async()=>{
+test('editing user paint remains ready; empty or erased brushes cannot generate',async()=>{
   const h=harness('normal');await h.upload();await h.click('识别产品与替换位置');await h.paint([{x:.6,y:.02},{x:.8,y:.02}]);
-  h.change('确认本次替换费用',true);assert(!h.button('开始替换').props.disabled);
-  await h.paint([{x:.55,y:.03},{x:.9,y:.03}]);assert(h.button('开始替换').props.disabled);
-  assert.equal(h.nodes().find(n=>n.props['aria-label']==='确认本次替换费用').props.checked,false);
-  h.change('确认本次替换费用',true);await h.click('撤销一笔');assert(h.button('开始替换').props.disabled);
+  assert(!h.button('开始替换').props.disabled);
+  await h.paint([{x:.55,y:.03},{x:.9,y:.03}]);assert(!h.button('开始替换').props.disabled);
+  assert(!h.nodes().some(n=>n.props['aria-label']==='确认本次替换费用'));
+  await h.click('撤销一笔');assert(!h.button('开始替换').props.disabled);
   await h.click('清空涂抹');assert(h.button('开始替换').props.disabled);assert(!h.calls.some(c=>c.url.endsWith('/generation')));
 });
 
-test('an analysis without AI instances still permits user painting and explicitly confirmed generation, with refresh requiring fresh confirmations',async()=>{
+test('an analysis without AI instances still permits user painting and explicitly confirmed generation, without refresh creating another task',async()=>{
   const h=harness('no-targets');await h.upload();await h.click('识别产品与替换位置');await h.paint([{x:.2,y:.4},{x:.6,y:.4}]);
-  h.change('确认本次替换费用',true);await h.click('开始替换');
+  await h.click('开始替换');
   const generation=h.snapshot().currentJob;
   const analysis={...structuredClone(generation),id:generation.analysisJobId,kind:'analysis',requestId:JSON.parse(h.storage.get('replication_v2_analysis')).requestId,
     status:'succeeded',createdAt:generation.createdAt-1,analysis:{data:{new_product:{category:'鞋'},scene:{old_product_instances:[]}},text:'new product',revisionHash:'confirmed-h',confirmedAt:1},results:[],input:null};
   const refreshed=harness('normal',h.storage,{currentJob:generation,jobs:{[analysis.id]:analysis,[generation.id]:generation},workbenchJobs:[analysis,generation]});await refreshed.mountEffects();
-  for(const name of ['确认本次替换费用'])assert.equal(refreshed.nodes().find(n=>n.props['aria-label']===name).props.checked,false);
-  assert(refreshed.button('开始替换').props.disabled);assert(!refreshed.calls.some(c=>c.method==='POST'));
+  assert(!refreshed.nodes().some(n=>n.props['aria-label']==='确认本次替换费用'));
+  assert(!refreshed.button('开始替换').props.disabled);assert(!refreshed.calls.some(c=>c.method==='POST'));
+});
+
+test('fresh uploads can paint and directly generate once with no analysis, revision, or fee checkbox',async()=>{
+  const h=harness('normal');await h.upload();assert(!h.button('画笔').props.disabled);await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);
+  assert(!h.nodes().some(n=>n.props['aria-label']==='确认本次替换费用'));assert(!h.button('开始替换').props.disabled);
+  const click=h.button('开始替换').props.onClick;await Promise.all([click(),click()]);h.render();
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/materials')).length,1);assert.equal(h.calls.filter(c=>c.url.endsWith('/generation')).length,1);
+  assert(!h.calls.some(c=>c.url.endsWith('/analysis')||c.url.endsWith('/revision')));assert.equal(h.counts().remoteCreates,1);
+});
+
+test('failed or unknown optional analysis permits explicit generation and never auto-retries the old prediction',async()=>{
+  for(const mode of ['truncated-analysis','unknown']){const h=harness(mode);await h.upload();await h.click('识别产品与替换位置');await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);await h.click('开始替换');
+    assert.equal(h.calls.filter(c=>c.url.endsWith('/analysis')).length,1);assert.equal(h.calls.filter(c=>c.url.endsWith('/generation')).length,1);assert.equal(h.counts().remoteCreates,2);}
+});
+
+test('changing a restored reference angle reuses authenticated saved assets and keeps user paint',async()=>{
+  const original=harness('normal');await original.upload();await original.click('识别产品与替换位置');const a=structuredClone(original.snapshot().currentJob);
+  a.source.url='/api/replication/assets/'+a.id+'/source.png';a.references[0].url='/api/replication/assets/'+a.id+'/ref-1.png';
+  const h=harness('normal',new Map(),{currentJob:a,workbenchJobs:[a]});await h.mountEffects();await h.paint([{x:.2,y:.4},{x:.3,y:.5}]);
+  h.nodes().find(n=>n.props['aria-label']==='参考1角度').props.onChange({target:{value:'side'}});h.render();assert(!h.button('开始替换').props.disabled);await h.click('开始替换');
+  assert.equal(h.calls.filter(c=>c.url.startsWith('/api/replication/assets/')).length,2);assert.equal(h.calls.filter(c=>c.url.endsWith('/generation')).length,1);assert(!h.label().includes('重新上传素材'));
+});
+
+test('refresh restores unsent edits and files without invoking any model',async()=>{
+  const image={file:new File(['image'],'scene.png',{type:'image/png'}),width:96,height:64};
+  const draft={version:1,source:image,references:[{...image,angle:'side'}],savedAt:Date.now(),edits:{strokes:[{tool:'paint',size:.1,points:[{x:.2,y:.4}]}],notes:'保留鞋带',resolution:'1K',count:1,analysisText:''}};
+  const h=harness('normal',new Map(),{draft});await h.mountEffects();assert(!h.button('开始替换').props.disabled);assert.equal(h.nodes().find(n=>n.props['aria-label']==='补充要求').props.value,'保留鞋带');assert(!h.calls.some(c=>c.method==='POST'));
+  await h.click('开始替换');assert.equal(h.calls.find(c=>c.url.endsWith('/generation')).body.notes,'保留鞋带');assert.equal(h.counts().remoteCreates,1);
+});
+
+test('owned unsent edits after analysis override the last submitted brush; corrupt or foreign edit caches are ignored',async()=>{
+  const f=await completedWorkbench(),seed=harness('normal',f.storage);
+  const edits={fingerprint:f.analysis.inputFingerprint,strokes:[{tool:'paint',size:.1,points:[{x:.8,y:.8}]}],notes:'只替换右侧',resolution:'1K',count:1,analysisText:'',savedAt:Date.now()+1};
+  seed.service.saveReplicationEdits(edits);
+  const h=harness('normal',f.storage,{...f,workbenchJobs:[f.analysis,f.generation]});await h.mountEffects();
+  assert.equal(h.nodes().find(n=>n.props['aria-label']==='补充要求').props.value,'只替换右侧');assert(!h.button('重新生成一张').props.disabled);await h.click('重新生成一张');
+  const body=h.calls.find(c=>c.url.endsWith('/generation')).body;assert.equal(body.brush.strokes[0].points[0].x,.8);assert.equal(body.resolution,'1K');assert.equal(body.analysisSummary,'');
+  for(const patch of [{ownerId:'another-user'},{strokes:[{tool:'paint',size:.1,points:[{x:NaN,y:0}]}]},{count:99}]){
+    f.storage.set('replication_edits_v1',JSON.stringify({...edits,ownerId:'owner-incident',...patch}));assert.equal(h.service.readReplicationEdits(edits.fingerprint),null);
+  }
 });
