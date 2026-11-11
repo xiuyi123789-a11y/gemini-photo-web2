@@ -7,3 +7,4 @@
 - .local、node_modules、dist、data、备份和真实环境凭据不提交 GitHub，不打入 Docker 镜像。
 - 使用 npm run export:source 生成源码包，不包含密钥和用户数据。
 - 删除本地目录不会删除腾讯云资源或停止云端计费；云端实例、数据库卷和备份需另行管理。
+- 每次准备提交并同步 GitHub 的项目更新，先执行项目技能 `.agents/skills/project-update/SKILL.md`：更新同一份项目介绍及版本历史，并在交付时提供与实际提交匹配的服务器更新指令。遵守用户不调用真实收费模型的约定。
